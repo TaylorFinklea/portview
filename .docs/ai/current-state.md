@@ -8,15 +8,19 @@
 
 ## Most Recent Progress (continued 2026-06-02 — "do all of it")
 
-Building the full remaining feature backlog sequentially. Done + committed since the hardware-verified POC:
-- **Clipboard sync (M2)** — `ClipboardUpdate` msg (type 13); host `ClipboardSync` polls NSPasteboard changeCount → push, applies remote without echo; client writes UIPasteboard inbound + "paste to Mac" toolbar button (iOS restricts silent reads, so push is user-initiated). Commit `0865234`. *(Also fixed a real bug: host input case list was missing `.keyEvent`, so backspace/return/arrows were never injected.)*
-- **Modifier keys / chords (⌘⇧⌥⌃)** — `KeyModifiers` OptionSet; `KeyEvent` generalized to carry modifiers + either a SpecialKey OR a single character (so ⌘C works). Host applies CGEventFlags + an ANSI/US keycode table for char chords. Client: sticky modifier bar (arm → next keystroke is a chord → auto-clears). Commit `624d821`.
-- **2-finger scroll vs pinch-zoom separation** — gesture intent-lock in `TrackpadVideoView.Coordinator`: first decisive signal (centroid translation vs finger-separation scale) wins; loser is a no-op until fingers lift; baselines rebased so a late commit doesn't jump. Commit `9b23eed`.
-- **Saved-Macs list** — `SavedHostsStore` (UserDefaults JSON); "Saved Macs" Form section (one-tap reconnect, swipe-delete); pairing persisted only once `session.status == .streaming` (never saves a bad pin). Commit `997972b`.
+Worked the full remaining backlog sequentially. **All 9 items done + committed** on top of the hardware-verified POC. **Tests: 69 / 24 suites green (1 QUIC test intentionally disabled). Host builds clean. iOS app BUILD SUCCEEDED.**
 
-**Tests: 60 / 20 suites green. Host builds clean. iOS app BUILD SUCCEEDED.** None of these 4 are hardware-verified yet (need a fresh host run + device rebuild).
+- **Clipboard sync (M2)** — `ClipboardUpdate` msg (13); host `ClipboardSync` polls NSPasteboard changeCount → push, applies remote without echo; client writes UIPasteboard inbound + "paste to Mac" button. Commit `0865234`. *(Also fixed a real bug: host input case list was missing `.keyEvent` → backspace/return/arrows were never injected.)*
+- **Modifier keys / chords (⌘⇧⌥⌃)** — `KeyModifiers` OptionSet; `KeyEvent` carries modifiers + either a SpecialKey OR a character (⌘C works). Host CGEventFlags + ANSI/US keycode table. Client sticky modifier bar (arm → next key is a chord → auto-clears). Commit `624d821`.
+- **2-finger scroll vs pinch-zoom** — per-gesture intent-lock in `TrackpadVideoView.Coordinator` (first decisive signal wins; loser no-ops until fingers lift; baselines rebased). Commit `9b23eed`.
+- **Saved-Macs list** — `SavedHostsStore` (UserDefaults JSON); "Saved Macs" section (one-tap reconnect, swipe-delete); persisted only on `.streaming` (never a bad pin). Commit `997972b`.
+- **Multi-monitor (M3)** — host advertises ALL displays in ServerHello, picks by StartSession.displayID; new `SwitchDisplay` msg (14) re-targets capture + rebinds InputInjector live; pumpVideo breaks on cancel. Client display-switcher Menu. Commit `23bc418`.
+- **File transfer (M5)** — iPhone→Mac push; `FileOffer`(15)+`FileChunk`(16); host `FileReceiver` writes ~/Downloads (de-dups names); client `.fileImporter` + 64 KB ordered chunks interleaved with video. Commit `614dd39`. *(Mac→iPhone = future.)*
+- **Metal renderer** — replaced AVSampleBufferDisplayLayer with explicit `VideoDecoder` (HEVC→BGRA) → `MetalVideoRenderer` (CVMetalTextureCache zero-copy → CAMetalLayer, runtime passthrough shader, aspect-fit). Commit `b2c14f2`.
+- **Audio (M4)** — SCStream `capturesAudio`; host converts to non-interleaved Float32 (AVAudioConverter), `AudioFrame`(17); client `AudioPlayer` (AVAudioEngine/PlayerNode). Commit `3dceb0e`. *(Plays as it arrives; tight A/V lip-sync = future.)*
+- **QUIC transport (M6) — GROUNDWORK ONLY, not a swap.** Additive `connectQUIC` + `PortviewListener(quicIdentity:)` via NWMultiplexGroup; cancellable `awaitReady`. Loopback bidi test `@Test(.disabled)` because it **reproduced the documented chicken-and-egg** (ready-before-open hangs; open-immediately returns nil/`streamUnavailable`). TLS-over-TCP remains the shipping default — zero regression. See decisions.md ADR. Commit `e441244`.
 
-**In progress:** M3 multi-monitor (pick/switch display). **Remaining:** file transfer, Metal renderer, audio, QUIC transport swap.
+**⚠️ Not yet hardware-verified (build-green only):** clipboard, modifiers, gestures, saved-Macs, multi-monitor, file transfer, **Metal render path** (replaced the proven AVSampleBufferDisplayLayer — check video still paints on device), and **audio** (needs device + Screen-Recording grant + real audio source). Re-run host (`swift run portview-host`, grant Screen Recording) + rebuild client on device to validate.
 
 ## Last Session Summary
 

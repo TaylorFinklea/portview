@@ -11,13 +11,14 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 ## Now / Next / Later
 
 ### Now
-- [x] M0 walking skeleton — protocol + transport + media + host exe + iOS client app, all compiling; core pipeline POC color-verified by tests. **Awaiting first run on real hardware** (Screen-Recording grant + iPhone) to confirm a live picture.
+- [ ] **On-device verification pass** — all of M0–M5 + Metal render + audio build green but only the original M0/M1 POC (screen + trackpad + keyboard + zoom) is hardware-verified. Re-run host + rebuild client on device and confirm: Metal video still paints, audio plays, multi-monitor switch, file push lands in ~/Downloads, clipboard both ways, modifier chords.
 
 ### Next
-- [ ] M1 — trackpad input (CGEvent) + on-screen keyboard + Bonjour discovery + QR pairing/pinned-cert + saved-Macs list.
+- [ ] Finish the QUIC multiplex swap (resolve the NWConnectionGroup chicken-and-egg — see decisions.md) and flip the default once the disabled loopback test passes; then split lanes (per-frame unidirectional video streams).
+- [ ] Mac→iPhone file transfer; tight A/V lip-sync.
 
 ### Later
-- [ ] M2 clipboard · M3 multi-monitor · M4 audio · M5 file transfer · M6 adaptive quality + reconnect/push-rewake + polish.
+- [ ] M6 polish: adaptive bitrate/fps, reconnect + APNs re-wake, settings, quality HUD. TCC onboarding UI. Device keypairs + revocable PairingStore.
 
 ## Milestones
 
@@ -44,10 +45,22 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 ### M2: Clipboard sync (text, both ways) — [x] DONE
 Text both ways: `ClipboardUpdate` msg, host `ClipboardSync` (NSPasteboard poll + apply), client UIPasteboard + "paste to Mac" button.
 
-### M3: Multi-monitor (pick/switch display)
-### M4: Audio (Core Audio process tap → encode → A/V-synced playback)
-### M5: File transfer (files lane)
-### M6: Polish (adaptive bitrate/fps, reconnect + APNs re-wake, settings, quality HUD)
+### M3: Multi-monitor (pick/switch display) — [x] DONE (build-green; device-verify pending)
+Host advertises all displays; `SwitchDisplay` msg re-targets capture + InputInjector live; client display-switcher Menu.
+
+### M4: Audio (Mac → iPhone) — [x] DONE (build-green; device-verify pending)
+SCStream `capturesAudio` → non-interleaved Float32 (AVAudioConverter) → `AudioFrame` → client AVAudioEngine. *(Plays as it arrives; tight lip-sync = future.)*
+
+### M5: File transfer (files lane) — [x] DONE (iPhone→Mac; Mac→iPhone future)
+`FileOffer`/`FileChunk`; host `FileReceiver` → ~/Downloads; client `.fileImporter` + chunked send interleaved with video.
+
+### Render: Metal — [x] DONE (build-green; device-verify pending)
+Explicit VideoToolbox decode (BGRA) → CAMetalLayer via CVMetalTextureCache. Replaced AVSampleBufferDisplayLayer.
+
+### M6: QUIC transport (NWMultiplexGroup) — [~] GROUNDWORK ONLY
+Additive `connectQUIC`/`PortviewListener(quicIdentity:)` + cancellable connect; loopback bidi test DISABLED (reproduces the NWConnectionGroup chicken-and-egg). TLS-over-TCP still ships. See decisions.md.
+
+### M6: Polish (adaptive bitrate/fps, reconnect + APNs re-wake, settings, quality HUD) — not started
 
 ## Backlog
 
