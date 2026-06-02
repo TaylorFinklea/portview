@@ -26,11 +26,14 @@ struct PortviewHostApp {
 
         do {
             let content = try await SCShareableContent.current
-            guard let display = content.displays.first else {
+            let displays = content.displays
+            guard !displays.isEmpty else {
                 print("No display available to capture.")
                 return
             }
-            print("Display \(display.displayID): \(display.width)x\(display.height)")
+            for display in displays {
+                print("Display \(display.displayID): \(display.width)x\(display.height)")
+            }
 
             let identity = try TLSIdentity.makeEphemeralSelfSigned(commonName: "Portview Host")
             let pinHex = try identity.certificateSHA256().map { String(format: "%02x", $0) }.joined()
@@ -64,7 +67,7 @@ struct PortviewHostApp {
             }
 
             for await connection in listener.connections {
-                await serve(connection, display: display)
+                await serve(connection, displays: displays)
             }
         } catch {
             print("Portview host error: \(error)")
@@ -97,21 +100,31 @@ struct PortviewHostApp {
 
     /// Run one client session. A single inbound loop handles the handshake and then
     /// input messages (injected as CGEvents); video streams concurrently from a child task.
-    static func serve(_ connection: PortviewConnection, display: SCDisplay) async {
-        let injector = InputInjector(displayBounds: CGDisplayBounds(display.displayID))
-        injector.onCursorMoved = { nx, ny in
-            Task { try? await connection.send(.cursorPosition(CursorPosition(normalizedX: nx, normalizedY: ny))) }
+    static func serve(_ connection: PortviewConnection, displays: [SCDisplay]) async {
+        guard let firstDisplay = displays.first else { return }
+        let displayInfos = displays.map {
+            DisplayInfo(id: UInt32($0.displayID), name: "Display \($0.displayID)",
+                        width: UInt32($0.width), height: UInt32($0.height), scaleX100: 100)
         }
+        var server = ServerHandshake(displays: displayInfos, supportedCodecs: [.hevc])
         let clipboard = ClipboardSync()
         clipboard.start { text in
             Task { try? await connection.send(.clipboardUpdate(ClipboardUpdate(text: text))) }
         }
-        var server = ServerHandshake(
-            displays: [DisplayInfo(id: UInt32(display.displayID), name: "Display",
-                                   width: UInt32(display.width), height: UInt32(display.height), scaleX100: 100)],
-            supportedCodecs: [.hevc]
-        )
+
+        // Injector and video pump are (re)bound to the active display; switching re-targets both.
+        var injector = makeInjector(for: firstDisplay, connection: connection)
         var videoTask: Task<Void, Never>?
+
+        func display(forID id: UInt32) -> SCDisplay {
+            displays.first { UInt32($0.displayID) == id } ?? firstDisplay
+        }
+        func startVideo(on display: SCDisplay) {
+            videoTask?.cancel()
+            injector = makeInjector(for: display, connection: connection)
+            videoTask = Task { await pumpVideo(connection, display: display) }
+            print("Streaming display \(display.displayID) (\(display.width)x\(display.height)).")
+        }
 
         for await message in connection.inbound {
             switch message {
@@ -125,8 +138,9 @@ struct PortviewHostApp {
                 }
             case .startSession(let start):
                 do { try server.handle(start) } catch { print("startSession error: \(error)"); return }
-                print("Client streaming; starting capture + input.")
-                videoTask = Task { await pumpVideo(connection, display: display) }
+                startVideo(on: display(forID: start.displayID))
+            case .switchDisplay(let switchMessage):
+                startVideo(on: display(forID: switchMessage.displayID))
             case .pointerMove, .pointerButton, .scroll, .typeText, .keyEvent:
                 injector.handle(message)
             case .clipboardUpdate(let update):
@@ -141,6 +155,15 @@ struct PortviewHostApp {
         }
         clipboard.stop()
         videoTask?.cancel()
+    }
+
+    /// Build an `InputInjector` whose cursor clamping + reporting are bound to `display`.
+    private static func makeInjector(for display: SCDisplay, connection: PortviewConnection) -> InputInjector {
+        let injector = InputInjector(displayBounds: CGDisplayBounds(display.displayID))
+        injector.onCursorMoved = { nx, ny in
+            Task { try? await connection.send(.cursorPosition(CursorPosition(normalizedX: nx, normalizedY: ny))) }
+        }
+        return injector
     }
 
     /// Capture → HEVC encode → serialize → send. The encoder is built to match the actual
@@ -162,6 +185,7 @@ struct PortviewHostApp {
         var needsKeyframe = true
 
         for await frame in capture.frames {
+            if Task.isCancelled { break }  // display switch / disconnect — stop this capture promptly
             let bufferWidth = CVPixelBufferGetWidth(frame.pixelBuffer)
             let bufferHeight = CVPixelBufferGetHeight(frame.pixelBuffer)
             if encoder == nil || bufferWidth != encoderWidth || bufferHeight != encoderHeight {

@@ -73,6 +73,21 @@ struct ContentView: View {
                                 Button { zoom = 1 } label: { Image(systemName: "minus.magnifyingglass") }
                                     .padding(8).background(.ultraThinMaterial, in: Circle())
                             }
+                            if session.displays.count > 1 {
+                                Menu {
+                                    ForEach(session.displays, id: \.id) { display in
+                                        Button {
+                                            session.switchDisplay(to: display.id)
+                                        } label: {
+                                            Label(display.name,
+                                                  systemImage: display.id == session.activeDisplayID ? "checkmark" : "display")
+                                        }
+                                    }
+                                } label: {
+                                    Image(systemName: "rectangle.on.rectangle")
+                                }
+                                .padding(8).background(.ultraThinMaterial, in: Circle())
+                            }
                             Button { session.pasteToHost() } label: { Image(systemName: "doc.on.clipboard") }
                                 .padding(8).background(.ultraThinMaterial, in: Circle())
                             Button { keyboardActive.toggle() } label: {

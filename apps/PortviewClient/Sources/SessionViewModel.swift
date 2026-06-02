@@ -17,6 +17,9 @@ final class SessionViewModel: ObservableObject {
     @Published var status: Status = .idle
     /// Latest cursor position reported by the host, normalized to the display (0…1).
     @Published var cursorNormalized = CGPoint(x: 0.5, y: 0.5)
+    /// Displays the host offered (from ServerHello) and which one is currently streaming.
+    @Published var displays: [DisplayInfo] = []
+    @Published var activeDisplayID: UInt32 = 0
     let renderer = VideoRenderer()
     private var task: Task<Void, Never>?
     private var connection: PortviewConnection?
@@ -59,6 +62,18 @@ final class SessionViewModel: ObservableObject {
         task?.cancel()
         task = nil
         status = .idle
+        displays = []
+        activeDisplayID = 0
+    }
+
+    /// Re-target the live stream to another of the host's displays (no reconnect).
+    func switchDisplay(to displayID: UInt32) {
+        guard displayID != activeDisplayID,
+              let display = displays.first(where: { $0.id == displayID }) else { return }
+        activeDisplayID = displayID
+        displaySize = CGSize(width: max(1, Double(display.width)), height: max(1, Double(display.height)))
+        cursorNormalized = CGPoint(x: 0.5, y: 0.5)
+        send(.switchDisplay(SwitchDisplay(displayID: displayID)))
     }
 
     // MARK: - Input (client → host)
@@ -123,6 +138,8 @@ final class SessionViewModel: ObservableObject {
                 switch message {
                 case .serverHello(let hello):
                     guard let display = hello.displays.first else { continue }
+                    displays = hello.displays
+                    activeDisplayID = display.id
                     displaySize = CGSize(width: max(1, Double(display.width)), height: max(1, Double(display.height)))
                     let start = try client.handle(
                         hello, displayID: display.id,
