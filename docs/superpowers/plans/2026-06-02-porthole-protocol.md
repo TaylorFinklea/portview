@@ -238,6 +238,8 @@ public struct BinaryWriter: Sendable {
 
 ```swift
 // Sources/PortholeProtocol/BinaryReader.swift
+import Foundation  // for String(bytes:encoding:)
+
 /// Reads values from a byte buffer in Porthole's wire format. Bounds-checked.
 public struct BinaryReader: Sendable {
     private let storage: [UInt8]

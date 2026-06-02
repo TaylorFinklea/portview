@@ -22,7 +22,7 @@ Full design: `docs/superpowers/specs/2026-06-02-porthole-design.md`.
 ## Milestones
 
 ### M0: Walking skeleton
-- [ ] `PortholeProtocol`: lane defs, message types, binary framing, handshake state machine, version negotiation (pure Swift, unit-tested)
+- [x] `PortholeProtocol`: lane defs, message types, binary framing, handshake state machine, version negotiation (pure Swift, unit-tested) — 31 tests green
 - [ ] `PortholeTransport`: QUIC listener/connection wrapper over Network.framework (NetworkConnection/NetworkListener), per-lane streams/datagrams
 - [ ] Host: SCStream capture (1 display) → VideoToolbox HEVC low-latency encode → video lane
 - [ ] Client: QUIC connect → VideoToolbox decode → CAMetalLayer render

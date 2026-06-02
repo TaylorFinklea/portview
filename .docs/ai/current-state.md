@@ -19,7 +19,9 @@
 ## Build Status
 
 - Toolchain: Swift 6.2, Xcode 26.0.1, macOS 26.3.1 (Apple Silicon). Confirmed.
-- No code yet. Nothing to build.
+- `PortholeProtocol` package: builds clean, `swift test` = 31/31 green (9 suites). Wire protocol complete — binary primitives, 6 M0 messages, self-delimiting framing, FrameDecoder stream reassembly, client/server handshake state machines, e2e handshake-over-frames.
+- Plan: `docs/superpowers/plans/2026-06-02-porthole-protocol.md` (executed).
+- Next: `PortholeTransport` (QUIC over Network.framework) — needs its own plan.
 
 ## Blockers
 
