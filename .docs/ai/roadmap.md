@@ -34,8 +34,8 @@ Full design: `docs/superpowers/specs/2026-06-02-porthole-design.md`.
 ### M1: Control + connect
 - [x] InputInjector (CGEvent global coords) + input lane (pointerMove/pointerButton/scroll/typeText) + trackpad gesture→message mapping. Host injection + client trackpad compile; 46 tests. *(Injection needs Accessibility grant; run-verify on hardware pending.)*
 - [ ] On-screen keyboard UI (protocol `typeText` ready); Secure Input detection + banner
-- [ ] Bonjour advertise/browse `_porthole._udp`; manual add (Tailscale host)
-- [ ] QR pairing + device keypairs + pinned server identity; revocable PairingStore
+- [x] Bonjour advertise (`_porthole._tcp`) + NWBrowser discovery + client list; manual IP/port retained. *(LAN-functional verify needs devices.)*
+- [x] QR pairing — host terminal QR + pairing URL (`PairingPayload`); client camera scanner → auto-connect. Cert pinning enforced. *(Device keypairs + revocable PairingStore still to do.)*
 - [ ] Saved-Macs list; TCC onboarding (Screen Recording + Accessibility)
 
 ### M2: Clipboard sync (text, both ways)

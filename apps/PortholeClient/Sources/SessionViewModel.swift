@@ -20,13 +20,31 @@ final class SessionViewModel: ObservableObject {
     private var connection: PortholeConnection?
 
     func connect(host: String, port: UInt16, pinHex: String) {
+        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
+            status = .failed("Invalid port.")
+            return
+        }
+        start(endpoint: .hostPort(host: NWEndpoint.Host(host), port: nwPort), pinHex: pinHex)
+    }
+
+    /// Connect to a Bonjour-discovered host (user still supplies the pin).
+    func connect(to host: DiscoveredHost, pinHex: String) {
+        start(endpoint: host.endpoint, pinHex: pinHex)
+    }
+
+    /// Connect from a scanned QR pairing payload (host, port, and pin all included).
+    func connect(payload: PairingPayload) {
+        connect(host: payload.host, port: payload.port, pinHex: payload.pinHex)
+    }
+
+    private func start(endpoint: NWEndpoint, pinHex: String) {
         guard let pin = Data(hexString: pinHex), pin.count == 32 else {
             status = .failed("Pin must be 64 hex characters.")
             return
         }
         status = .connecting
         task?.cancel()
-        task = Task { [weak self] in await self?.run(host: host, port: port, pin: pin) }
+        task = Task { [weak self] in await self?.run(endpoint: endpoint, pin: pin) }
     }
 
     func disconnect() {
@@ -61,12 +79,7 @@ final class SessionViewModel: ObservableObject {
         Task { try? await connection.send(message) }
     }
 
-    private func run(host: String, port: UInt16, pin: Data) async {
-        guard let nwPort = NWEndpoint.Port(rawValue: port) else {
-            status = .failed("Invalid port.")
-            return
-        }
-        let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: nwPort)
+    private func run(endpoint: NWEndpoint, pin: Data) async {
         do {
             let connection = try await PortholeConnection.connect(to: endpoint, pinnedCertificateSHA256: pin)
             self.connection = connection

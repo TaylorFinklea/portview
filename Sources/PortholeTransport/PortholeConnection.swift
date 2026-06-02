@@ -105,10 +105,14 @@ public final class PortholeListener: @unchecked Sendable {
     /// Incoming connections, each a ready `PortholeConnection`.
     public let connections: AsyncStream<PortholeConnection>
 
-    public init(identity: TLSIdentity) throws {
+    public init(identity: TLSIdentity, serviceName: String? = nil) throws {
         let queue = DispatchQueue(label: "porthole.listener")
         self.queue = queue
-        self.listener = try NWListener(using: TLSParameters.server(identity: identity))
+        let listener = try NWListener(using: TLSParameters.server(identity: identity))
+        if let serviceName {
+            listener.service = NWListener.Service(name: serviceName, type: PortholeTransport.bonjourServiceType)
+        }
+        self.listener = listener
         (self.connections, self.connectionContinuation) = AsyncStream<PortholeConnection>.makeStream()
 
         let continuation = connectionContinuation

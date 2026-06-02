@@ -34,19 +34,29 @@ struct PortholeHostApp {
             let identity = try TLSIdentity.makeEphemeralSelfSigned(commonName: "Porthole Host")
             let pinHex = try identity.certificateSHA256().map { String(format: "%02x", $0) }.joined()
 
-            let listener = try PortholeListener(identity: identity)
+            let serviceName = Host.current().localizedName ?? "Mac"
+            let listener = try PortholeListener(identity: identity, serviceName: serviceName)
             let port = try await listener.start()
+
+            let ip = NetworkInterface.primaryIPv4() ?? "<your-Mac-LAN-IP>"
+            let payload = PairingPayload(host: ip, port: port.rawValue, pinHex: pinHex, name: serviceName)
 
             print("""
 
             ┌─────────────────────────────────────────────
-            │ 🪟  Porthole host ready
-            │ Port:  \(port.rawValue)
-            │ Pin:   \(pinHex)
-            │ Connect the iOS client to <your-Mac-LAN-IP>:\(port.rawValue) with that pin.
+            │ 🪟  Porthole host ready  —  \(serviceName)
+            │ Address:  \(ip):\(port.rawValue)
+            │ Pin:      \(pinHex)
+            │ Discoverable on the LAN as "\(serviceName)" (Bonjour).
+            │ Pairing URL: \(payload.urlString)
             └─────────────────────────────────────────────
 
             """)
+
+            if let qr = TerminalQR.render(payload.urlString) {
+                print("Scan this from the Porthole app (or use discovery + the pin above):\n")
+                print(qr)
+            }
 
             if !AXIsProcessTrusted() {
                 print("ℹ️  Input control needs Accessibility permission (System Settings ▸ Privacy & Security ▸ Accessibility — enable your terminal). Viewing works without it; control won't take effect until it's granted.\n")

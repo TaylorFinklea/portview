@@ -20,12 +20,17 @@ targets:
         product: PortholeMedia
       - package: Porthole
         product: PortholeProtocol
+    info:
+      path: Porthole-Info.plist
+      properties:
+        NSLocalNetworkUsageDescription: "Porthole connects to your Mac on your local network to mirror its screen."
+        NSCameraUsageDescription: "Porthole uses the camera to scan the pairing QR code shown on your Mac."
+        NSBonjourServices:
+          - _porthole._tcp
+        UILaunchScreen: {}
     settings:
       base:
-        GENERATE_INFOPLIST_FILE: YES
         PRODUCT_BUNDLE_IDENTIFIER: dev.finklea.porthole
-        INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Porthole connects to your Mac on your local network to mirror its screen."
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: K7CBQW6MPG

@@ -31,7 +31,8 @@
 - **M1 control IMPLEMENTED + compiling (full suite 46 tests / 17 suites green):** input protocol messages (pointerMove/pointerButton/scroll/typeText — TDD); host `InputInjector` maps them to CGEvents (relative cursor w/ clamping, click, scroll, unicode type) — host `serve()` now handles input concurrently with the video pump; needs Accessibility grant (host prints a hint). Client: `TrackpadVideoView` — 1-finger drag = move, tap = click, 2-finger = scroll → input messages. iOS app bundle id = `dev.finklea.porthole`, automatic signing team K7CBQW6MPG.
 - Fixed a flaky `SecPKCS12Import` race under concurrent test suites by serializing it with a lock (`TLSIdentity.importLock`); 3 consecutive full-suite runs green.
 - Host needs BOTH grants to fully work: Screen Recording (capture) + Accessibility (input). Both attach to the terminal app for `swift run`.
-- Next (M1): trackpad input/control (input lane + CGEvent on host), Bonjour discovery + QR pairing (replace manual IP/pin), then audio/clipboard/files/multi-monitor; revisit QUIC + Metal renderer.
+- **M1 frictionless connect IMPLEMENTED + compiling (50 tests / 18 suites green):** host advertises Bonjour `_porthole._tcp` and prints a pairing URL + terminal QR; shared `PairingPayload` (URL ↔ host/port/pin, tested) + `PortholeBrowser`; client gets a discovered-Macs list, a camera QR scanner (scan → auto-connect), and manual entry. iOS Info.plist now has NSBonjourServices + NSCameraUsageDescription + NSLocalNetworkUsageDescription (via xcodegen `info:`; generated `*-Info.plist` is gitignored). *(QR scannability + camera unverified — need a device.)*
+- Next: run M0/M1 on hardware; then M1 polish (on-screen keyboard UI, saved-Macs list, device keypairs + revocable PairingStore) and M2+ (clipboard/audio/files/multi-monitor); revisit QUIC + Metal renderer.
 
 ## Blockers
 
