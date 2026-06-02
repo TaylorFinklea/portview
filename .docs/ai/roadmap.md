@@ -24,10 +24,12 @@ Full design: `docs/superpowers/specs/2026-06-02-porthole-design.md`.
 ### M0: Walking skeleton
 - [x] `PortholeProtocol`: lane defs, message types, binary framing, handshake state machine, version negotiation (pure Swift, unit-tested) — 31 tests green
 - [x] `PortholeTransport`: connection/listener wrapper over Network.framework — TLS-over-TCP for the POC (QUIC groundwork proven via one-way loopback spike; see decisions.md), cert pinning, handshake + VideoFrame over a real connection. 36 tests green.
-- [ ] Host: SCStream capture (1 display) → VideoToolbox HEVC low-latency encode → video lane
-- [ ] Client: QUIC connect → VideoToolbox decode → CAMetalLayer render
+- [x] `PortholeMedia`: VideoToolbox HEVC encode + decode (round-trip recovers color); HEVC sample serialization; **full encode→pinned-TLS→decode pipeline POC, color-verified, autonomous**.
+- [ ] Host: SCStream capture (1 display) → wire to VideoEncoder. *(Needs Screen-Recording TCC grant — interactive.)*
+- [ ] Client: VideoDecoder → CAMetalLayer render. *(Needs GUI/device.)*
+- [ ] Package macOS host app + iOS client app (Xcode). *(Needs Xcode + device.)*
 - [ ] Latency harness; confirm <50 ms motion-to-photon
-- [ ] Resolve open Qs: iOS 26 QUIC datagram support; HEVC low-latency flag on macOS 26
+- [x] Resolve open Qs: iOS 26 QUIC datagrams (supported; deferred) ✓; HEVC encode works on macOS 26 ✓ (EnableLowLatencyRateControl accepted)
 
 ### M1: Control + connect
 - [ ] InputInjector (CGEvent global coords) + input lane; trackpad gesture→message mapping

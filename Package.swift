@@ -20,7 +20,10 @@ let package = Package(
             name: "PortholeTransportTests",
             dependencies: ["PortholeTransport", "PortholeProtocol"]
         ),
-        .target(name: "PortholeMedia"),
-        .testTarget(name: "PortholeMediaTests", dependencies: ["PortholeMedia"]),
+        .target(name: "PortholeMedia", dependencies: ["PortholeProtocol"]),
+        .testTarget(
+            name: "PortholeMediaTests",
+            dependencies: ["PortholeMedia", "PortholeProtocol", "PortholeTransport"]
+        ),
     ]
 )
