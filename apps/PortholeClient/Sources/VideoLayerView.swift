@@ -101,14 +101,14 @@ struct TrackpadVideoView: UIViewRepresentable {
         }
 
         @objc func handleMove(_ gesture: UIPanGestureRecognizer) {
-            let translation = gesture.translation(in: gesture.view)
+            let translation = gesture.translation(in: nil) // window space: zoom-independent
             if gesture.state == .began { lastMove = .zero }
             onMove(translation.x - lastMove.x, translation.y - lastMove.y)
             lastMove = translation
         }
 
         @objc func handleScroll(_ gesture: UIPanGestureRecognizer) {
-            let translation = gesture.translation(in: gesture.view)
+            let translation = gesture.translation(in: nil) // window space: zoom-independent
             if gesture.state == .began { lastScroll = .zero }
             onScroll(translation.x - lastScroll.x, translation.y - lastScroll.y)
             lastScroll = translation

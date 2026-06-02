@@ -20,6 +20,10 @@ final class SessionViewModel: ObservableObject {
     let renderer = VideoRenderer()
     private var task: Task<Void, Never>?
     private var connection: PortholeConnection?
+    /// Mac display size in points (from ServerHello); used to predict the cursor locally.
+    private var displaySize = CGSize(width: 1, height: 1)
+    /// Must match the host's InputInjector sensitivity so the predicted cursor tracks the real one.
+    private let inputSensitivity: CGFloat = 1.5
 
     func connect(host: String, port: UInt16, pinHex: String) {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
@@ -60,7 +64,14 @@ final class SessionViewModel: ObservableObject {
     // MARK: - Input (client → host)
 
     func sendPointerMove(dx: CGFloat, dy: CGFloat) {
-        send(.pointerMove(PointerMove(dx: Int32(dx.rounded()), dy: Int32(dy.rounded()))))
+        let sentDx = dx.rounded()
+        let sentDy = dy.rounded()
+        send(.pointerMove(PointerMove(dx: Int32(sentDx), dy: Int32(sentDy))))
+        // Predict the cursor locally for instant zoom-follow, using the exact delta we sent so
+        // the prediction stays in lockstep with the host (its CursorPosition then matches, no snap).
+        let nx = min(1, max(0, cursorNormalized.x + sentDx * inputSensitivity / displaySize.width))
+        let ny = min(1, max(0, cursorNormalized.y + sentDy * inputSensitivity / displaySize.height))
+        cursorNormalized = CGPoint(x: nx, y: ny)
     }
 
     func sendClick() {
@@ -100,6 +111,7 @@ final class SessionViewModel: ObservableObject {
                 switch message {
                 case .serverHello(let hello):
                     guard let display = hello.displays.first else { continue }
+                    displaySize = CGSize(width: max(1, Double(display.width)), height: max(1, Double(display.height)))
                     let start = try client.handle(
                         hello, displayID: display.id,
                         maxWidth: display.width, maxHeight: display.height,
