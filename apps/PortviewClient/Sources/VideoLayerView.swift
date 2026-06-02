@@ -1,48 +1,12 @@
 import SwiftUI
 import UIKit
-import AVFoundation
-import CoreMedia
-
-/// Renders decoded video by enqueueing `CMSampleBuffer`s into an `AVSampleBufferDisplayLayer`,
-/// which handles hardware decode + display. Simple first render path (production: Metal/CAMetalLayer).
-@MainActor
-final class VideoRenderer {
-    private weak var displayLayer: AVSampleBufferDisplayLayer?
-
-    func attach(_ layer: AVSampleBufferDisplayLayer) {
-        displayLayer = layer
-    }
-
-    func enqueue(_ sampleBuffer: CMSampleBuffer) {
-        markDisplayImmediately(sampleBuffer)
-        displayLayer?.sampleBufferRenderer.enqueue(sampleBuffer)
-    }
-
-    /// Without a control timebase, the layer needs each sample flagged for immediate display.
-    private func markDisplayImmediately(_ sampleBuffer: CMSampleBuffer) {
-        guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true),
-              CFArrayGetCount(attachments) > 0 else { return }
-        let dictionary = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
-        CFDictionarySetValue(
-            dictionary,
-            Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
-            Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
-        )
-    }
-}
-
-/// A UIView backed by an `AVSampleBufferDisplayLayer`.
-final class SampleBufferUIView: UIView {
-    override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
-    var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
-}
 
 /// Video display plus trackpad-style input: one-finger pan moves the cursor, two-finger pan
 /// scrolls, tap clicks, pinch reports a zoom factor. The actual zoom/pan render and cursor
 /// centering are applied by the parent in SwiftUI (`scaleEffect`/`offset`), which is reliable;
 /// a raw transform on this view's backing layer is fought by layout.
 struct TrackpadVideoView: UIViewRepresentable {
-    let renderer: VideoRenderer
+    let renderer: MetalVideoRenderer
     let zoom: CGFloat
     let onMove: (CGFloat, CGFloat) -> Void
     let onScroll: (CGFloat, CGFloat) -> Void
@@ -53,12 +17,11 @@ struct TrackpadVideoView: UIViewRepresentable {
         Coordinator(onMove: onMove, onScroll: onScroll, onClick: onClick, onZoom: onZoom)
     }
 
-    func makeUIView(context: Context) -> SampleBufferUIView {
-        let view = SampleBufferUIView()
+    func makeUIView(context: Context) -> MetalVideoUIView {
+        let view = MetalVideoUIView()
         view.backgroundColor = .black
-        view.displayLayer.videoGravity = .resizeAspect
         view.isUserInteractionEnabled = true
-        renderer.attach(view.displayLayer)
+        renderer.attach(view.metalLayer)
 
         let coordinator = context.coordinator
         let move = UIPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleMove(_:)))
@@ -77,7 +40,7 @@ struct TrackpadVideoView: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ uiView: SampleBufferUIView, context: Context) {
+    func updateUIView(_ uiView: MetalVideoUIView, context: Context) {
         context.coordinator.currentZoom = zoom
     }
 

@@ -22,7 +22,8 @@ final class SessionViewModel: ObservableObject {
     @Published var activeDisplayID: UInt32 = 0
     /// Transient status of an in-flight file push (nil when none).
     @Published var transferStatus: String?
-    let renderer = VideoRenderer()
+    let renderer = MetalVideoRenderer()
+    private let decoder = VideoDecoder()
     private var task: Task<Void, Never>?
     private var connection: PortviewConnection?
     /// Mac display size in points (from ServerHello); used to predict the cursor locally.
@@ -177,8 +178,9 @@ final class SessionViewModel: ObservableObject {
                     client.didStartStreaming()
                     status = .streaming
                 case .videoFrame(let frame):
-                    if let sample = try? rebuild(frame) {
-                        renderer.enqueue(sample)
+                    if let sample = try? rebuild(frame),
+                       let pixelBuffer = try? await decoder.decode(sample) {
+                        renderer.render(pixelBuffer)
                     }
                 case .cursorPosition(let cursor):
                     cursorNormalized = CGPoint(x: cursor.normalizedX, y: cursor.normalizedY)
