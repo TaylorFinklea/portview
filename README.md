@@ -1,8 +1,8 @@
-# 🪟 Porthole
+# 🪟 Portview
 
 **Native iPhone → Mac screen sharing and control that actually feels native.**
 
-Mac-to-Mac screen sharing feels instant because, when both ends are Apple, macOS uses a private, hardware-accelerated video path. From an iPhone you're stuck with VNC, which feels laggy. Porthole closes that gap with a fully open-source stack: a tiny Mac helper captures the screen with **ScreenCaptureKit**, hardware-encodes **HEVC** with **VideoToolbox**, and streams it over an encrypted **QUIC** connection to a native iPhone app that hardware-decodes, renders through **Metal**, and sends back trackpad-style input.
+Mac-to-Mac screen sharing feels instant because, when both ends are Apple, macOS uses a private, hardware-accelerated video path. From an iPhone you're stuck with VNC, which feels laggy. Portview closes that gap with a fully open-source stack: a tiny Mac helper captures the screen with **ScreenCaptureKit**, hardware-encodes **HEVC** with **VideoToolbox**, and streams it over an encrypted **QUIC** connection to a native iPhone app that hardware-decodes, renders through **Metal**, and sends back trackpad-style input.
 
 No reverse-engineering of Apple's proprietary protocol. No servers. No VNC.
 
@@ -10,7 +10,7 @@ No reverse-engineering of Apple's proprietary protocol. No servers. No VNC.
 - **iPhone is a pure viewer/controller**, which sidesteps every iOS screen-capture restriction.
 - **Apple Silicon, macOS 26+ / iOS 26+.** Swift 6, the newest capture/encode/QUIC APIs.
 
-> Status: **early development.** See [`docs/superpowers/specs/2026-06-02-porthole-design.md`](docs/superpowers/specs/2026-06-02-porthole-design.md) for the full design, and [`.docs/ai/roadmap.md`](.docs/ai/roadmap.md) for the milestone roadmap.
+> Status: **early development.** See [`docs/superpowers/specs/2026-06-02-portview-design.md`](docs/superpowers/specs/2026-06-02-portview-design.md) for the full design, and [`.docs/ai/roadmap.md`](.docs/ai/roadmap.md) for the milestone roadmap.
 
 ## Architecture
 

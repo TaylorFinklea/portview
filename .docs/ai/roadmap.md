@@ -4,9 +4,9 @@
 
 ## Vision
 
-Porthole — open-source, native-feeling iPhone→Mac screen sharing & control (own Mac host agent: ScreenCaptureKit + VideoToolbox HEVC over QUIC; iPhone is pure viewer/controller). Replaces laggy VNC. Apache-2.0. macOS 26 / iOS 26, Apple Silicon.
+Portview — open-source, native-feeling iPhone→Mac screen sharing & control (own Mac host agent: ScreenCaptureKit + VideoToolbox HEVC over QUIC; iPhone is pure viewer/controller). Replaces laggy VNC. Apache-2.0. macOS 26 / iOS 26, Apple Silicon.
 
-Full design: `docs/superpowers/specs/2026-06-02-porthole-design.md`.
+Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 
 ## Now / Next / Later
 
@@ -22,10 +22,10 @@ Full design: `docs/superpowers/specs/2026-06-02-porthole-design.md`.
 ## Milestones
 
 ### M0: Walking skeleton
-- [x] `PortholeProtocol`: lane defs, message types, binary framing, handshake state machine, version negotiation (pure Swift, unit-tested) — 31 tests green
-- [x] `PortholeTransport`: connection/listener wrapper over Network.framework — TLS-over-TCP for the POC (QUIC groundwork proven via one-way loopback spike; see decisions.md), cert pinning, handshake + VideoFrame over a real connection. 36 tests green.
-- [x] `PortholeMedia`: VideoToolbox HEVC encode + decode (round-trip recovers color); HEVC sample serialization; **full encode→pinned-TLS→decode pipeline POC, color-verified, autonomous**.
-- [x] Host: `porthole-host` exe — SCStream capture → VideoEncoder → serialize → serve. Compiles; runs with a Screen-Recording grant.
+- [x] `PortviewProtocol`: lane defs, message types, binary framing, handshake state machine, version negotiation (pure Swift, unit-tested) — 31 tests green
+- [x] `PortviewTransport`: connection/listener wrapper over Network.framework — TLS-over-TCP for the POC (QUIC groundwork proven via one-way loopback spike; see decisions.md), cert pinning, handshake + VideoFrame over a real connection. 36 tests green.
+- [x] `PortviewMedia`: VideoToolbox HEVC encode + decode (round-trip recovers color); HEVC sample serialization; **full encode→pinned-TLS→decode pipeline POC, color-verified, autonomous**.
+- [x] Host: `portview-host` exe — SCStream capture → VideoEncoder → serialize → serve. Compiles; runs with a Screen-Recording grant.
 - [x] Client: iOS app — receive → deserialize → AVSampleBufferDisplayLayer render. Compiles for iOS 26 sim (BUILD SUCCEEDED). *(CAMetalLayer is a later latency optimization.)*
 - [x] Package macOS host (SwiftPM exe) + iOS client app (xcodegen). Run guide: `apps/README.md`. *(Running on a real iPhone needs Xcode + your signing team.)*
 - [ ] Latency harness; confirm <50 ms motion-to-photon
@@ -35,7 +35,7 @@ Full design: `docs/superpowers/specs/2026-06-02-porthole-design.md`.
 - [x] InputInjector (CGEvent global coords) + input lane (pointerMove/pointerButton/scroll/typeText) + trackpad gesture→message mapping. Host injection + client trackpad compile; 46 tests. *(Injection needs Accessibility grant; run-verify on hardware pending.)*
 - [x] On-screen keyboard UI — `UIKeyInput` first-responder; typeText + `KeyEvent` special keys (return/delete/tab/escape/arrows) + host CGEvent injection. *(Secure-Input detection/banner still to do.)*
 - [x] Pinch-to-zoom on the video that follows the cursor (host reports `CursorPosition`; client clamped layer transform). *(Approximates view-bounds, ignores letterbox; hardware-verify pending.)*
-- [x] Bonjour advertise (`_porthole._tcp`) + NWBrowser discovery + client list; manual IP/port retained. *(LAN-functional verify needs devices.)*
+- [x] Bonjour advertise (`_portview._tcp`) + NWBrowser discovery + client list; manual IP/port retained. *(LAN-functional verify needs devices.)*
 - [x] QR pairing — host terminal QR + pairing URL (`PairingPayload`); client camera scanner → auto-connect. Cert pinning enforced. *(Device keypairs + revocable PairingStore still to do.)*
 - [ ] Saved-Macs list; TCC onboarding (Screen Recording + Accessibility)
 

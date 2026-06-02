@@ -2,32 +2,32 @@
 import PackageDescription
 
 let package = Package(
-    name: "PortholeProtocol",
+    name: "PortviewProtocol",
     platforms: [.macOS(.v26), .iOS(.v26)],
     products: [
-        .library(name: "PortholeProtocol", targets: ["PortholeProtocol"]),
-        .library(name: "PortholeTransport", targets: ["PortholeTransport"]),
-        .library(name: "PortholeMedia", targets: ["PortholeMedia"]),
+        .library(name: "PortviewProtocol", targets: ["PortviewProtocol"]),
+        .library(name: "PortviewTransport", targets: ["PortviewTransport"]),
+        .library(name: "PortviewMedia", targets: ["PortviewMedia"]),
     ],
     targets: [
-        .target(name: "PortholeProtocol"),
+        .target(name: "PortviewProtocol"),
         .testTarget(
-            name: "PortholeProtocolTests",
-            dependencies: ["PortholeProtocol"]
+            name: "PortviewProtocolTests",
+            dependencies: ["PortviewProtocol"]
         ),
-        .target(name: "PortholeTransport", dependencies: ["PortholeProtocol"]),
+        .target(name: "PortviewTransport", dependencies: ["PortviewProtocol"]),
         .testTarget(
-            name: "PortholeTransportTests",
-            dependencies: ["PortholeTransport", "PortholeProtocol"]
+            name: "PortviewTransportTests",
+            dependencies: ["PortviewTransport", "PortviewProtocol"]
         ),
         .executableTarget(
-            name: "porthole-host",
-            dependencies: ["PortholeProtocol", "PortholeTransport", "PortholeMedia"]
+            name: "portview-host",
+            dependencies: ["PortviewProtocol", "PortviewTransport", "PortviewMedia"]
         ),
-        .target(name: "PortholeMedia", dependencies: ["PortholeProtocol"]),
+        .target(name: "PortviewMedia", dependencies: ["PortviewProtocol"]),
         .testTarget(
-            name: "PortholeMediaTests",
-            dependencies: ["PortholeMedia", "PortholeProtocol", "PortholeTransport"]
+            name: "PortviewMediaTests",
+            dependencies: ["PortviewMedia", "PortviewProtocol", "PortviewTransport"]
         ),
     ]
 )

@@ -1,0 +1,43 @@
+name: PortviewClient
+options:
+  bundleIdPrefix: dev.finklea
+  deploymentTarget:
+    iOS: "26.0"
+packages:
+  Portview:
+    path: ../..
+targets:
+  PortviewClient:
+    type: application
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - Sources
+    dependencies:
+      - package: Portview
+        product: PortviewTransport
+      - package: Portview
+        product: PortviewMedia
+      - package: Portview
+        product: PortviewProtocol
+    info:
+      path: Portview-Info.plist
+      properties:
+        NSLocalNetworkUsageDescription: "Portview connects to your Mac on your local network to mirror its screen."
+        NSCameraUsageDescription: "Portview uses the camera to scan the pairing QR code shown on your Mac."
+        NSBonjourServices:
+          - _portview._tcp
+        UILaunchScreen: {}
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.finklea.portview
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: K7CBQW6MPG
+schemes:
+  PortviewClient:
+    build:
+      targets:
+        PortviewClient: all
+    run:
+      config: Debug
