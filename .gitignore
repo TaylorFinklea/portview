@@ -1,0 +1,22 @@
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# Xcode
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# macOS
+.DS_Store
+
+# Brainstorm visual-companion scratch (not source)
+.superpowers/
+
+# Secrets / signing
+*.p12
+*.mobileprovision
+.env
