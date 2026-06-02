@@ -42,8 +42,10 @@ public struct TLSIdentity {
         return Data(SHA256.hash(data: der))
     }
 
-    /// Generate a fresh, ephemeral self-signed P-256 identity via the system `openssl`,
-    /// then import it as a `SecIdentity`. Intended for M0 / tests; not persisted.
+    #if os(macOS)
+    /// Generate a fresh, ephemeral self-signed identity via the system `openssl`,
+    /// then import it as a `SecIdentity`. Host-only (macOS): uses `Process`, which is
+    /// unavailable on iOS, and only the host needs to mint an identity.
     public static func makeEphemeralSelfSigned(commonName: String = "Porthole") throws -> TLSIdentity {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -98,4 +100,5 @@ public struct TLSIdentity {
             throw TLSIdentityError.opensslFailed("openssl \(arguments.first ?? "") failed: \(err)")
         }
     }
+    #endif
 }

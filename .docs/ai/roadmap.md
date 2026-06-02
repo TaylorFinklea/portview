@@ -11,7 +11,7 @@ Full design: `docs/superpowers/specs/2026-06-02-porthole-design.md`.
 ## Now / Next / Later
 
 ### Now
-- [ ] M0 walking skeleton — `PortholeProtocol` SPM pkg (TDD) + `PortholeTransport` (QUIC); host capture→HEVC→QUIC→client decode→Metal render; hardcoded LAN, no input/pairing.
+- [x] M0 walking skeleton — protocol + transport + media + host exe + iOS client app, all compiling; core pipeline POC color-verified by tests. **Awaiting first run on real hardware** (Screen-Recording grant + iPhone) to confirm a live picture.
 
 ### Next
 - [ ] M1 — trackpad input (CGEvent) + on-screen keyboard + Bonjour discovery + QR pairing/pinned-cert + saved-Macs list.
@@ -25,9 +25,9 @@ Full design: `docs/superpowers/specs/2026-06-02-porthole-design.md`.
 - [x] `PortholeProtocol`: lane defs, message types, binary framing, handshake state machine, version negotiation (pure Swift, unit-tested) — 31 tests green
 - [x] `PortholeTransport`: connection/listener wrapper over Network.framework — TLS-over-TCP for the POC (QUIC groundwork proven via one-way loopback spike; see decisions.md), cert pinning, handshake + VideoFrame over a real connection. 36 tests green.
 - [x] `PortholeMedia`: VideoToolbox HEVC encode + decode (round-trip recovers color); HEVC sample serialization; **full encode→pinned-TLS→decode pipeline POC, color-verified, autonomous**.
-- [ ] Host: SCStream capture (1 display) → wire to VideoEncoder. *(Needs Screen-Recording TCC grant — interactive.)*
-- [ ] Client: VideoDecoder → CAMetalLayer render. *(Needs GUI/device.)*
-- [ ] Package macOS host app + iOS client app (Xcode). *(Needs Xcode + device.)*
+- [x] Host: `porthole-host` exe — SCStream capture → VideoEncoder → serialize → serve. Compiles; runs with a Screen-Recording grant.
+- [x] Client: iOS app — receive → deserialize → AVSampleBufferDisplayLayer render. Compiles for iOS 26 sim (BUILD SUCCEEDED). *(CAMetalLayer is a later latency optimization.)*
+- [x] Package macOS host (SwiftPM exe) + iOS client app (xcodegen). Run guide: `apps/README.md`. *(Running on a real iPhone needs Xcode + your signing team.)*
 - [ ] Latency harness; confirm <50 ms motion-to-photon
 - [x] Resolve open Qs: iOS 26 QUIC datagrams (supported; deferred) ✓; HEVC encode works on macOS 26 ✓ (EnableLowLatencyRateControl accepted)
 

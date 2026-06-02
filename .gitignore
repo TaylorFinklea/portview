@@ -10,6 +10,9 @@ DerivedData/
 *.xcuserstate
 *.xcscmblueprint
 
+# Generated Xcode projects (regenerate with `xcodegen generate` in apps/*/)
+apps/*/*.xcodeproj/
+
 # macOS
 .DS_Store
 
