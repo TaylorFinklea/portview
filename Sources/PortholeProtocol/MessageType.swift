@@ -10,4 +10,6 @@ public enum MessageType: UInt8, Sendable {
     case pointerButton = 8
     case scroll = 9
     case typeText = 10
+    case keyEvent = 11
+    case cursorPosition = 12
 }

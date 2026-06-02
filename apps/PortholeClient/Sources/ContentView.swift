@@ -8,23 +8,45 @@ struct ContentView: View {
     @State private var port = ""
     @State private var pin = ""
     @State private var showScanner = false
+    @State private var zoom: CGFloat = 1
+    @State private var keyboardActive = false
 
     var body: some View {
         if session.status == .streaming {
             ZStack(alignment: .top) {
                 TrackpadVideoView(
                     renderer: session.renderer,
+                    zoom: zoom,
+                    cursor: session.cursorNormalized,
                     onMove: { dx, dy in session.sendPointerMove(dx: dx, dy: dy) },
                     onScroll: { dx, dy in session.sendScroll(dx: dx, dy: dy) },
-                    onClick: { session.sendClick() }
+                    onClick: { session.sendClick() },
+                    onZoom: { zoom = min(4, max(1, $0)) }
                 )
                 .ignoresSafeArea()
-                HStack {
-                    Text("drag = move · tap = click · 2-finger = scroll")
+
+                // Invisible first-responder that surfaces the system keyboard when toggled.
+                KeyboardCaptureView(
+                    isActive: $keyboardActive,
+                    onText: { session.sendText($0) },
+                    onSpecial: { session.sendKey($0) }
+                )
+                .frame(width: 0, height: 0)
+
+                HStack(spacing: 10) {
+                    Text("drag·move  tap·click  2-finger·scroll  pinch·zoom")
                         .font(.caption2)
                         .padding(.horizontal, 10).padding(.vertical, 6)
                         .background(.ultraThinMaterial, in: Capsule())
                     Spacer()
+                    if zoom > 1.01 {
+                        Button { zoom = 1 } label: { Image(systemName: "minus.magnifyingglass") }
+                            .padding(8).background(.ultraThinMaterial, in: Circle())
+                    }
+                    Button { keyboardActive.toggle() } label: {
+                        Image(systemName: keyboardActive ? "keyboard.chevron.compact.down" : "keyboard")
+                    }
+                    .padding(8).background(.ultraThinMaterial, in: Circle())
                     Button("Disconnect") { session.disconnect() }
                         .padding(.horizontal, 14).padding(.vertical, 8)
                         .background(.ultraThinMaterial, in: Capsule())

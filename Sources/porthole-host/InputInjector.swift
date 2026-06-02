@@ -6,9 +6,12 @@ import PortholeProtocol
 /// Requires Accessibility permission to actually take effect. Tracks the cursor
 /// position itself (trackpad-style relative movement) and clamps to the display.
 final class InputInjector: @unchecked Sendable {
+    /// Called with the normalized (0…1) cursor position after it moves (throttled).
+    var onCursorMoved: ((Double, Double) -> Void)?
     private var position: CGPoint
     private let bounds: CGRect
     private var leftButtonDown = false
+    private var lastReported = CGPoint(x: -1_000, y: -1_000)
     private let sensitivity: CGFloat
 
     init(displayBounds: CGRect, sensitivity: CGFloat = 1.5) {
@@ -23,6 +26,7 @@ final class InputInjector: @unchecked Sendable {
         case .pointerButton(let m): button(m.button, down: m.isDown)
         case .scroll(let m): scroll(dx: m.dx, dy: m.dy)
         case .typeText(let m): typeText(m.text)
+        case .keyEvent(let m): pressKey(m.key)
         default: break
         }
     }
@@ -42,6 +46,16 @@ final class InputInjector: @unchecked Sendable {
         let type: CGEventType = leftButtonDown ? .leftMouseDragged : .mouseMoved
         CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: position, mouseButton: .left)?
             .post(tap: .cghidEventTap)
+        reportCursorIfMoved()
+    }
+
+    private func reportCursorIfMoved() {
+        guard onCursorMoved != nil, bounds.width > 0, bounds.height > 0 else { return }
+        guard abs(position.x - lastReported.x) >= 3 || abs(position.y - lastReported.y) >= 3 else { return }
+        lastReported = position
+        let nx = Double((position.x - bounds.minX) / bounds.width)
+        let ny = Double((position.y - bounds.minY) / bounds.height)
+        onCursorMoved?(nx, ny)
     }
 
     private func button(_ kind: PointerButtonKind, down: Bool) {
@@ -77,6 +91,25 @@ final class InputInjector: @unchecked Sendable {
             up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
+        }
+    }
+
+    private func pressKey(_ key: SpecialKey) {
+        let code = Self.virtualKeyCode(key)
+        CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)?.post(tap: .cghidEventTap)
+        CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)?.post(tap: .cghidEventTap)
+    }
+
+    static func virtualKeyCode(_ key: SpecialKey) -> CGKeyCode {
+        switch key {
+        case .returnKey: 0x24
+        case .delete: 0x33
+        case .tab: 0x30
+        case .escape: 0x35
+        case .arrowLeft: 0x7B
+        case .arrowRight: 0x7C
+        case .arrowDown: 0x7D
+        case .arrowUp: 0x7E
         }
     }
 }

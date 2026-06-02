@@ -26,6 +26,8 @@ public enum Frame {
         case .pointerButton(let m): encode(m)
         case .scroll(let m): encode(m)
         case .typeText(let m): encode(m)
+        case .keyEvent(let m): encode(m)
+        case .cursorPosition(let m): encode(m)
         }
     }
 
@@ -55,6 +57,8 @@ public enum Frame {
         case .pointerButton: return .pointerButton(try PointerButton(from: &r))
         case .scroll: return .scroll(try Scroll(from: &r))
         case .typeText: return .typeText(try TypeText(from: &r))
+        case .keyEvent: return .keyEvent(try KeyEvent(from: &r))
+        case .cursorPosition: return .cursorPosition(try CursorPosition(from: &r))
         }
     }
 }

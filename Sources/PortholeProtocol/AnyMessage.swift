@@ -10,6 +10,8 @@ public enum AnyMessage: Equatable, Sendable {
     case pointerButton(PointerButton)
     case scroll(Scroll)
     case typeText(TypeText)
+    case keyEvent(KeyEvent)
+    case cursorPosition(CursorPosition)
 
     public var messageType: MessageType {
         switch self {
@@ -23,6 +25,8 @@ public enum AnyMessage: Equatable, Sendable {
         case .pointerButton: .pointerButton
         case .scroll: .scroll
         case .typeText: .typeText
+        case .keyEvent: .keyEvent
+        case .cursorPosition: .cursorPosition
         }
     }
 }

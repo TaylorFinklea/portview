@@ -37,16 +37,20 @@ final class SampleBufferUIView: UIView {
     var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
 }
 
-/// Video display plus trackpad-style input: one-finger pan moves the cursor, two-finger
-/// pan scrolls, tap clicks. Deltas are forwarded incrementally as the gesture updates.
+/// Video display plus trackpad-style input and pinch-to-zoom that follows the cursor.
+/// One-finger pan moves the cursor, two-finger pan scrolls, tap clicks, pinch zooms.
+/// When zoomed, the layer transform keeps the host cursor (`cursor`, normalized) centered.
 struct TrackpadVideoView: UIViewRepresentable {
     let renderer: VideoRenderer
+    let zoom: CGFloat
+    let cursor: CGPoint            // normalized 0…1
     let onMove: (CGFloat, CGFloat) -> Void
     let onScroll: (CGFloat, CGFloat) -> Void
     let onClick: () -> Void
+    let onZoom: (CGFloat) -> Void
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onMove: onMove, onScroll: onScroll, onClick: onClick)
+        Coordinator(onMove: onMove, onScroll: onScroll, onClick: onClick, onZoom: onZoom)
     }
 
     func makeUIView(context: Context) -> SampleBufferUIView {
@@ -63,28 +67,54 @@ struct TrackpadVideoView: UIViewRepresentable {
         scroll.minimumNumberOfTouches = 2
         scroll.maximumNumberOfTouches = 2
         let tap = UITapGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleTap(_:)))
-        view.addGestureRecognizer(move)
-        view.addGestureRecognizer(scroll)
-        view.addGestureRecognizer(tap)
+        let pinch = UIPinchGestureRecognizer(target: coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        for recognizer in [move, scroll, tap, pinch] as [UIGestureRecognizer] {
+            recognizer.delegate = coordinator
+            view.addGestureRecognizer(recognizer)
+        }
         return view
     }
 
-    func updateUIView(_ uiView: SampleBufferUIView, context: Context) {}
+    func updateUIView(_ uiView: SampleBufferUIView, context: Context) {
+        context.coordinator.currentZoom = zoom
+        let bounds = uiView.bounds
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let z = max(1, zoom)
+        let limitX = (z - 1) * bounds.width / 2
+        let limitY = (z - 1) * bounds.height / 2
+        let focusX = cursor.x * bounds.width
+        let focusY = cursor.y * bounds.height
+        // Map the cursor toward the view centre at scale z, clamped so no empty edges show.
+        let tx = min(limitX, max(-limitX, z * (bounds.midX - focusX)))
+        let ty = min(limitY, max(-limitY, z * (bounds.midY - focusY)))
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        var transform = CATransform3DIdentity
+        transform = CATransform3DTranslate(transform, tx, ty, 0)
+        transform = CATransform3DScale(transform, z, z, 1)
+        uiView.displayLayer.transform = transform
+        CATransaction.commit()
+    }
 
     @MainActor
-    final class Coordinator: NSObject {
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         let onMove: (CGFloat, CGFloat) -> Void
         let onScroll: (CGFloat, CGFloat) -> Void
         let onClick: () -> Void
+        let onZoom: (CGFloat) -> Void
+        var currentZoom: CGFloat = 1
         private var lastMove: CGPoint = .zero
         private var lastScroll: CGPoint = .zero
+        private var pinchStart: CGFloat = 1
 
         init(onMove: @escaping (CGFloat, CGFloat) -> Void,
              onScroll: @escaping (CGFloat, CGFloat) -> Void,
-             onClick: @escaping () -> Void) {
+             onClick: @escaping () -> Void,
+             onZoom: @escaping (CGFloat) -> Void) {
             self.onMove = onMove
             self.onScroll = onScroll
             self.onClick = onClick
+            self.onZoom = onZoom
         }
 
         @objc func handleMove(_ gesture: UIPanGestureRecognizer) {
@@ -103,6 +133,19 @@ struct TrackpadVideoView: UIViewRepresentable {
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
             onClick()
+        }
+
+        @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+            switch gesture.state {
+            case .began: pinchStart = currentZoom
+            case .changed, .ended: onZoom(pinchStart * gesture.scale)
+            default: break
+            }
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
+            true
         }
     }
 }

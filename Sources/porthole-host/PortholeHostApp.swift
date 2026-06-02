@@ -99,6 +99,9 @@ struct PortholeHostApp {
     /// input messages (injected as CGEvents); video streams concurrently from a child task.
     static func serve(_ connection: PortholeConnection, display: SCDisplay) async {
         let injector = InputInjector(displayBounds: CGDisplayBounds(display.displayID))
+        injector.onCursorMoved = { nx, ny in
+            Task { try? await connection.send(.cursorPosition(CursorPosition(normalizedX: nx, normalizedY: ny))) }
+        }
         var server = ServerHandshake(
             displays: [DisplayInfo(id: UInt32(display.displayID), name: "Display",
                                    width: UInt32(display.width), height: UInt32(display.height), scaleX100: 100)],

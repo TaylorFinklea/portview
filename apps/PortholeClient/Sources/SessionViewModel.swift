@@ -15,6 +15,8 @@ final class SessionViewModel: ObservableObject {
     }
 
     @Published var status: Status = .idle
+    /// Latest cursor position reported by the host, normalized to the display (0…1).
+    @Published var cursorNormalized = CGPoint(x: 0.5, y: 0.5)
     let renderer = VideoRenderer()
     private var task: Task<Void, Never>?
     private var connection: PortholeConnection?
@@ -74,6 +76,10 @@ final class SessionViewModel: ObservableObject {
         send(.typeText(TypeText(text: text)))
     }
 
+    func sendKey(_ key: SpecialKey) {
+        send(.keyEvent(KeyEvent(key: key)))
+    }
+
     private func send(_ message: AnyMessage) {
         guard let connection else { return }
         Task { try? await connection.send(message) }
@@ -106,6 +112,8 @@ final class SessionViewModel: ObservableObject {
                     if let sample = try? rebuild(frame) {
                         renderer.enqueue(sample)
                     }
+                case .cursorPosition(let cursor):
+                    cursorNormalized = CGPoint(x: cursor.normalizedX, y: cursor.normalizedY)
                 case .error(let error):
                     status = .failed("Host error: \(error.message)")
                     return
