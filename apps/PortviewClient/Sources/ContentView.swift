@@ -5,6 +5,9 @@ import PortviewTransport
 struct ContentView: View {
     @StateObject private var session = SessionViewModel()
     @StateObject private var discovery = DiscoveryModel()
+    @StateObject private var savedHosts = SavedHostsStore()
+    /// Pairing to persist if the in-flight connection reaches `.streaming`.
+    @State private var pendingSave: PairingPayload?
     @State private var host = ""
     @State private var port = ""
     @State private var pin = ""
@@ -117,6 +120,24 @@ struct ContentView: View {
                         }
                     }
 
+                    if !savedHosts.hosts.isEmpty {
+                        Section("Saved Macs") {
+                            ForEach(savedHosts.hosts) { saved in
+                                Button {
+                                    pendingSave = saved.payload
+                                    session.connect(payload: saved.payload)
+                                } label: {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(saved.name)
+                                        Text("\(saved.host):\(String(saved.port))")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            .onDelete { savedHosts.remove(atOffsets: $0) }
+                        }
+                    }
+
                     if !discovery.hosts.isEmpty {
                         Section("Discovered Macs (enter the pin, then tap)") {
                             ForEach(discovery.hosts) { discovered in
@@ -144,6 +165,7 @@ struct ContentView: View {
                             .font(.system(.body, design: .monospaced))
                         Button("Connect manually") {
                             if let parsedPort = UInt16(port) {
+                                pendingSave = PairingPayload(host: host, port: parsedPort, pinHex: pin, name: host)
                                 session.connect(host: host, port: parsedPort, pinHex: pin)
                             }
                         }
@@ -164,10 +186,17 @@ struct ContentView: View {
                     QRScannerView { code in
                         showScanner = false
                         if let payload = PairingPayload(urlString: code) {
+                            pendingSave = payload
                             session.connect(payload: payload)
                         }
                     }
                     .ignoresSafeArea()
+                }
+                .onChange(of: session.status) { _, newValue in
+                    if newValue == .streaming, let payload = pendingSave {
+                        savedHosts.remember(payload)
+                        pendingSave = nil
+                    }
                 }
                 .onAppear { discovery.start() }
                 .onDisappear { discovery.stop() }
