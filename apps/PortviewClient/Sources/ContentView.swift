@@ -1,4 +1,5 @@
 import SwiftUI
+import PortviewProtocol
 import PortviewTransport
 
 struct ContentView: View {
@@ -10,6 +11,12 @@ struct ContentView: View {
     @State private var showScanner = false
     @State private var zoom: CGFloat = 1
     @State private var keyboardActive = false
+    /// Sticky modifiers armed for the next keystroke (cleared after it's sent).
+    @State private var armed: KeyModifiers = []
+
+    private let modifierKeys: [(label: String, mod: KeyModifiers)] = [
+        ("⌘", .command), ("⇧", .shift), ("⌥", .option), ("⌃", .control)
+    ]
 
     var body: some View {
         if session.status == .streaming {
@@ -37,31 +44,64 @@ struct ContentView: View {
                     // Invisible first-responder that surfaces the system keyboard when toggled.
                     KeyboardCaptureView(
                         isActive: $keyboardActive,
-                        onText: { session.sendText($0) },
-                        onSpecial: { session.sendKey($0) }
+                        onText: { text in
+                            if armed.isEmpty {
+                                session.sendText(text)
+                            } else {
+                                session.sendChar(text, modifiers: armed)
+                                armed = []
+                            }
+                        },
+                        onSpecial: { key in
+                            session.sendKey(key, modifiers: armed)
+                            armed = []
+                        }
                     )
                     .frame(width: 0, height: 0)
 
-                    HStack(spacing: 10) {
-                    Text("drag·move  tap·click  2-finger·scroll  pinch·zoom")
-                        .font(.caption2)
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .background(.ultraThinMaterial, in: Capsule())
-                    Spacer()
-                    if zoom > 1.01 {
-                        Button { zoom = 1 } label: { Image(systemName: "minus.magnifyingglass") }
+                    VStack(spacing: 8) {
+                        HStack(spacing: 10) {
+                            Text("drag·move  tap·click  2-finger·scroll  pinch·zoom")
+                                .font(.caption2)
+                                .padding(.horizontal, 10).padding(.vertical, 6)
+                                .background(.ultraThinMaterial, in: Capsule())
+                            Spacer()
+                            if zoom > 1.01 {
+                                Button { zoom = 1 } label: { Image(systemName: "minus.magnifyingglass") }
+                                    .padding(8).background(.ultraThinMaterial, in: Circle())
+                            }
+                            Button { session.pasteToHost() } label: { Image(systemName: "doc.on.clipboard") }
+                                .padding(8).background(.ultraThinMaterial, in: Circle())
+                            Button { keyboardActive.toggle() } label: {
+                                Image(systemName: keyboardActive ? "keyboard.chevron.compact.down" : "keyboard")
+                            }
                             .padding(8).background(.ultraThinMaterial, in: Circle())
+                            Button("Disconnect") { session.disconnect() }
+                                .padding(.horizontal, 14).padding(.vertical, 8)
+                                .background(.ultraThinMaterial, in: Capsule())
+                        }
+
+                        // Sticky modifier bar — arm ⌘/⇧/⌥/⌃, then the next key forms a chord.
+                        if keyboardActive {
+                            HStack(spacing: 8) {
+                                ForEach(modifierKeys.indices, id: \.self) { i in
+                                    let entry = modifierKeys[i]
+                                    let on = armed.contains(entry.mod)
+                                    Button { armed.formSymmetricDifference(entry.mod) } label: {
+                                        Text(entry.label)
+                                            .font(.system(size: 17, weight: .semibold))
+                                            .frame(width: 42, height: 36)
+                                            .foregroundStyle(on ? Color.white : Color.primary)
+                                            .background(
+                                                on ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.ultraThinMaterial),
+                                                in: RoundedRectangle(cornerRadius: 8)
+                                            )
+                                    }
+                                }
+                                Spacer()
+                            }
+                        }
                     }
-                    Button { session.pasteToHost() } label: { Image(systemName: "doc.on.clipboard") }
-                        .padding(8).background(.ultraThinMaterial, in: Circle())
-                    Button { keyboardActive.toggle() } label: {
-                        Image(systemName: keyboardActive ? "keyboard.chevron.compact.down" : "keyboard")
-                    }
-                    .padding(8).background(.ultraThinMaterial, in: Circle())
-                    Button("Disconnect") { session.disconnect() }
-                        .padding(.horizontal, 14).padding(.vertical, 8)
-                        .background(.ultraThinMaterial, in: Capsule())
-                }
                     .padding()
                 }
             }

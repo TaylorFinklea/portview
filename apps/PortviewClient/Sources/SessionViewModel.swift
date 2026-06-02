@@ -87,8 +87,13 @@ final class SessionViewModel: ObservableObject {
         send(.typeText(TypeText(text: text)))
     }
 
-    func sendKey(_ key: SpecialKey) {
-        send(.keyEvent(KeyEvent(key: key)))
+    func sendKey(_ key: SpecialKey, modifiers: KeyModifiers = []) {
+        send(.keyEvent(KeyEvent(special: key, modifiers: modifiers)))
+    }
+
+    /// Send a single character as a key chord (used for shortcuts like ⌘C).
+    func sendChar(_ character: String, modifiers: KeyModifiers) {
+        send(.keyEvent(KeyEvent(character: character, modifiers: modifiers)))
     }
 
     /// Push the iPhone's clipboard text to the Mac (user-initiated; iOS restricts auto-reads).

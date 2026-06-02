@@ -26,7 +26,7 @@ final class InputInjector: @unchecked Sendable {
         case .pointerButton(let m): button(m.button, down: m.isDown)
         case .scroll(let m): scroll(dx: m.dx, dy: m.dy)
         case .typeText(let m): typeText(m.text)
-        case .keyEvent(let m): pressKey(m.key)
+        case .keyEvent(let m): pressKey(m)
         default: break
         }
     }
@@ -94,10 +94,96 @@ final class InputInjector: @unchecked Sendable {
         }
     }
 
-    private func pressKey(_ key: SpecialKey) {
-        let code = Self.virtualKeyCode(key)
-        CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)?.post(tap: .cghidEventTap)
-        CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)?.post(tap: .cghidEventTap)
+    private func pressKey(_ event: KeyEvent) {
+        let flags = Self.cgFlags(event.modifiers)
+        switch event.key {
+        case .special(let key):
+            postKey(Self.virtualKeyCode(key), flags: flags)
+        case .character(let character):
+            if let code = Self.ansiKeyCode(for: character) {
+                postKey(code, flags: flags)
+            } else {
+                // Unmapped key (e.g. a non-ANSI character). Fall back to unicode typing;
+                // modifier flags won't reliably register as a shortcut, but the text still lands.
+                typeText(character)
+            }
+        }
+    }
+
+    /// Post a key-down/key-up pair for a virtual keycode with modifier flags applied to both.
+    private func postKey(_ code: CGKeyCode, flags: CGEventFlags) {
+        let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)
+        down?.flags = flags
+        down?.post(tap: .cghidEventTap)
+        let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)
+        up?.flags = flags
+        up?.post(tap: .cghidEventTap)
+    }
+
+    static func cgFlags(_ modifiers: KeyModifiers) -> CGEventFlags {
+        var flags: CGEventFlags = []
+        if modifiers.contains(.command) { flags.insert(.maskCommand) }
+        if modifiers.contains(.shift) { flags.insert(.maskShift) }
+        if modifiers.contains(.option) { flags.insert(.maskAlternate) }
+        if modifiers.contains(.control) { flags.insert(.maskControl) }
+        return flags
+    }
+
+    /// Virtual keycode for a single character on the ANSI/US layout (the physical key;
+    /// case and symbols come from modifier flags). Returns nil for anything unmapped.
+    static func ansiKeyCode(for character: String) -> CGKeyCode? {
+        guard let ch = character.lowercased().first else { return nil }
+        return switch ch {
+        case "a": 0x00
+        case "s": 0x01
+        case "d": 0x02
+        case "f": 0x03
+        case "h": 0x04
+        case "g": 0x05
+        case "z": 0x06
+        case "x": 0x07
+        case "c": 0x08
+        case "v": 0x09
+        case "b": 0x0B
+        case "q": 0x0C
+        case "w": 0x0D
+        case "e": 0x0E
+        case "r": 0x0F
+        case "y": 0x10
+        case "t": 0x11
+        case "1": 0x12
+        case "2": 0x13
+        case "3": 0x14
+        case "4": 0x15
+        case "6": 0x16
+        case "5": 0x17
+        case "=": 0x18
+        case "9": 0x19
+        case "7": 0x1A
+        case "-": 0x1B
+        case "8": 0x1C
+        case "0": 0x1D
+        case "]": 0x1E
+        case "o": 0x1F
+        case "u": 0x20
+        case "[": 0x21
+        case "i": 0x22
+        case "p": 0x23
+        case "l": 0x25
+        case "j": 0x26
+        case "'": 0x27
+        case "k": 0x28
+        case ";": 0x29
+        case "\\": 0x2A
+        case ",": 0x2B
+        case "/": 0x2C
+        case "n": 0x2D
+        case "m": 0x2E
+        case ".": 0x2F
+        case "`": 0x32
+        case " ": 0x31
+        default: nil
+        }
     }
 
     static func virtualKeyCode(_ key: SpecialKey) -> CGKeyCode {
