@@ -8,13 +8,25 @@ struct ContentView: View {
 
     var body: some View {
         if session.status == .streaming {
-            ZStack(alignment: .topTrailing) {
-                VideoLayerView(renderer: session.renderer)
-                    .ignoresSafeArea()
-                Button("Disconnect") { session.disconnect() }
-                    .padding(.horizontal, 14).padding(.vertical, 8)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .padding()
+            ZStack(alignment: .top) {
+                TrackpadVideoView(
+                    renderer: session.renderer,
+                    onMove: { dx, dy in session.sendPointerMove(dx: dx, dy: dy) },
+                    onScroll: { dx, dy in session.sendScroll(dx: dx, dy: dy) },
+                    onClick: { session.sendClick() }
+                )
+                .ignoresSafeArea()
+                HStack {
+                    Text("drag = move · tap = click · 2-finger = scroll")
+                        .font(.caption2)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: Capsule())
+                    Spacer()
+                    Button("Disconnect") { session.disconnect() }
+                        .padding(.horizontal, 14).padding(.vertical, 8)
+                        .background(.ultraThinMaterial, in: Capsule())
+                }
+                .padding()
             }
         } else {
             NavigationStack {

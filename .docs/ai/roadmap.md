@@ -32,8 +32,8 @@ Full design: `docs/superpowers/specs/2026-06-02-porthole-design.md`.
 - [x] Resolve open Qs: iOS 26 QUIC datagrams (supported; deferred) ✓; HEVC encode works on macOS 26 ✓ (EnableLowLatencyRateControl accepted)
 
 ### M1: Control + connect
-- [ ] InputInjector (CGEvent global coords) + input lane; trackpad gesture→message mapping
-- [ ] On-screen keyboard; Secure Input detection + banner
+- [x] InputInjector (CGEvent global coords) + input lane (pointerMove/pointerButton/scroll/typeText) + trackpad gesture→message mapping. Host injection + client trackpad compile; 46 tests. *(Injection needs Accessibility grant; run-verify on hardware pending.)*
+- [ ] On-screen keyboard UI (protocol `typeText` ready); Secure Input detection + banner
 - [ ] Bonjour advertise/browse `_porthole._udp`; manual add (Tailscale host)
 - [ ] QR pairing + device keypairs + pinned server identity; revocable PairingStore
 - [ ] Saved-Macs list; TCC onboarding (Screen Recording + Accessibility)

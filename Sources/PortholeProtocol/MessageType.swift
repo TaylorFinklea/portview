@@ -6,4 +6,8 @@ public enum MessageType: UInt8, Sendable {
     case videoFrame = 4
     case bye = 5
     case error = 6
+    case pointerMove = 7
+    case pointerButton = 8
+    case scroll = 9
+    case typeText = 10
 }

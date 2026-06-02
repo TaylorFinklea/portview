@@ -22,6 +22,10 @@ public enum Frame {
         case .videoFrame(let m): encode(m)
         case .bye(let m): encode(m)
         case .error(let m): encode(m)
+        case .pointerMove(let m): encode(m)
+        case .pointerButton(let m): encode(m)
+        case .scroll(let m): encode(m)
+        case .typeText(let m): encode(m)
         }
     }
 
@@ -47,6 +51,10 @@ public enum Frame {
         case .videoFrame: return .videoFrame(try VideoFrame(from: &r))
         case .bye: return .bye(try Bye(from: &r))
         case .error: return .error(try ProtocolError(from: &r))
+        case .pointerMove: return .pointerMove(try PointerMove(from: &r))
+        case .pointerButton: return .pointerButton(try PointerButton(from: &r))
+        case .scroll: return .scroll(try Scroll(from: &r))
+        case .typeText: return .typeText(try TypeText(from: &r))
         }
     }
 }

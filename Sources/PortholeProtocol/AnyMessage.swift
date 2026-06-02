@@ -6,6 +6,10 @@ public enum AnyMessage: Equatable, Sendable {
     case videoFrame(VideoFrame)
     case bye(Bye)
     case error(ProtocolError)
+    case pointerMove(PointerMove)
+    case pointerButton(PointerButton)
+    case scroll(Scroll)
+    case typeText(TypeText)
 
     public var messageType: MessageType {
         switch self {
@@ -15,6 +19,10 @@ public enum AnyMessage: Equatable, Sendable {
         case .videoFrame: .videoFrame
         case .bye: .bye
         case .error: .error
+        case .pointerMove: .pointerMove
+        case .pointerButton: .pointerButton
+        case .scroll: .scroll
+        case .typeText: .typeText
         }
     }
 }

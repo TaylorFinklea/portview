@@ -2,6 +2,7 @@ import Foundation
 @preconcurrency import ScreenCaptureKit
 import CoreMedia
 import CoreGraphics
+import ApplicationServices
 import PortholeProtocol
 import PortholeTransport
 import PortholeMedia
@@ -47,6 +48,10 @@ struct PortholeHostApp {
 
             """)
 
+            if !AXIsProcessTrusted() {
+                print("ℹ️  Input control needs Accessibility permission (System Settings ▸ Privacy & Security ▸ Accessibility — enable your terminal). Viewing works without it; control won't take effect until it's granted.\n")
+            }
+
             for await connection in listener.connections {
                 await serve(connection, display: display)
             }
@@ -79,35 +84,47 @@ struct PortholeHostApp {
         """)
     }
 
-    /// Run one client session: handshake, then capture → encode → serialize → send.
+    /// Run one client session. A single inbound loop handles the handshake and then
+    /// input messages (injected as CGEvents); video streams concurrently from a child task.
     static func serve(_ connection: PortholeConnection, display: SCDisplay) async {
-        let width = display.width
-        let height = display.height
+        let injector = InputInjector(displayBounds: CGDisplayBounds(display.displayID))
         var server = ServerHandshake(
             displays: [DisplayInfo(id: UInt32(display.displayID), name: "Display",
-                                   width: UInt32(width), height: UInt32(height), scaleX100: 100)],
+                                   width: UInt32(display.width), height: UInt32(display.height), scaleX100: 100)],
             supportedCodecs: [.hevc]
         )
+        var videoTask: Task<Void, Never>?
 
-        handshake: for await message in connection.inbound {
-            do {
-                switch message {
-                case .clientHello(let hello):
+        for await message in connection.inbound {
+            switch message {
+            case .clientHello(let hello):
+                do {
                     try await connection.send(.serverHello(server.handle(hello)))
-                case .startSession(let start):
-                    try server.handle(start)
-                    break handshake
-                default:
-                    break
+                } catch {
+                    print("handshake error: \(error)")
+                    videoTask?.cancel()
+                    return
                 }
-            } catch {
-                print("handshake error: \(error)")
+            case .startSession(let start):
+                do { try server.handle(start) } catch { print("startSession error: \(error)"); return }
+                print("Client streaming; starting capture + input.")
+                videoTask = Task { await pumpVideo(connection, display: display) }
+            case .pointerMove, .pointerButton, .scroll, .typeText:
+                injector.handle(message)
+            case .bye:
+                videoTask?.cancel()
                 return
+            default:
+                break
             }
         }
-        guard server.state == .streaming else { return }
-        print("Client streaming; starting capture.")
+        videoTask?.cancel()
+    }
 
+    /// Capture → HEVC encode → serialize → send, until the capture stream ends.
+    static func pumpVideo(_ connection: PortholeConnection, display: SCDisplay) async {
+        let width = display.width
+        let height = display.height
         do {
             let encoder = try VideoEncoder(width: width, height: height)
             let capture = CaptureEngine(width: width, height: height)

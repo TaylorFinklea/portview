@@ -18,6 +18,10 @@ public enum TLSIdentityError: Error {
 public struct TLSIdentity {
     public let secIdentity: SecIdentity
 
+    /// Serializes `SecPKCS12Import`, which touches the process-global keychain and races
+    /// under concurrent imports (e.g. parallel test suites each minting an identity).
+    private static let importLock = NSLock()
+
     public init(secIdentity: SecIdentity) {
         self.secIdentity = secIdentity
     }
@@ -77,7 +81,9 @@ public struct TLSIdentity {
     public static func importPKCS12(_ data: Data, passphrase: String) throws -> TLSIdentity {
         let options: [String: Any] = [kSecImportExportPassphrase as String: passphrase]
         var items: CFArray?
+        importLock.lock()
         let status = SecPKCS12Import(data as CFData, options as CFDictionary, &items)
+        importLock.unlock()
         guard status == errSecSuccess else { throw TLSIdentityError.pkcs12ImportFailed(status) }
         guard let array = items as? [[String: Any]],
               let first = array.first,

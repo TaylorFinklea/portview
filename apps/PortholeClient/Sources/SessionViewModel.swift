@@ -17,6 +17,7 @@ final class SessionViewModel: ObservableObject {
     @Published var status: Status = .idle
     let renderer = VideoRenderer()
     private var task: Task<Void, Never>?
+    private var connection: PortholeConnection?
 
     func connect(host: String, port: UInt16, pinHex: String) {
         guard let pin = Data(hexString: pinHex), pin.count == 32 else {
@@ -29,9 +30,35 @@ final class SessionViewModel: ObservableObject {
     }
 
     func disconnect() {
+        connection?.close()
+        connection = nil
         task?.cancel()
         task = nil
         status = .idle
+    }
+
+    // MARK: - Input (client → host)
+
+    func sendPointerMove(dx: CGFloat, dy: CGFloat) {
+        send(.pointerMove(PointerMove(dx: Int32(dx.rounded()), dy: Int32(dy.rounded()))))
+    }
+
+    func sendClick() {
+        send(.pointerButton(PointerButton(button: .left, isDown: true)))
+        send(.pointerButton(PointerButton(button: .left, isDown: false)))
+    }
+
+    func sendScroll(dx: CGFloat, dy: CGFloat) {
+        send(.scroll(Scroll(dx: Int32(dx.rounded()), dy: Int32(dy.rounded()))))
+    }
+
+    func sendText(_ text: String) {
+        send(.typeText(TypeText(text: text)))
+    }
+
+    private func send(_ message: AnyMessage) {
+        guard let connection else { return }
+        Task { try? await connection.send(message) }
     }
 
     private func run(host: String, port: UInt16, pin: Data) async {
@@ -42,6 +69,7 @@ final class SessionViewModel: ObservableObject {
         let endpoint = NWEndpoint.hostPort(host: NWEndpoint.Host(host), port: nwPort)
         do {
             let connection = try await PortholeConnection.connect(to: endpoint, pinnedCertificateSHA256: pin)
+            self.connection = connection
             var client = ClientHandshake(
                 deviceID: UIDevice.current.identifierForVendor?.uuidString ?? "ios-client",
                 deviceName: UIDevice.current.name,
@@ -73,8 +101,10 @@ final class SessionViewModel: ObservableObject {
                 }
             }
             if status == .streaming { status = .idle } // connection closed
+            self.connection = nil
         } catch {
             status = .failed("\(error)")
+            self.connection = nil
         }
     }
 

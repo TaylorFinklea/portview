@@ -37,16 +37,72 @@ final class SampleBufferUIView: UIView {
     var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
 }
 
-struct VideoLayerView: UIViewRepresentable {
+/// Video display plus trackpad-style input: one-finger pan moves the cursor, two-finger
+/// pan scrolls, tap clicks. Deltas are forwarded incrementally as the gesture updates.
+struct TrackpadVideoView: UIViewRepresentable {
     let renderer: VideoRenderer
+    let onMove: (CGFloat, CGFloat) -> Void
+    let onScroll: (CGFloat, CGFloat) -> Void
+    let onClick: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onMove: onMove, onScroll: onScroll, onClick: onClick)
+    }
 
     func makeUIView(context: Context) -> SampleBufferUIView {
         let view = SampleBufferUIView()
         view.backgroundColor = .black
         view.displayLayer.videoGravity = .resizeAspect
+        view.isUserInteractionEnabled = true
         renderer.attach(view.displayLayer)
+
+        let coordinator = context.coordinator
+        let move = UIPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleMove(_:)))
+        move.maximumNumberOfTouches = 1
+        let scroll = UIPanGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleScroll(_:)))
+        scroll.minimumNumberOfTouches = 2
+        scroll.maximumNumberOfTouches = 2
+        let tap = UITapGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleTap(_:)))
+        view.addGestureRecognizer(move)
+        view.addGestureRecognizer(scroll)
+        view.addGestureRecognizer(tap)
         return view
     }
 
     func updateUIView(_ uiView: SampleBufferUIView, context: Context) {}
+
+    @MainActor
+    final class Coordinator: NSObject {
+        let onMove: (CGFloat, CGFloat) -> Void
+        let onScroll: (CGFloat, CGFloat) -> Void
+        let onClick: () -> Void
+        private var lastMove: CGPoint = .zero
+        private var lastScroll: CGPoint = .zero
+
+        init(onMove: @escaping (CGFloat, CGFloat) -> Void,
+             onScroll: @escaping (CGFloat, CGFloat) -> Void,
+             onClick: @escaping () -> Void) {
+            self.onMove = onMove
+            self.onScroll = onScroll
+            self.onClick = onClick
+        }
+
+        @objc func handleMove(_ gesture: UIPanGestureRecognizer) {
+            let translation = gesture.translation(in: gesture.view)
+            if gesture.state == .began { lastMove = .zero }
+            onMove(translation.x - lastMove.x, translation.y - lastMove.y)
+            lastMove = translation
+        }
+
+        @objc func handleScroll(_ gesture: UIPanGestureRecognizer) {
+            let translation = gesture.translation(in: gesture.view)
+            if gesture.state == .began { lastScroll = .zero }
+            onScroll(translation.x - lastScroll.x, translation.y - lastScroll.y)
+            lastScroll = translation
+        }
+
+        @objc func handleTap(_ gesture: UITapGestureRecognizer) {
+            onClick()
+        }
+    }
 }

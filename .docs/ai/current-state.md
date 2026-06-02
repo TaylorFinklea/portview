@@ -28,6 +28,9 @@
 - Shared packages gated for iOS: TLSIdentity openssl/Process code is `#if os(macOS)` (client never mints an identity), so PortholeProtocol/Transport/Media compile for iOS.
 - iOS client app (`apps/PortholeClient`, xcodegen): SCAFFOLDED + **compiles for iOS 26 simulator (BUILD SUCCEEDED)**. SwiftUI connect screen (IP/port/pin) + SessionViewModel (connect → client handshake → receive VideoFrame → deserialize → enqueue) + AVSampleBufferDisplayLayer renderer. Generated .xcodeproj is gitignored — run `xcodegen generate` in apps/PortholeClient. Run guide: `apps/README.md`.
 - **M0 walking-skeleton scaffold COMPLETE and compiling end to end.** Not yet run on real hardware (needs Screen-Recording grant on the Mac + iPhone/Xcode for the client). To watch live: `swift run porthole-host` (grant Screen Recording, re-run), then run the iOS app and enter the printed IP/port/pin.
+- **M1 control IMPLEMENTED + compiling (full suite 46 tests / 17 suites green):** input protocol messages (pointerMove/pointerButton/scroll/typeText — TDD); host `InputInjector` maps them to CGEvents (relative cursor w/ clamping, click, scroll, unicode type) — host `serve()` now handles input concurrently with the video pump; needs Accessibility grant (host prints a hint). Client: `TrackpadVideoView` — 1-finger drag = move, tap = click, 2-finger = scroll → input messages. iOS app bundle id = `dev.finklea.porthole`, automatic signing team K7CBQW6MPG.
+- Fixed a flaky `SecPKCS12Import` race under concurrent test suites by serializing it with a lock (`TLSIdentity.importLock`); 3 consecutive full-suite runs green.
+- Host needs BOTH grants to fully work: Screen Recording (capture) + Accessibility (input). Both attach to the terminal app for `swift run`.
 - Next (M1): trackpad input/control (input lane + CGEvent on host), Bonjour discovery + QR pairing (replace manual IP/pin), then audio/clipboard/files/multi-monitor; revisit QUIC + Metal renderer.
 
 ## Blockers
