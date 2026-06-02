@@ -102,6 +102,10 @@ struct PortviewHostApp {
         injector.onCursorMoved = { nx, ny in
             Task { try? await connection.send(.cursorPosition(CursorPosition(normalizedX: nx, normalizedY: ny))) }
         }
+        let clipboard = ClipboardSync()
+        clipboard.start { text in
+            Task { try? await connection.send(.clipboardUpdate(ClipboardUpdate(text: text))) }
+        }
         var server = ServerHandshake(
             displays: [DisplayInfo(id: UInt32(display.displayID), name: "Display",
                                    width: UInt32(display.width), height: UInt32(display.height), scaleX100: 100)],
@@ -123,15 +127,19 @@ struct PortviewHostApp {
                 do { try server.handle(start) } catch { print("startSession error: \(error)"); return }
                 print("Client streaming; starting capture + input.")
                 videoTask = Task { await pumpVideo(connection, display: display) }
-            case .pointerMove, .pointerButton, .scroll, .typeText:
+            case .pointerMove, .pointerButton, .scroll, .typeText, .keyEvent:
                 injector.handle(message)
+            case .clipboardUpdate(let update):
+                clipboard.applyRemote(update.text)
             case .bye:
+                clipboard.stop()
                 videoTask?.cancel()
                 return
             default:
                 break
             }
         }
+        clipboard.stop()
         videoTask?.cancel()
     }
 

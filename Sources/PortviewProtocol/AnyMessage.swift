@@ -12,6 +12,7 @@ public enum AnyMessage: Equatable, Sendable {
     case typeText(TypeText)
     case keyEvent(KeyEvent)
     case cursorPosition(CursorPosition)
+    case clipboardUpdate(ClipboardUpdate)
 
     public var messageType: MessageType {
         switch self {
@@ -27,6 +28,7 @@ public enum AnyMessage: Equatable, Sendable {
         case .typeText: .typeText
         case .keyEvent: .keyEvent
         case .cursorPosition: .cursorPosition
+        case .clipboardUpdate: .clipboardUpdate
         }
     }
 }

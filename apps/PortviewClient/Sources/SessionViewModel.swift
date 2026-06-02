@@ -91,6 +91,13 @@ final class SessionViewModel: ObservableObject {
         send(.keyEvent(KeyEvent(key: key)))
     }
 
+    /// Push the iPhone's clipboard text to the Mac (user-initiated; iOS restricts auto-reads).
+    func pasteToHost() {
+        if let text = UIPasteboard.general.string, !text.isEmpty {
+            send(.clipboardUpdate(ClipboardUpdate(text: text)))
+        }
+    }
+
     private func send(_ message: AnyMessage) {
         guard let connection else { return }
         Task { try? await connection.send(message) }
@@ -126,6 +133,8 @@ final class SessionViewModel: ObservableObject {
                     }
                 case .cursorPosition(let cursor):
                     cursorNormalized = CGPoint(x: cursor.normalizedX, y: cursor.normalizedY)
+                case .clipboardUpdate(let update):
+                    UIPasteboard.general.string = update.text
                 case .error(let error):
                     status = .failed("Host error: \(error.message)")
                     return

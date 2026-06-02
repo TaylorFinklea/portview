@@ -52,6 +52,8 @@ struct ContentView: View {
                         Button { zoom = 1 } label: { Image(systemName: "minus.magnifyingglass") }
                             .padding(8).background(.ultraThinMaterial, in: Circle())
                     }
+                    Button { session.pasteToHost() } label: { Image(systemName: "doc.on.clipboard") }
+                        .padding(8).background(.ultraThinMaterial, in: Circle())
                     Button { keyboardActive.toggle() } label: {
                         Image(systemName: keyboardActive ? "keyboard.chevron.compact.down" : "keyboard")
                     }

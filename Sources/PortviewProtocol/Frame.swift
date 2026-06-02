@@ -28,6 +28,7 @@ public enum Frame {
         case .typeText(let m): encode(m)
         case .keyEvent(let m): encode(m)
         case .cursorPosition(let m): encode(m)
+        case .clipboardUpdate(let m): encode(m)
         }
     }
 
@@ -59,6 +60,7 @@ public enum Frame {
         case .typeText: return .typeText(try TypeText(from: &r))
         case .keyEvent: return .keyEvent(try KeyEvent(from: &r))
         case .cursorPosition: return .cursorPosition(try CursorPosition(from: &r))
+        case .clipboardUpdate: return .clipboardUpdate(try ClipboardUpdate(from: &r))
         }
     }
 }

@@ -12,4 +12,5 @@ public enum MessageType: UInt8, Sendable {
     case typeText = 10
     case keyEvent = 11
     case cursorPosition = 12
+    case clipboardUpdate = 13
 }
