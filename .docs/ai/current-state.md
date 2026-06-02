@@ -20,8 +20,9 @@
 
 - Toolchain: Swift 6.2, Xcode 26.0.1, macOS 26.3.1 (Apple Silicon). Confirmed.
 - `PortholeProtocol` package: builds clean, `swift test` = 31/31 green (9 suites). Wire protocol complete — binary primitives, 6 M0 messages, self-delimiting framing, FrameDecoder stream reassembly, client/server handshake state machines, e2e handshake-over-frames. (Plan: `docs/superpowers/plans/2026-06-02-porthole-protocol.md`, executed.)
-- `PortholeTransport`: plan written (`docs/superpowers/plans/2026-06-02-porthole-transport.md`), NOT yet implemented. Next action = execute its Task 1 (verified QUIC loopback spike: TLS identity + NWConnection QUIC params).
-- Next: execute transport plan (spike → MessageChannel → PortholeConnection lanes over QUIC).
+- `PortholeTransport`: IMPLEMENTED. 36 tests / 13 suites all green. TLS identity (RSA self-signed via openssl→PKCS#12→SecPKCS12Import), QUIC loopback spike (one-way, proves QUIC works), cert pinning (SHA-256 of leaf DER), MessageChannel, and `PortholeConnection`/`PortholeListener` carrying the full handshake + a VideoFrame over a real localhost connection.
+- **POC transport = TLS-over-TCP** (see decisions.md): bidirectional, unambiguous; QUIC's bare-NWConnection+listener model double-delivers connections and the reply-send hangs (needs the NWConnectionGroup/NWMultiplexGroup multiplex model, deferred). PortholeConnection is transport-agnostic, so swapping back to QUIC is one line. QUICParameters + the QUIC loopback spike remain as proven groundwork.
+- Next: PortholeMedia — VideoToolbox HEVC encode + decode; then a synthetic-frame encode→connection→decode pipeline test = the autonomous POC of the core. Then host capture (ScreenCaptureKit) + client render (Metal), which need your Mac (Screen-Recording grant) + device.
 
 ## Blockers
 

@@ -19,15 +19,12 @@ public enum QUICParameters {
         return NWParameters(quic: q)
     }
 
-    /// Client parameters. M0 spike trusts the host's self-signed cert unconditionally;
-    /// M1 replaces the verify block with QR-pinned-fingerprint validation.
-    public static func client() -> NWParameters {
+    /// Client parameters that pin the host's certificate by SHA-256 of its DER encoding.
+    /// The handshake succeeds only if the presented leaf certificate matches `pinnedCertificateSHA256`.
+    /// (M0/POC: the pin is computed from the host's generated identity; M1 carries it in the pairing QR.)
+    public static func client(pinnedCertificateSHA256: Data) -> NWParameters {
         let q = baseOptions()
-        sec_protocol_options_set_verify_block(
-            q.securityProtocolOptions,
-            { _, _, complete in complete(true) },
-            DispatchQueue(label: "porthole.tls.verify")
-        )
+        CertificatePinning.install(on: q.securityProtocolOptions, pinnedCertificateSHA256: pinnedCertificateSHA256)
         return NWParameters(quic: q)
     }
 }

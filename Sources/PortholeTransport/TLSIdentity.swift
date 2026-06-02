@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import CryptoKit
 
 /// Errors generating or importing a TLS identity.
 public enum TLSIdentityError: Error {
@@ -27,6 +28,18 @@ public struct TLSIdentity {
             throw TLSIdentityError.secIdentityBridgeFailed
         }
         return identity
+    }
+
+    /// SHA-256 of the leaf certificate's DER encoding — the value a client pins.
+    /// (In M1 this is encoded into the pairing QR; the client pins it before connecting.)
+    public func certificateSHA256() throws -> Data {
+        var certificate: SecCertificate?
+        let status = SecIdentityCopyCertificate(secIdentity, &certificate)
+        guard status == errSecSuccess, let certificate else {
+            throw TLSIdentityError.secIdentityBridgeFailed
+        }
+        let der = SecCertificateCopyData(certificate) as Data
+        return Data(SHA256.hash(data: der))
     }
 
     /// Generate a fresh, ephemeral self-signed P-256 identity via the system `openssl`,

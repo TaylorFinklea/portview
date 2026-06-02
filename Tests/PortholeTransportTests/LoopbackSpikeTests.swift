@@ -4,22 +4,6 @@ import Network
 @testable import PortholeTransport
 @testable import PortholeProtocol
 
-private struct TimeoutError: Error {}
-
-/// Run `operation`, failing with `TimeoutError` if it outlasts `duration`.
-private func withTimeout<T: Sendable>(
-    _ duration: Duration,
-    _ operation: @escaping @Sendable () async throws -> T
-) async throws -> T {
-    try await withThrowingTaskGroup(of: T.self) { group in
-        group.addTask { try await operation() }
-        group.addTask { try await Task.sleep(for: duration); throw TimeoutError() }
-        let result = try await group.next()!
-        group.cancelAll()
-        return result
-    }
-}
-
 @Suite struct LoopbackSpikeTests {
     /// Proves a real QUIC connection on 127.0.0.1 carries one frame-encoded message
     /// end to end. A single `NWConnection` with QUIC options is one bidirectional
@@ -60,8 +44,10 @@ private func withTimeout<T: Sendable>(
         }
 
         // --- CLIENT: a single QUIC connection = one bidirectional stream ---
+        // Pin the host's certificate (computed from its identity; M1 carries it in the QR).
+        let pin = try identity.certificateSHA256()
         let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: port)
-        let connection = NWConnection(to: endpoint, using: QUICParameters.client())
+        let connection = NWConnection(to: endpoint, using: QUICParameters.client(pinnedCertificateSHA256: pin))
 
         try await withTimeout(.seconds(10)) {
             try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
