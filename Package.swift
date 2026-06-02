@@ -7,6 +7,7 @@ let package = Package(
     products: [
         .library(name: "PortholeProtocol", targets: ["PortholeProtocol"]),
         .library(name: "PortholeTransport", targets: ["PortholeTransport"]),
+        .library(name: "PortholeMedia", targets: ["PortholeMedia"]),
     ],
     targets: [
         .target(name: "PortholeProtocol"),
@@ -19,5 +20,7 @@ let package = Package(
             name: "PortholeTransportTests",
             dependencies: ["PortholeTransport", "PortholeProtocol"]
         ),
+        .target(name: "PortholeMedia"),
+        .testTarget(name: "PortholeMediaTests", dependencies: ["PortholeMedia"]),
     ]
 )
