@@ -68,6 +68,8 @@ struct TrackpadVideoView: UIViewRepresentable {
         scroll.maximumNumberOfTouches = 2
         let tap = UITapGestureRecognizer(target: coordinator, action: #selector(Coordinator.handleTap(_:)))
         let pinch = UIPinchGestureRecognizer(target: coordinator, action: #selector(Coordinator.handlePinch(_:)))
+        coordinator.scrollRecognizer = scroll
+        coordinator.pinchRecognizer = pinch
         for recognizer in [move, scroll, tap, pinch] as [UIGestureRecognizer] {
             recognizer.delegate = coordinator
             view.addGestureRecognizer(recognizer)
@@ -86,9 +88,16 @@ struct TrackpadVideoView: UIViewRepresentable {
         let onClick: () -> Void
         let onZoom: (CGFloat) -> Void
         var currentZoom: CGFloat = 1
+        weak var scrollRecognizer: UIPanGestureRecognizer?
+        weak var pinchRecognizer: UIPinchGestureRecognizer?
         private var lastMove: CGPoint = .zero
         private var lastScroll: CGPoint = .zero
         private var pinchStart: CGFloat = 1
+
+        /// A two-finger gesture locks to exactly one intent on its first decisive movement,
+        /// so scrolling never doubles as zooming (and vice versa) within the same gesture.
+        private enum TwoFingerMode { case undecided, scroll, zoom }
+        private var twoFingerMode: TwoFingerMode = .undecided
 
         init(onMove: @escaping (CGFloat, CGFloat) -> Void,
              onScroll: @escaping (CGFloat, CGFloat) -> Void,
@@ -109,9 +118,24 @@ struct TrackpadVideoView: UIViewRepresentable {
 
         @objc func handleScroll(_ gesture: UIPanGestureRecognizer) {
             let translation = gesture.translation(in: nil) // window space: zoom-independent
-            if gesture.state == .began { lastScroll = .zero }
-            onScroll(translation.x - lastScroll.x, translation.y - lastScroll.y)
-            lastScroll = translation
+            switch gesture.state {
+            case .began:
+                lastScroll = translation
+            case .changed:
+                decideTwoFingerMode()
+                guard twoFingerMode == .scroll else {
+                    // Not (yet) scrolling — keep the baseline current so a late commit
+                    // starts from a zero delta instead of jumping.
+                    lastScroll = translation
+                    return
+                }
+                onScroll(translation.x - lastScroll.x, translation.y - lastScroll.y)
+                lastScroll = translation
+            case .ended, .cancelled, .failed:
+                resetTwoFingerIfDone()
+            default:
+                break
+            }
         }
 
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
@@ -120,9 +144,46 @@ struct TrackpadVideoView: UIViewRepresentable {
 
         @objc func handlePinch(_ gesture: UIPinchGestureRecognizer) {
             switch gesture.state {
-            case .began: pinchStart = currentZoom
-            case .changed, .ended: onZoom(pinchStart * gesture.scale)
-            default: break
+            case .began:
+                pinchStart = currentZoom
+            case .changed:
+                decideTwoFingerMode()
+                guard twoFingerMode == .zoom else {
+                    // Rebase so committing to zoom later doesn't snap the scale.
+                    pinchStart = currentZoom / gesture.scale
+                    return
+                }
+                onZoom(pinchStart * gesture.scale)
+            case .ended:
+                if twoFingerMode == .zoom { onZoom(pinchStart * gesture.scale) }
+                resetTwoFingerIfDone()
+            case .cancelled, .failed:
+                resetTwoFingerIfDone()
+            default:
+                break
+            }
+        }
+
+        /// Commit the two-finger gesture to scroll or zoom once one signal clearly dominates.
+        private func decideTwoFingerMode() {
+            guard twoFingerMode == .undecided else { return }
+            let translation = scrollRecognizer?.translation(in: nil) ?? .zero
+            let centroidDelta = hypot(translation.x, translation.y)
+            let scaleDelta = abs((pinchRecognizer?.scale ?? 1) - 1)
+            // Require a minimum signal before committing to avoid jitter at touch-down.
+            guard scaleDelta >= 0.04 || centroidDelta >= 12 else { return }
+            // ~200 converts a scale fraction into a comparable point magnitude.
+            twoFingerMode = (scaleDelta * 200 > centroidDelta) ? .zoom : .scroll
+        }
+
+        /// Clear the lock once neither two-finger recognizer is active.
+        private func resetTwoFingerIfDone() {
+            let active: (UIGestureRecognizer?) -> Bool = { recognizer in
+                guard let state = recognizer?.state else { return false }
+                return state == .began || state == .changed
+            }
+            if !active(scrollRecognizer) && !active(pinchRecognizer) {
+                twoFingerMode = .undecided
             }
         }
 
