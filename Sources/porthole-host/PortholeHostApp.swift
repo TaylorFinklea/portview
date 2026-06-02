@@ -1,6 +1,7 @@
 import Foundation
 @preconcurrency import ScreenCaptureKit
 import CoreMedia
+import CoreVideo
 import CoreGraphics
 import ApplicationServices
 import PortholeProtocol
@@ -131,31 +132,59 @@ struct PortholeHostApp {
         videoTask?.cancel()
     }
 
-    /// Capture → HEVC encode → serialize → send, until the capture stream ends.
+    /// Capture → HEVC encode → serialize → send. The encoder is built to match the actual
+    /// pixel-buffer dimensions (points vs pixels differ on Retina), and a single bad frame is
+    /// skipped (re-requesting a keyframe) rather than aborting the whole stream.
     static func pumpVideo(_ connection: PortholeConnection, display: SCDisplay) async {
-        let width = display.width
-        let height = display.height
+        let capture = CaptureEngine(width: display.width, height: display.height)
         do {
-            let encoder = try VideoEncoder(width: width, height: height)
-            let capture = CaptureEngine(width: width, height: height)
             try capture.start(display: display, maxFPS: 60)
-            var sequence: UInt64 = 0
-            for await frame in capture.frames {
-                let encoded = try await encoder.encode(frame.pixelBuffer, presentationTime: frame.pts, forceKeyframe: sequence == 0)
+        } catch {
+            print("capture start error: \(error)")
+            return
+        }
+
+        var encoder: VideoEncoder?
+        var encoderWidth = 0
+        var encoderHeight = 0
+        var sequence: UInt64 = 0
+        var needsKeyframe = true
+
+        for await frame in capture.frames {
+            let bufferWidth = CVPixelBufferGetWidth(frame.pixelBuffer)
+            let bufferHeight = CVPixelBufferGetHeight(frame.pixelBuffer)
+            if encoder == nil || bufferWidth != encoderWidth || bufferHeight != encoderHeight {
+                do {
+                    encoder = try VideoEncoder(width: bufferWidth, height: bufferHeight)
+                    encoderWidth = bufferWidth
+                    encoderHeight = bufferHeight
+                    needsKeyframe = true
+                    print("Encoder ready for \(bufferWidth)x\(bufferHeight) buffers.")
+                } catch {
+                    print("encoder create error: \(error)")
+                    continue
+                }
+            }
+            guard let activeEncoder = encoder else { continue }
+
+            do {
+                let encoded = try await activeEncoder.encode(frame.pixelBuffer, presentationTime: frame.pts, forceKeyframe: needsKeyframe)
                 let sample = try VideoSampleSerializer.serialize(encoded)
                 sequence += 1
+                needsKeyframe = false
                 try await connection.send(.videoFrame(VideoFrame(
                     sequence: sequence,
                     ptsMicros: UInt64(max(0, CMTimeGetSeconds(frame.pts)) * 1_000_000),
                     isKeyframe: sample.isKeyframe,
                     displayID: UInt32(display.displayID),
-                    width: UInt32(width), height: UInt32(height),
+                    width: UInt32(bufferWidth), height: UInt32(bufferHeight),
                     data: sample.serialized()
                 )))
+            } catch {
+                needsKeyframe = true
+                if sequence == 0 { print("frame skipped (will retry as keyframe): \(error)") }
             }
-            capture.stop()
-        } catch {
-            print("stream error: \(error)")
         }
+        capture.stop()
     }
 }
