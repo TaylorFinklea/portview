@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 import PortviewProtocol
 import PortviewTransport
 
@@ -12,6 +13,7 @@ struct ContentView: View {
     @State private var port = ""
     @State private var pin = ""
     @State private var showScanner = false
+    @State private var showFileImporter = false
     @State private var zoom: CGFloat = 1
     @State private var keyboardActive = false
     /// Sticky modifiers armed for the next keystroke (cleared after it's sent).
@@ -90,6 +92,8 @@ struct ContentView: View {
                             }
                             Button { session.pasteToHost() } label: { Image(systemName: "doc.on.clipboard") }
                                 .padding(8).background(.ultraThinMaterial, in: Circle())
+                            Button { showFileImporter = true } label: { Image(systemName: "arrow.up.doc") }
+                                .padding(8).background(.ultraThinMaterial, in: Circle())
                             Button { keyboardActive.toggle() } label: {
                                 Image(systemName: keyboardActive ? "keyboard.chevron.compact.down" : "keyboard")
                             }
@@ -119,8 +123,27 @@ struct ContentView: View {
                                 Spacer()
                             }
                         }
+
+                        if let transferStatus = session.transferStatus {
+                            HStack {
+                                Text(transferStatus)
+                                    .font(.caption2)
+                                    .padding(.horizontal, 10).padding(.vertical, 6)
+                                    .background(.ultraThinMaterial, in: Capsule())
+                                Spacer()
+                            }
+                        }
                     }
                     .padding()
+                    .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item]) { result in
+                        if case .success(let url) = result {
+                            guard url.startAccessingSecurityScopedResource() else { return }
+                            defer { url.stopAccessingSecurityScopedResource() }
+                            if let data = try? Data(contentsOf: url) {
+                                session.sendFile(name: url.lastPathComponent, data: data)
+                            }
+                        }
+                    }
                 }
             }
             .ignoresSafeArea()

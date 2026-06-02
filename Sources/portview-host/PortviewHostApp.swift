@@ -111,6 +111,7 @@ struct PortviewHostApp {
         clipboard.start { text in
             Task { try? await connection.send(.clipboardUpdate(ClipboardUpdate(text: text))) }
         }
+        let fileReceiver = FileReceiver()
 
         // Injector and video pump are (re)bound to the active display; switching re-targets both.
         var injector = makeInjector(for: firstDisplay, connection: connection)
@@ -145,8 +146,13 @@ struct PortviewHostApp {
                 injector.handle(message)
             case .clipboardUpdate(let update):
                 clipboard.applyRemote(update.text)
+            case .fileOffer(let offer):
+                fileReceiver.offer(offer)
+            case .fileChunk(let chunk):
+                fileReceiver.chunk(chunk)
             case .bye:
                 clipboard.stop()
+                fileReceiver.cancelAll()
                 videoTask?.cancel()
                 return
             default:
@@ -154,6 +160,7 @@ struct PortviewHostApp {
             }
         }
         clipboard.stop()
+        fileReceiver.cancelAll()
         videoTask?.cancel()
     }
 

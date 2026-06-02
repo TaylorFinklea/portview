@@ -14,6 +14,8 @@ public enum AnyMessage: Equatable, Sendable {
     case cursorPosition(CursorPosition)
     case clipboardUpdate(ClipboardUpdate)
     case switchDisplay(SwitchDisplay)
+    case fileOffer(FileOffer)
+    case fileChunk(FileChunk)
 
     public var messageType: MessageType {
         switch self {
@@ -31,6 +33,8 @@ public enum AnyMessage: Equatable, Sendable {
         case .cursorPosition: .cursorPosition
         case .clipboardUpdate: .clipboardUpdate
         case .switchDisplay: .switchDisplay
+        case .fileOffer: .fileOffer
+        case .fileChunk: .fileChunk
         }
     }
 }

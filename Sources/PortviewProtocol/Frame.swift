@@ -30,6 +30,8 @@ public enum Frame {
         case .cursorPosition(let m): encode(m)
         case .clipboardUpdate(let m): encode(m)
         case .switchDisplay(let m): encode(m)
+        case .fileOffer(let m): encode(m)
+        case .fileChunk(let m): encode(m)
         }
     }
 
@@ -63,6 +65,8 @@ public enum Frame {
         case .cursorPosition: return .cursorPosition(try CursorPosition(from: &r))
         case .clipboardUpdate: return .clipboardUpdate(try ClipboardUpdate(from: &r))
         case .switchDisplay: return .switchDisplay(try SwitchDisplay(from: &r))
+        case .fileOffer: return .fileOffer(try FileOffer(from: &r))
+        case .fileChunk: return .fileChunk(try FileChunk(from: &r))
         }
     }
 }

@@ -20,6 +20,8 @@ final class SessionViewModel: ObservableObject {
     /// Displays the host offered (from ServerHello) and which one is currently streaming.
     @Published var displays: [DisplayInfo] = []
     @Published var activeDisplayID: UInt32 = 0
+    /// Transient status of an in-flight file push (nil when none).
+    @Published var transferStatus: String?
     let renderer = VideoRenderer()
     private var task: Task<Void, Never>?
     private var connection: PortviewConnection?
@@ -115,6 +117,31 @@ final class SessionViewModel: ObservableObject {
     func pasteToHost() {
         if let text = UIPasteboard.general.string, !text.isEmpty {
             send(.clipboardUpdate(ClipboardUpdate(text: text)))
+        }
+    }
+
+    /// Push a file to the Mac (saved to its ~/Downloads). Announce it, then stream ordered
+    /// 64 KB chunks within one Task so they stay in order and interleave with live video.
+    func sendFile(name: String, data: Data) {
+        guard let connection else { return }
+        let transferID = UInt32.random(in: 1...UInt32.max)
+        let bytes = [UInt8](data)
+        transferStatus = "Sending \(name)…"
+        Task { [weak self] in
+            do {
+                try await connection.send(.fileOffer(FileOffer(transferID: transferID, name: name, size: UInt64(bytes.count))))
+                let chunkSize = 64 * 1024
+                var offset = 0
+                repeat {
+                    let end = min(offset + chunkSize, bytes.count)
+                    let isLast = end >= bytes.count
+                    try await connection.send(.fileChunk(FileChunk(transferID: transferID, isLast: isLast, data: Array(bytes[offset..<end]))))
+                    offset = end
+                } while offset < bytes.count
+                self?.transferStatus = "Sent \(name)"
+            } catch {
+                self?.transferStatus = "Send failed: \(name)"
+            }
         }
     }
 
