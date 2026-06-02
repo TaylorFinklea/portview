@@ -37,13 +37,13 @@ final class SampleBufferUIView: UIView {
     var displayLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
 }
 
-/// Video display plus trackpad-style input and pinch-to-zoom that follows the cursor.
-/// One-finger pan moves the cursor, two-finger pan scrolls, tap clicks, pinch zooms.
-/// When zoomed, the layer transform keeps the host cursor (`cursor`, normalized) centered.
+/// Video display plus trackpad-style input: one-finger pan moves the cursor, two-finger pan
+/// scrolls, tap clicks, pinch reports a zoom factor. The actual zoom/pan render and cursor
+/// centering are applied by the parent in SwiftUI (`scaleEffect`/`offset`), which is reliable;
+/// a raw transform on this view's backing layer is fought by layout.
 struct TrackpadVideoView: UIViewRepresentable {
     let renderer: VideoRenderer
     let zoom: CGFloat
-    let cursor: CGPoint            // normalized 0…1
     let onMove: (CGFloat, CGFloat) -> Void
     let onScroll: (CGFloat, CGFloat) -> Void
     let onClick: () -> Void
@@ -77,23 +77,6 @@ struct TrackpadVideoView: UIViewRepresentable {
 
     func updateUIView(_ uiView: SampleBufferUIView, context: Context) {
         context.coordinator.currentZoom = zoom
-        let bounds = uiView.bounds
-        guard bounds.width > 0, bounds.height > 0 else { return }
-        let z = max(1, zoom)
-        let limitX = (z - 1) * bounds.width / 2
-        let limitY = (z - 1) * bounds.height / 2
-        let focusX = cursor.x * bounds.width
-        let focusY = cursor.y * bounds.height
-        // Map the cursor toward the view centre at scale z, clamped so no empty edges show.
-        let tx = min(limitX, max(-limitX, z * (bounds.midX - focusX)))
-        let ty = min(limitY, max(-limitY, z * (bounds.midY - focusY)))
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        var transform = CATransform3DIdentity
-        transform = CATransform3DTranslate(transform, tx, ty, 0)
-        transform = CATransform3DScale(transform, z, z, 1)
-        uiView.displayLayer.transform = transform
-        CATransaction.commit()
     }
 
     @MainActor

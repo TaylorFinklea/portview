@@ -13,27 +13,36 @@ struct ContentView: View {
 
     var body: some View {
         if session.status == .streaming {
-            ZStack(alignment: .top) {
-                TrackpadVideoView(
-                    renderer: session.renderer,
-                    zoom: zoom,
-                    cursor: session.cursorNormalized,
-                    onMove: { dx, dy in session.sendPointerMove(dx: dx, dy: dy) },
-                    onScroll: { dx, dy in session.sendScroll(dx: dx, dy: dy) },
-                    onClick: { session.sendClick() },
-                    onZoom: { zoom = min(4, max(1, $0)) }
-                )
-                .ignoresSafeArea()
+            GeometryReader { geo in
+                let size = geo.size
+                let z = zoom
+                let limitX = (z - 1) * size.width / 2
+                let limitY = (z - 1) * size.height / 2
+                let panX = min(limitX, max(-limitX, z * (size.width / 2 - session.cursorNormalized.x * size.width)))
+                let panY = min(limitY, max(-limitY, z * (size.height / 2 - session.cursorNormalized.y * size.height)))
 
-                // Invisible first-responder that surfaces the system keyboard when toggled.
-                KeyboardCaptureView(
-                    isActive: $keyboardActive,
-                    onText: { session.sendText($0) },
-                    onSpecial: { session.sendKey($0) }
-                )
-                .frame(width: 0, height: 0)
+                ZStack(alignment: .top) {
+                    TrackpadVideoView(
+                        renderer: session.renderer,
+                        zoom: zoom,
+                        onMove: { dx, dy in session.sendPointerMove(dx: dx, dy: dy) },
+                        onScroll: { dx, dy in session.sendScroll(dx: dx, dy: dy) },
+                        onClick: { session.sendClick() },
+                        onZoom: { zoom = min(4, max(1, $0)) }
+                    )
+                    .frame(width: size.width, height: size.height)
+                    .scaleEffect(z, anchor: .center)
+                    .offset(x: panX, y: panY)
 
-                HStack(spacing: 10) {
+                    // Invisible first-responder that surfaces the system keyboard when toggled.
+                    KeyboardCaptureView(
+                        isActive: $keyboardActive,
+                        onText: { session.sendText($0) },
+                        onSpecial: { session.sendKey($0) }
+                    )
+                    .frame(width: 0, height: 0)
+
+                    HStack(spacing: 10) {
                     Text("drag·move  tap·click  2-finger·scroll  pinch·zoom")
                         .font(.caption2)
                         .padding(.horizontal, 10).padding(.vertical, 6)
@@ -51,8 +60,10 @@ struct ContentView: View {
                         .padding(.horizontal, 14).padding(.vertical, 8)
                         .background(.ultraThinMaterial, in: Capsule())
                 }
-                .padding()
+                    .padding()
+                }
             }
+            .ignoresSafeArea()
         } else {
             NavigationStack {
                 Form {
