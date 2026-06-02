@@ -24,6 +24,7 @@ final class SessionViewModel: ObservableObject {
     @Published var transferStatus: String?
     let renderer = MetalVideoRenderer()
     private let decoder = VideoDecoder()
+    private let audioPlayer = AudioPlayer()
     private var task: Task<Void, Never>?
     private var connection: PortviewConnection?
     /// Mac display size in points (from ServerHello); used to predict the cursor locally.
@@ -67,6 +68,7 @@ final class SessionViewModel: ObservableObject {
         status = .idle
         displays = []
         activeDisplayID = 0
+        audioPlayer.stop()
     }
 
     /// Re-target the live stream to another of the host's displays (no reconnect).
@@ -186,6 +188,8 @@ final class SessionViewModel: ObservableObject {
                     cursorNormalized = CGPoint(x: cursor.normalizedX, y: cursor.normalizedY)
                 case .clipboardUpdate(let update):
                     UIPasteboard.general.string = update.text
+                case .audioFrame(let audio):
+                    audioPlayer.play(sampleRate: Double(audio.sampleRate), channels: UInt32(audio.channels), planarData: audio.data)
                 case .error(let error):
                     status = .failed("Host error: \(error.message)")
                     return
@@ -194,9 +198,11 @@ final class SessionViewModel: ObservableObject {
                 }
             }
             if status == .streaming { status = .idle } // connection closed
+            audioPlayer.stop()
             self.connection = nil
         } catch {
             status = .failed("\(error)")
+            audioPlayer.stop()
             self.connection = nil
         }
     }

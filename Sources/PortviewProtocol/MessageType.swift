@@ -16,4 +16,5 @@ public enum MessageType: UInt8, Sendable {
     case switchDisplay = 14
     case fileOffer = 15
     case fileChunk = 16
+    case audioFrame = 17
 }

@@ -185,6 +185,16 @@ struct PortviewHostApp {
             return
         }
 
+        // Forward system audio concurrently with video (same connection, separate messages).
+        let audioTask = Task {
+            for await audio in capture.audioFrames {
+                try? await connection.send(.audioFrame(AudioFrame(
+                    sampleRate: audio.sampleRate, channels: audio.channels,
+                    ptsMicros: audio.ptsMicros, data: audio.data)))
+            }
+        }
+        defer { audioTask.cancel() }
+
         var encoder: VideoEncoder?
         var encoderWidth = 0
         var encoderHeight = 0
