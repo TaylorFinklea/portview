@@ -1,6 +1,6 @@
 name: PortholeClient
 options:
-  bundleIdPrefix: app.porthole
+  bundleIdPrefix: dev.finklea
   deploymentTarget:
     iOS: "26.0"
 packages:
@@ -23,11 +23,12 @@ targets:
     settings:
       base:
         GENERATE_INFOPLIST_FILE: YES
-        PRODUCT_BUNDLE_IDENTIFIER: app.porthole.client
+        PRODUCT_BUNDLE_IDENTIFIER: dev.finklea.porthole
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: "Porthole connects to your Mac on your local network to mirror its screen."
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         TARGETED_DEVICE_FAMILY: "1,2"
-        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: K7CBQW6MPG
 schemes:
   PortholeClient:
     build:
