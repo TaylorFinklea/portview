@@ -1,6 +1,7 @@
 import Foundation
 @preconcurrency import ScreenCaptureKit
 import CoreMedia
+import CoreGraphics
 import PortholeProtocol
 import PortholeTransport
 import PortholeMedia
@@ -12,34 +13,70 @@ import PortholeMedia
 /// permission (System Settings ▸ Privacy & Security ▸ Screen Recording); grant it and re-run.
 @main
 struct PortholeHostApp {
-    static func main() async throws {
-        let content = try await SCShareableContent.current
-        guard let display = content.displays.first else {
-            print("No display available to capture.")
+    static func main() async {
+        // ScreenCaptureKit needs Screen-Recording permission — even to enumerate displays.
+        // Request/preflight it first; for a `swift run` binary the grant attaches to your
+        // terminal app. If it was already declined, this returns false without re-prompting.
+        guard CGRequestScreenCaptureAccess() else {
+            printScreenRecordingHelp()
             return
         }
-        print("Display \(display.displayID): \(display.width)x\(display.height)")
 
-        let identity = try TLSIdentity.makeEphemeralSelfSigned(commonName: "Porthole Host")
-        let pinHex = try identity.certificateSHA256().map { String(format: "%02x", $0) }.joined()
+        do {
+            let content = try await SCShareableContent.current
+            guard let display = content.displays.first else {
+                print("No display available to capture.")
+                return
+            }
+            print("Display \(display.displayID): \(display.width)x\(display.height)")
 
-        let listener = try PortholeListener(identity: identity)
-        let port = try await listener.start()
+            let identity = try TLSIdentity.makeEphemeralSelfSigned(commonName: "Porthole Host")
+            let pinHex = try identity.certificateSHA256().map { String(format: "%02x", $0) }.joined()
 
+            let listener = try PortholeListener(identity: identity)
+            let port = try await listener.start()
+
+            print("""
+
+            ┌─────────────────────────────────────────────
+            │ 🪟  Porthole host ready
+            │ Port:  \(port.rawValue)
+            │ Pin:   \(pinHex)
+            │ Connect the iOS client to <your-Mac-LAN-IP>:\(port.rawValue) with that pin.
+            └─────────────────────────────────────────────
+
+            """)
+
+            for await connection in listener.connections {
+                await serve(connection, display: display)
+            }
+        } catch {
+            print("Porthole host error: \(error)")
+            let description = "\(error)"
+            if description.contains("declined") || description.contains("TCC") || description.contains("3801") {
+                printScreenRecordingHelp()
+            }
+        }
+    }
+
+    private static func printScreenRecordingHelp() {
         print("""
 
-        ┌─────────────────────────────────────────────
-        │ 🪟  Porthole host ready
-        │ Port:  \(port.rawValue)
-        │ Pin:   \(pinHex)
-        │ Connect the iOS client to <your-Mac-LAN-IP>:\(port.rawValue) with that pin.
-        └─────────────────────────────────────────────
+        ⚠️  Screen Recording permission is required and was not granted.
+
+        Because `swift run` has no app identity, macOS attaches the permission to your
+        TERMINAL app — and since it was declined once, the prompt won't reappear. Enable it
+        manually:
+          1. System Settings ▸ Privacy & Security ▸ Screen Recording.
+          2. Turn on your terminal (Terminal, iTerm, Ghostty, VS Code, …). Add it with “+”
+             if it isn't listed (e.g. /System/Applications/Utilities/Terminal.app).
+          3. Fully quit that terminal app (Cmd-Q) and reopen it.
+          4. Run `swift run porthole-host` again.
+
+        (A signed .app bundle that requests its own Screen-Recording permission is a later
+        packaging step; for now the terminal grant is the quickest path.)
 
         """)
-
-        for await connection in listener.connections {
-            await serve(connection, display: display)
-        }
     }
 
     /// Run one client session: handshake, then capture → encode → serialize → send.
