@@ -6,6 +6,18 @@
 
 `main`
 
+## Most Recent Progress (continued 2026-06-02 — "do all of it")
+
+Building the full remaining feature backlog sequentially. Done + committed since the hardware-verified POC:
+- **Clipboard sync (M2)** — `ClipboardUpdate` msg (type 13); host `ClipboardSync` polls NSPasteboard changeCount → push, applies remote without echo; client writes UIPasteboard inbound + "paste to Mac" toolbar button (iOS restricts silent reads, so push is user-initiated). Commit `0865234`. *(Also fixed a real bug: host input case list was missing `.keyEvent`, so backspace/return/arrows were never injected.)*
+- **Modifier keys / chords (⌘⇧⌥⌃)** — `KeyModifiers` OptionSet; `KeyEvent` generalized to carry modifiers + either a SpecialKey OR a single character (so ⌘C works). Host applies CGEventFlags + an ANSI/US keycode table for char chords. Client: sticky modifier bar (arm → next keystroke is a chord → auto-clears). Commit `624d821`.
+- **2-finger scroll vs pinch-zoom separation** — gesture intent-lock in `TrackpadVideoView.Coordinator`: first decisive signal (centroid translation vs finger-separation scale) wins; loser is a no-op until fingers lift; baselines rebased so a late commit doesn't jump. Commit `9b23eed`.
+- **Saved-Macs list** — `SavedHostsStore` (UserDefaults JSON); "Saved Macs" Form section (one-tap reconnect, swipe-delete); pairing persisted only once `session.status == .streaming` (never saves a bad pin). Commit `997972b`.
+
+**Tests: 60 / 20 suites green. Host builds clean. iOS app BUILD SUCCEEDED.** None of these 4 are hardware-verified yet (need a fresh host run + device rebuild).
+
+**In progress:** M3 multi-monitor (pick/switch display). **Remaining:** file transfer, Metal renderer, audio, QUIC transport swap.
+
 ## Last Session Summary
 
 **Date**: 2026-06-02

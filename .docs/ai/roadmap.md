@@ -37,9 +37,13 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 - [x] Pinch-to-zoom on the video that follows the cursor (host reports `CursorPosition`; client clamped layer transform). *(Approximates view-bounds, ignores letterbox; hardware-verify pending.)*
 - [x] Bonjour advertise (`_portview._tcp`) + NWBrowser discovery + client list; manual IP/port retained. *(LAN-functional verify needs devices.)*
 - [x] QR pairing — host terminal QR + pairing URL (`PairingPayload`); client camera scanner → auto-connect. Cert pinning enforced. *(Device keypairs + revocable PairingStore still to do.)*
-- [ ] Saved-Macs list; TCC onboarding (Screen Recording + Accessibility)
+- [x] Saved-Macs list (`SavedHostsStore`, UserDefaults; one-tap reconnect, persists on successful stream). *(TCC onboarding still to do.)*
+- [x] Modifier keys / chords (⌘⇧⌥⌃) — `KeyModifiers` + char-or-special `KeyEvent`; host CGEventFlags + ANSI keycodes; client sticky modifier bar.
+- [x] Separate 2-finger scroll from pinch-zoom (per-gesture intent lock).
 
-### M2: Clipboard sync (text, both ways)
+### M2: Clipboard sync (text, both ways) — [x] DONE
+Text both ways: `ClipboardUpdate` msg, host `ClipboardSync` (NSPasteboard poll + apply), client UIPasteboard + "paste to Mac" button.
+
 ### M3: Multi-monitor (pick/switch display)
 ### M4: Audio (Core Audio process tap → encode → A/V-synced playback)
 ### M5: File transfer (files lane)
