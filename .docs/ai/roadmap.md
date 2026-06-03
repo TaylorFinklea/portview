@@ -66,7 +66,29 @@ Bare QUIC `NWConnection` (one bidi stream — no multiplex group needed); host s
 
 ## Backlog
 
-> (none yet — milestones above are the active plan)
+### Zoom: viewport should fill the phone's aspect when zoomed (currently keeps the Mac's aspect)
+- **Observed (on device):** zooming magnifies but the view stays the Mac's landscape aspect — the letterbox bars persist on the portrait phone even when zoomed in. User expects a zoomed view to fill the phone (portrait crop).
+- **Root cause:** the host's SCStream output buffer is a fixed size = display dimensions (`CaptureEngine` `config.width/height` set once at start). `setViewport` only changes `sourceRect`; the crop is then **scaled back up to fill the same display-aspect buffer**, so every encoded frame is landscape. The client (`MetalVideoRenderer`) aspect-FITS a landscape frame into the portrait view → bars never disappear, regardless of zoom or the residual settling to 1.
+- **Fix (two-mode, reuses pumpVideo's existing encoder-rebuild-on-dimension-change):**
+  - Overview (zoom ≈ 1): `sourceRect` = full, output = display dims, client letterboxes the whole display (today's behavior — keep it).
+  - Zoomed (zoom > ~1.05): host sets `config.width/height` to a **view-aspect** resolution (~display res, aspect = the client's view aspect) and crops a **view-aspect** `sourceRect` region; client aspect-fit then FILLS the phone. One encoder rebuild at the overview→zoom transition; keep output dims constant within zoom mode (only `sourceRect` changes) so pan/zoom don't rebuild.
+  - Client computes a view-aspect crop (window ∩ display) from `geo.size` aspect; the host can derive output aspect from the crop's normalized pixel-aspect (no extra wire field). Residual math stays uniform since frame+target share the view aspect while zoomed (brief aspect mismatch only at the transition frame).
+- **Files:** `Sources/portview-host/CaptureEngine.swift` (setViewport: also set output dims), `Sources/portview-host/PortviewHostApp.swift` (pass/handle), `apps/PortviewClient/Sources/ContentView.swift` (view-aspect target crop + residual), maybe `Viewport` (only if the crop-derived aspect proves insufficient).
+- **Acceptance:** zooming in on a portrait phone fills the screen (no bars); zoom-1 still shows the whole display.
+- **Verify:** `swift test` green; on-device visual check.
+- **Tier hint:** Opus to scope (geometry + capture reconfig + can't be unit-verified); careful on-device iteration.
+
+### Zoom: jerky at large zoom
+- **Observed:** panning/zooming at large zoom is jerky.
+- **Likely causes:** SCStream `updateConfiguration` (sourceRect) reconfig latency on each throttled viewport send (~12 Hz) during a pan; residual transform stepping between host confirmations; possible keyframe/scene-change cost when the crop jumps.
+- **Ideas:** smoother/predictive viewport (lead the pan), interpolate frameViewport on the client between confirmations, lower reconfig rate + lean more on client residual during motion, or raise fps.
+- **Tier hint:** Sonnet/Opus; needs on-device profiling.
+
+### Zoom: pixelated at large zoom
+- **Observed:** image is pixelated at large zoom.
+- **Cause:** the crop is scaled to a constant output resolution; at high zoom the crop's native pixels < output → upscaling. Bitrate (25 Mbps) is also spread over the (now constant-size) frame.
+- **Ideas:** encode the crop nearer its native resolution (variable output dims — but watch encoder-rebuild churn vs the jerky issue), and/or raise bitrate when cropped (adaptive). Pairs naturally with the aspect-fill rework above.
+- **Tier hint:** Sonnet/Opus; pairs with the aspect rework + adaptive bitrate (M6 polish).
 
 ## Constraints
 
