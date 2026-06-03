@@ -156,7 +156,7 @@ final class SessionViewModel: ObservableObject {
 
     private func run(endpoint: NWEndpoint, pin: Data) async {
         do {
-            let connection = try await PortviewConnection.connect(to: endpoint, pinnedCertificateSHA256: pin)
+            let connection = try await PortviewConnection.connectQUIC(to: endpoint, pinnedCertificateSHA256: pin)
             self.connection = connection
             var client = ClientHandshake(
                 deviceID: UIDevice.current.identifierForVendor?.uuidString ?? "ios-client",

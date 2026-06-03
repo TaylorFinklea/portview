@@ -39,7 +39,7 @@ struct PortviewHostApp {
             let pinHex = try identity.certificateSHA256().map { String(format: "%02x", $0) }.joined()
 
             let serviceName = Host.current().localizedName ?? "Mac"
-            let listener = try PortviewListener(identity: identity, serviceName: serviceName)
+            let listener = try PortviewListener(quicIdentity: identity, serviceName: serviceName)
             let port = try await listener.start()
 
             let ip = NetworkInterface.primaryIPv4() ?? "<your-Mac-LAN-IP>"
@@ -66,8 +66,12 @@ struct PortviewHostApp {
                 print("ℹ️  Input control needs Accessibility permission (System Settings ▸ Privacy & Security ▸ Accessibility — enable your terminal). Viewing works without it; control won't take effect until it's granted.\n")
             }
 
+            // Serve each accepted connection concurrently. QUIC delivers two connections per client
+            // (a dead "control" one that never carries data, plus the real one) — serving them
+            // concurrently means the dead connection can't block the live session. It also lets
+            // multiple clients connect at once.
             for await connection in listener.connections {
-                await serve(connection, displays: displays)
+                Task { await serve(connection, displays: displays) }
             }
         } catch {
             print("Portview host error: \(error)")

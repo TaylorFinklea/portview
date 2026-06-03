@@ -2,22 +2,18 @@ import Foundation
 import Network
 import PortviewProtocol
 
-/// Errors specific to the experimental QUIC multiplex transport.
-public enum QUICError: Error {
-    case streamUnavailable
-}
-
 /// One Portview session over a secure connection.
 ///
-/// POC scope: handshake + video frames travel as framed messages over a single
-/// bidirectional TLS-over-TCP connection. The production target is QUIC with the six
-/// logical lanes (per-frame unidirectional video streams); this type is transport-agnostic,
-/// so that swap touches only the `NWParameters` builder.
+/// Transport: framed messages travel over a single bidirectional connection. The default is now
+/// **QUIC** (TLS 1.3 over UDP) via `connectQUIC` / `PortviewListener(quicIdentity:)`; TLS-over-TCP
+/// (`connect` / `PortviewListener(identity:)`) is kept as a fallback. `PortviewConnection` is
+/// transport-agnostic — it just send/receives framed bytes over an `NWConnection`, so the choice is
+/// purely which `NWParameters` the endpoint is built with. A bare QUIC `NWConnection` is one
+/// bidirectional stream (an empirical loopback sweep confirmed it carries a full bidirectional
+/// round-trip — no `NWConnectionGroup` needed); lane-splitting into per-frame unidirectional
+/// streams is future work.
 public final class PortviewConnection: @unchecked Sendable {
     private let connection: NWConnection
-    /// Retained when this connection is a QUIC stream, so the owning QUIC connection
-    /// (the multiplex group) stays alive for the stream's lifetime. nil for TLS-over-TCP.
-    private let group: NWConnectionGroup?
     private let queue: DispatchQueue
     private var decoder = FrameDecoder()
     private let inboundContinuation: AsyncStream<AnyMessage>.Continuation
@@ -25,44 +21,29 @@ public final class PortviewConnection: @unchecked Sendable {
     /// Messages received from the peer, in arrival order.
     public let inbound: AsyncStream<AnyMessage>
 
-    init(connection: NWConnection, queue: DispatchQueue, group: NWConnectionGroup? = nil) {
+    init(connection: NWConnection, queue: DispatchQueue) {
         self.connection = connection
-        self.group = group
         self.queue = queue
         (self.inbound, self.inboundContinuation) = AsyncStream<AnyMessage>.makeStream()
     }
 
-    /// Connect to a host endpoint and return a ready connection (client side).
-    /// `pinnedCertificateSHA256` is the host's certificate hash (from pairing); the
-    /// TLS handshake fails unless the host presents exactly that certificate.
-    public static func connect(to endpoint: NWEndpoint, pinnedCertificateSHA256: Data) async throws -> PortviewConnection {
-        let queue = DispatchQueue(label: "portview.connection")
-        let nw = NWConnection(to: endpoint, using: TLSParameters.client(pinnedCertificateSHA256: pinnedCertificateSHA256))
-        let connection = PortviewConnection(connection: nw, queue: queue)
-        try await connection.awaitReady()
-        connection.startReceiveLoop()
-        return connection
+    /// Connect over QUIC (the default). A bare QUIC `NWConnection` is a single bidirectional stream;
+    /// the handshake fails unless the host presents exactly `pinnedCertificateSHA256`. (QUIC's
+    /// server-side double-delivery — `newConnectionHandler` firing twice — is tolerated by the
+    /// listener serving each accepted connection concurrently; only the data-carrying one runs a session.)
+    public static func connectQUIC(to endpoint: NWEndpoint, pinnedCertificateSHA256: Data) async throws -> PortviewConnection {
+        try await connect(to: endpoint, parameters: QUICParameters.client(pinnedCertificateSHA256: pinnedCertificateSHA256))
     }
 
-    /// Connect over QUIC using the multiplex-group model (additive/experimental — TLS-over-TCP
-    /// via `connect(to:)` remains the default). A QUIC connection carries an initial bidirectional
-    /// stream, wrapped here as the session transport; the group is retained to keep the QUIC
-    /// connection alive. This is the model the bare-`NWConnection` QUIC path couldn't achieve
-    /// (it double-delivered connections / hung on reply); see decisions.md.
-    public static func connectQUIC(to endpoint: NWEndpoint, pinnedCertificateSHA256: Data) async throws -> PortviewConnection {
-        let queue = DispatchQueue(label: "portview.quic.client")
-        let descriptor = NWMultiplexGroup(to: endpoint)
-        let group = NWConnectionGroup(with: descriptor, using: QUICParameters.client(pinnedCertificateSHA256: pinnedCertificateSHA256))
+    /// Connect over TLS-over-TCP (fallback). Certificate pinning is enforced identically.
+    public static func connect(to endpoint: NWEndpoint, pinnedCertificateSHA256: Data) async throws -> PortviewConnection {
+        try await connect(to: endpoint, parameters: TLSParameters.client(pinnedCertificateSHA256: pinnedCertificateSHA256))
+    }
 
-        // The documented chicken-and-egg: the group does NOT reach `.ready` on its own — opening
-        // a stream is what drives the QUIC handshake. So start the group, open the initial
-        // bidirectional stream immediately, and wait for the *stream* (not the group) to be ready.
-        group.start(queue: queue)
-        guard let stream = NWConnection(from: group) else {
-            group.cancel()
-            throw QUICError.streamUnavailable
-        }
-        let connection = PortviewConnection(connection: stream, queue: queue, group: group)
+    private static func connect(to endpoint: NWEndpoint, parameters: NWParameters) async throws -> PortviewConnection {
+        let queue = DispatchQueue(label: "portview.connection")
+        let nw = NWConnection(to: endpoint, using: parameters)
+        let connection = PortviewConnection(connection: nw, queue: queue)
         try await connection.awaitReady()
         connection.startReceiveLoop()
         return connection
@@ -81,7 +62,6 @@ public final class PortviewConnection: @unchecked Sendable {
     /// Cancel the connection and finish the inbound stream.
     public func close() {
         connection.cancel()
-        group?.cancel()
         inboundContinuation.finish()
     }
 
