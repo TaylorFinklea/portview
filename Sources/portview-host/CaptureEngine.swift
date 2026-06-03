@@ -70,25 +70,37 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         }
     }
 
-    /// Re-crop the live capture to a normalized region of the display (the magnifier). The region
-    /// is captured at native density and scaled to the unchanged output size, so it's encoded at
-    /// full resolution. Returns `true` only once the new configuration is actually in effect, so the
-    /// caller can confirm the crop to the client only when frames really reflect it. A no-op change
-    /// (within a point of the current crop) returns `true` without reconfiguring — this avoids
-    /// thrashing the live stream on sub-point jitter near a settled zoom.
+    /// Re-crop the live capture to a normalized region of the display (the magnifier), and size the
+    /// output buffer to that region's native pixels so the visible area is encoded at full display
+    /// density (crisp zoom) instead of the whole display scaled down. Output dimensions are snapped
+    /// to a 16-pixel grid so small pans/zooms don't constantly reconfigure the stream. Returns `true`
+    /// only once the new configuration is in effect (so the caller confirms the crop to the client
+    /// only when frames really reflect it); an unchanged config returns `true` without reconfiguring.
     func setViewport(normalizedX nx: Double, normalizedY ny: Double,
                      normalizedW nw: Double, normalizedH nh: Double) async -> Bool {
         guard let stream, let config else { return false }
-        // Near-full (within 1%) → no crop; `.zero` captures the whole display.
-        let newRect: CGRect = (nw >= 0.99 && nh >= 0.99)
+        let full = nw >= 0.99 && nh >= 0.99
+        // `.zero` sourceRect captures the whole display; output back to full size.
+        let newRect: CGRect = full
             ? .zero
             : CGRect(x: nx * Double(width), y: ny * Double(height),
                      width: nw * Double(width), height: nh * Double(height))
+        // Output dimensions: snap WIDTH to a 16px grid (so small pans/zooms don't re-encode), then
+        // derive HEIGHT from the exact crop aspect. Deriving height (rather than snapping it
+        // independently) keeps the output aspect equal to the crop aspect, so SCStream doesn't
+        // stretch the region and the client's frame-aspect calc matches exactly.
+        let outW = full ? width : min(width, max(16, Int((Double(width) * nw / 16).rounded()) * 16))
+        let cropAspect = (nw * Double(width)) / max(0.0001, nh * Double(height))
+        let outH = full ? height : min(height, max(16, Int((Double(outW) / cropAspect / 2).rounded()) * 2))
+
         let current = config.sourceRect
-        let unchanged = abs(newRect.minX - current.minX) < 1 && abs(newRect.minY - current.minY) < 1
+        let rectUnchanged = abs(newRect.minX - current.minX) < 1 && abs(newRect.minY - current.minY) < 1
             && abs(newRect.width - current.width) < 1 && abs(newRect.height - current.height) < 1
-        if unchanged { return true }
+        if rectUnchanged && config.width == outW && config.height == outH { return true }
+
         config.sourceRect = newRect
+        config.width = outW
+        config.height = outH
         do {
             try await stream.updateConfiguration(config)
             return true
