@@ -6,7 +6,15 @@
 
 `main`
 
-## Most Recent Progress (continued 2026-06-02 — "do all of it")
+## Latest Session (2026-06-02 #3 — QUIC swap + zoom fixes)
+
+User confirmed all "do all of it" features work on device. Then: "switch to QUIC and actually test it" + "zoomed-in experience is still terrible."
+
+- **QUIC is now the DEFAULT transport** (commit `beced46`). Ran a 6-candidate empirical loopback sweep (parallel worktrees). Breakthrough: the `NWConnectionGroup`/`NWMultiplexGroup` model was a **red herring** — a bare `NWConnection(to:using:QUICParameters.client)` is itself one bidirectional QUIC stream and carries a full round-trip. The real gotcha is QUIC's server-side **double-delivery** (`newConnectionHandler` fires twice: a dead "control" connection + the real data one) — fixed by the host serving each accepted connection **concurrently** (`Task { serve }`). Client uses `connectQUIC`, host uses `PortviewListener(quicIdentity:)`. Dead multiplex scaffolding removed. Bonjour type → `_portview._udp` (+ NSBonjourServices). `QUICBidirectionalTests` ENABLED + green. TLS-over-TCP kept as one-call fallback. See decisions.md ADR. **Tests 70/25 green; host + iOS build clean.** ⚠️ QUIC not yet validated on a real/Tailscale link (only loopback) — needs on-device test.
+- **Zoom — jumpy + off-center FIXED** (commit `689b253`, client-only): off-center was a real bug (pan math centered against full view bounds, ignoring the Metal letterbox) — now centers against the actual aspect-fit video rect with correct clamping; jumpy → short critically-damped spring on the pan offset. Verified iOS build.
+- **Zoom — blurry = NOT fixed.** It's digital upscaling; the real fix is a **host-side magnifier** (client sends a viewport rect → host sets `SCStreamConfiguration.sourceRect` to that crop, encoded at full res → crisp). This is a larger, feel-changing change (introduces a zoom settle/latency; needs viewport echo in VideoFrame + client residual transform). DEFERRED pending a decision — see roadmap Next. QUIC does NOT fix blur (it's render/encode, not transport).
+
+## Previous Session (2026-06-02 — "do all of it")
 
 Worked the full remaining backlog sequentially. **All 9 items done + committed** on top of the hardware-verified POC. **Tests: 69 / 24 suites green (1 QUIC test intentionally disabled). Host builds clean. iOS app BUILD SUCCEEDED.**
 

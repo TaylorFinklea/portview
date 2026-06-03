@@ -11,10 +11,12 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 ## Now / Next / Later
 
 ### Now
-- [ ] **On-device verification pass** — all of M0–M5 + Metal render + audio build green but only the original M0/M1 POC (screen + trackpad + keyboard + zoom) is hardware-verified. Re-run host + rebuild client on device and confirm: Metal video still paints, audio plays, multi-monitor switch, file push lands in ~/Downloads, clipboard both ways, modifier chords.
+- [x] On-device verification of the "do all of it" features — user confirmed all new features work.
+- [ ] **On-device test of QUIC + zoom fixes** — QUIC is now the default transport (only loopback-verified so far): confirm connect/stream/control/clipboard/audio/files all still work over QUIC, ideally over a real/Tailscale link to gauge the latency win. Confirm the zoom jumpy/off-center fixes feel right; judge whether "blurry" still warrants the host-side magnifier (Next).
 
 ### Next
-- [ ] Finish the QUIC multiplex swap (resolve the NWConnectionGroup chicken-and-egg — see decisions.md) and flip the default once the disabled loopback test passes; then split lanes (per-frame unidirectional video streams).
+- [ ] **Host-side magnifier for crisp zoom** — client sends a viewport rect (zoom/pan region); host sets `SCStreamConfiguration.sourceRect` to that crop (output dims constant) so the region is encoded at full res. Best UX = hybrid: echo the viewport in VideoFrame + client residual transform for instant feedback that settles crisp. Larger, feel-changing change; validate on device. (Fixes the "blurry" zoom complaint; QUIC does not.)
+- [ ] QUIC lane-splitting (per-frame unidirectional video streams); validate QUIC latency over a real/Tailscale link.
 - [ ] Mac→iPhone file transfer; tight A/V lip-sync.
 
 ### Later
@@ -57,8 +59,8 @@ SCStream `capturesAudio` → non-interleaved Float32 (AVAudioConverter) → `Aud
 ### Render: Metal — [x] DONE (build-green; device-verify pending)
 Explicit VideoToolbox decode (BGRA) → CAMetalLayer via CVMetalTextureCache. Replaced AVSampleBufferDisplayLayer.
 
-### M6: QUIC transport (NWMultiplexGroup) — [~] GROUNDWORK ONLY
-Additive `connectQUIC`/`PortviewListener(quicIdentity:)` + cancellable connect; loopback bidi test DISABLED (reproduces the NWConnectionGroup chicken-and-egg). TLS-over-TCP still ships. See decisions.md.
+### M6: QUIC transport — [x] DEFAULT (build-green; loopback-verified; on-device pending)
+Bare QUIC `NWConnection` (one bidi stream — no multiplex group needed); host serves connections concurrently to tolerate QUIC double-delivery. `connectQUIC` + `PortviewListener(quicIdentity:)` are the default; TLS-over-TCP is a one-call fallback. Bonjour `_udp`. `QUICBidirectionalTests` enabled + green. See decisions.md.
 
 ### M6: Polish (adaptive bitrate/fps, reconnect + APNs re-wake, settings, quality HUD) — not started
 

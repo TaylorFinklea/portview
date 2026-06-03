@@ -20,6 +20,9 @@ apps/*/*-Info.plist
 # Brainstorm visual-companion scratch (not source)
 .superpowers/
 
+# Claude Code workflow worktrees (transient; created by isolation: 'worktree')
+.claude/worktrees/
+
 # Secrets / signing
 *.p12
 *.mobileprovision
