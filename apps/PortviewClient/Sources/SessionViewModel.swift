@@ -27,8 +27,9 @@ final class SessionViewModel: ObservableObject {
     private let audioPlayer = AudioPlayer()
     private var task: Task<Void, Never>?
     private var connection: PortviewConnection?
-    /// Mac display size in points (from ServerHello); used to predict the cursor locally.
-    private var displaySize = CGSize(width: 1, height: 1)
+    /// Mac display size in points (from ServerHello); used to predict the cursor locally and to
+    /// letterbox-correct the client's zoom/pan math.
+    @Published private(set) var displaySize = CGSize(width: 1, height: 1)
     /// Must match the host's InputInjector sensitivity so the predicted cursor tracks the real one.
     private let inputSensitivity: CGFloat = 1.5
 

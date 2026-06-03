@@ -28,10 +28,24 @@ struct ContentView: View {
             GeometryReader { geo in
                 let size = geo.size
                 let z = zoom
-                let limitX = (z - 1) * size.width / 2
-                let limitY = (z - 1) * size.height / 2
-                let panX = min(limitX, max(-limitX, z * (size.width / 2 - session.cursorNormalized.x * size.width)))
-                let panY = min(limitY, max(-limitY, z * (size.height / 2 - session.cursorNormalized.y * size.height)))
+                // The Metal renderer aspect-fits (letterboxes) the video, so "center the cursor"
+                // must be computed against the video's actual rect inside the view — not the full
+                // view bounds — or the cursor drifts off-center on mismatched aspect ratios.
+                let videoAspect = session.displaySize.width / max(1, session.displaySize.height)
+                let viewAspect = size.width / max(1, size.height)
+                let videoSize = videoAspect > viewAspect
+                    ? CGSize(width: size.width, height: size.width / videoAspect)
+                    : CGSize(width: size.height * videoAspect, height: size.height)
+                let videoOrigin = CGPoint(x: (size.width - videoSize.width) / 2,
+                                          y: (size.height - videoSize.height) / 2)
+                let cursorView = CGPoint(x: videoOrigin.x + session.cursorNormalized.x * videoSize.width,
+                                         y: videoOrigin.y + session.cursorNormalized.y * videoSize.height)
+                // Pan to bring the cursor to the view center under scaleEffect(anchor: .center),
+                // clamped so the scaled video keeps covering the view.
+                let limitX = max(0, (z * videoSize.width - size.width) / 2)
+                let limitY = max(0, (z * videoSize.height - size.height) / 2)
+                let panX = min(limitX, max(-limitX, z * (size.width / 2 - cursorView.x)))
+                let panY = min(limitY, max(-limitY, z * (size.height / 2 - cursorView.y)))
 
                 ZStack(alignment: .top) {
                     TrackpadVideoView(
@@ -45,6 +59,9 @@ struct ContentView: View {
                     .frame(width: size.width, height: size.height)
                     .scaleEffect(z, anchor: .center)
                     .offset(x: panX, y: panY)
+                    // Smooth the follow so throttled host cursor reports don't make the pan jitter,
+                    // while staying responsive (short, critically damped — no overshoot).
+                    .animation(.spring(response: 0.1, dampingFraction: 1.0), value: session.cursorNormalized)
 
                     // Invisible first-responder that surfaces the system keyboard when toggled.
                     KeyboardCaptureView(
