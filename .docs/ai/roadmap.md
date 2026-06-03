@@ -12,12 +12,12 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 
 ### Now
 - [x] On-device verification of the "do all of it" features — user confirmed all new features work.
-- [ ] **On-device test of QUIC + zoom fixes** — QUIC is now the default transport (only loopback-verified so far): confirm connect/stream/control/clipboard/audio/files all still work over QUIC, ideally over a real/Tailscale link to gauge the latency win. Confirm the zoom jumpy/off-center fixes feel right; judge whether "blurry" still warrants the host-side magnifier (Next).
+- [ ] **On-device test of QUIC + zoom overhaul** — QUIC is now the default transport (only loopback-verified so far): confirm connect/stream/control/clipboard/audio/files all still work over QUIC, ideally over a real/Tailscale link to gauge the latency win. Confirm the zoom overhaul: jumpy/off-center fixes + the host-side magnifier (crisp zoom — does the residual settle look seamless, any reconfig stutter?).
 
 ### Next
-- [ ] **Host-side magnifier for crisp zoom** — client sends a viewport rect (zoom/pan region); host sets `SCStreamConfiguration.sourceRect` to that crop (output dims constant) so the region is encoded at full res. Best UX = hybrid: echo the viewport in VideoFrame + client residual transform for instant feedback that settles crisp. Larger, feel-changing change; validate on device. (Fixes the "blurry" zoom complaint; QUIC does not.)
 - [ ] QUIC lane-splitting (per-frame unidirectional video streams); validate QUIC latency over a real/Tailscale link.
 - [ ] Mac→iPhone file transfer; tight A/V lip-sync.
+- [ ] Magnifier follow-ups (if on-device testing shows them): tune the residual-settle timing; consider raising encode bitrate when cropped; smooth the crop transition.
 
 ### Later
 - [ ] M6 polish: adaptive bitrate/fps, reconnect + APNs re-wake, settings, quality HUD. TCC onboarding UI. Device keypairs + revocable PairingStore.
