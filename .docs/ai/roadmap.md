@@ -71,10 +71,16 @@ All three on-device complaints addressed via the **client window model** (`ZoomG
 - **Pixelated (#3):** `VideoEncoder` now sets an explicit AverageBitRate (w·h·6, 8–50 Mbps) — it set none before (soft default). Host crop encodes the zoomed region at that bitrate.
 Adversarially reviewed (no geometry bugs found). **Tests 72/25; host + iOS build clean.**
 
+### Zoom crispness — [x] DONE (build-green; device-verify pending), commit `4591ef7`
+On-device the fill worked but it was still blurry at moderate zoom. Root cause: the crop request was square (display-aspect), so for a wide display it clamped to the whole display until extreme zoom → host sent the full display, client digitally magnified → blur. Fix:
+- Client: cropRequest is now the **tight visible-window region** (not squared), padded 8%, clamped; `videoSize` derives from the frame's actual pixel aspect. **Hysteresis** keeps the current crop while panning inside it (re-crop only on pan-past-edge or zoom change) → panning within a crop is reconfigure-free.
+- Host `setViewport`: sizes the **output buffer to the crop's native pixels** (visible region encoded at full display density → crisp). Width snapped to 16px (re-encode hysteresis); **height derived from width preserving the exact crop aspect** (no SCStream stretch; matches client frame-aspect).
+- Adversarially reviewed (8 agents); fixed the confirmed findings (independent-snap aspect distortion → derive height; pan-reconfig-every-tick → hysteresis).
+- Tradeoff: brief encoder rebuild on zoom steps. Extreme-zoom pixelation is now inherent (native density of the screen region).
+
 ### Backlog — zoom follow-ups (deferred)
-- **Maximal crispness:** the host crop stays display-aspect (square-normalized) to avoid encoder-rebuild churn, so at high zoom the visible portrait window uses only ~part of the encoded crop. Full crispness = host emits a **view-aspect output buffer** when zoomed (the two-mode approach: set `config.width/height` to view-aspect + view-aspect `sourceRect`; one rebuild at the overview→zoom transition; reuses pumpVideo's dimension-change handling). Trade-off vs jerky/jump — revisit after on-device feel.
 - **Adaptive bitrate** when cropped (raise further at high zoom); dynamic `kVTCompressionPropertyKey_AverageBitRate` without recreating the session.
-- **Jerky tuning** if still present on device: predictive/leading viewport, interpolate `frameViewport` between host confirmations, raise fps.
+- **Jerky tuning** if still present on device: predictive/leading viewport, interpolate `frameViewport` between host confirmations, raise fps. Smooth the brief rebuild on zoom steps.
 
 ## Backlog
 
