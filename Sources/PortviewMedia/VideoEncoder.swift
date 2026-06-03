@@ -8,7 +8,8 @@ import CoreVideo
 public final class VideoEncoder: @unchecked Sendable {
     private let session: VTCompressionSession
 
-    public init(width: Int, height: Int, codec: CMVideoCodecType = kCMVideoCodecType_HEVC) throws {
+    public init(width: Int, height: Int, codec: CMVideoCodecType = kCMVideoCodecType_HEVC,
+                averageBitRate: Int? = nil) throws {
         let encoderSpec: [CFString: Any] = [
             kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue!,
         ]
@@ -33,6 +34,11 @@ public final class VideoEncoder: @unchecked Sendable {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main_AutoLevel)
+        // Set an explicit target bitrate (VideoToolbox's default is conservative → soft/pixelated).
+        // Heuristic ≈ 0.1 bits/pixel/frame × 60 fps, clamped; callers can override. This is what the
+        // host magnifier's cropped region is encoded at, so it directly affects zoom crispness.
+        let bitRate = averageBitRate ?? min(50_000_000, max(8_000_000, Int(Double(width * height) * 6.0)))
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitRate as CFNumber)
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
 

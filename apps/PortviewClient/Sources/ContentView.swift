@@ -27,34 +27,12 @@ struct ContentView: View {
         if session.status == .streaming {
             GeometryReader { geo in
                 let size = geo.size
-                // Target viewport: the display region the gesture wants, aspect-preserving (equal
-                // width/height fractions = 1/zoom), centered on the cursor and clamped on-screen.
-                let tw = min(1, 1 / zoom)
-                let target = CGRect(
-                    x: min(max(0, session.cursorNormalized.x - tw / 2), 1 - tw),
-                    y: min(max(0, session.cursorNormalized.y - tw / 2), 1 - tw),
-                    width: tw, height: tw)
-                // The Metal renderer aspect-fits the (display-aspect) video; its rect inside the view.
-                let videoAspect = session.displaySize.width / max(1, session.displaySize.height)
-                let viewAspect = size.width / max(1, size.height)
-                let videoSize = videoAspect > viewAspect
-                    ? CGSize(width: size.width, height: size.width / videoAspect)
-                    : CGSize(width: size.height * videoAspect, height: size.height)
-                let videoOrigin = CGPoint(x: (size.width - videoSize.width) / 2,
-                                          y: (size.height - videoSize.height) / 2)
-                // The host already cropped its frames to `frameViewport`. Render the RESIDUAL zoom of
-                // `target` on top of that: while the host catches up the residual provides instant
-                // (digital) zoom; once frame == target the residual is identity → crisp host-cropped 1:1.
-                let frame = session.frameViewport
-                let residual = frame.width > 0 ? frame.width / target.width : 1
-                let lfx = frame.width > 0 ? (target.midX - frame.minX) / frame.width : 0.5
-                let lfy = frame.height > 0 ? (target.midY - frame.minY) / frame.height : 0.5
-                let centerView = CGPoint(x: videoOrigin.x + lfx * videoSize.width,
-                                         y: videoOrigin.y + lfy * videoSize.height)
-                let limitX = max(0, (residual * videoSize.width - size.width) / 2)
-                let limitY = max(0, (residual * videoSize.height - size.height) / 2)
-                let panX = min(limitX, max(-limitX, residual * (size.width / 2 - centerView.x)))
-                let panY = min(limitY, max(-limitY, residual * (size.height / 2 - centerView.y)))
+                let zoomGeometry = ZoomGeometry(
+                    view: size,
+                    displaySize: session.displaySize,
+                    cursor: session.cursorNormalized,
+                    zoom: zoom,
+                    frameViewport: session.frameViewport)
 
                 ZStack(alignment: .top) {
                     TrackpadVideoView(
@@ -66,13 +44,14 @@ struct ContentView: View {
                         onZoom: { zoom = min(4, max(1, $0)) }
                     )
                     .frame(width: size.width, height: size.height)
-                    .scaleEffect(residual, anchor: .center)
-                    .offset(x: panX, y: panY)
+                    .scaleEffect(zoomGeometry.renderScale, anchor: .center)
+                    .offset(x: zoomGeometry.pan.x, y: zoomGeometry.pan.y)
                     // Smooth the follow so throttled host cursor reports don't make the pan jitter,
                     // while staying responsive (short, critically damped — no overshoot).
                     .animation(.spring(response: 0.1, dampingFraction: 1.0), value: session.cursorNormalized)
-                    // Tell the host to crop to the target region (the magnifier) as zoom/pan change.
-                    .onChange(of: target) { _, newTarget in session.requestViewport(newTarget) }
+                    // Ask the host to crop (the magnifier) to the padded display-aspect region around
+                    // the visible window, as zoom/pan change. Throttled + deduped in the view model.
+                    .onChange(of: zoomGeometry.cropRequest) { _, crop in session.requestViewport(crop) }
 
                     // Invisible first-responder that surfaces the system keyboard when toggled.
                     KeyboardCaptureView(

@@ -90,14 +90,14 @@ final class SessionViewModel: ObservableObject {
         send(.switchDisplay(SwitchDisplay(displayID: displayID)))
     }
 
-    /// Ask the host to crop its capture to `rect` (normalized) — the magnifier. Coalesced to ~12 Hz
+    /// Ask the host to crop its capture to `rect` (normalized) — the magnifier. Coalesced to ~8 Hz
     /// (with a trailing send) so a fast pinch/pan doesn't thrash the host's stream reconfiguration.
     func requestViewport(_ rect: CGRect) {
         pendingViewport = rect
         guard !viewportSendScheduled else { return }
         viewportSendScheduled = true
         Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(80))
+            try? await Task.sleep(for: .milliseconds(120))
             guard let self else { return }
             self.viewportSendScheduled = false
             let rect = self.pendingViewport
