@@ -22,6 +22,12 @@ final class SessionViewModel: ObservableObject {
     @Published var activeDisplayID: UInt32 = 0
     /// Transient status of an in-flight file push (nil when none).
     @Published var transferStatus: String?
+    /// Normalized region of the display the host's current frames represent (the magnifier crop).
+    /// Updated when the host confirms a viewport; the client renders the residual zoom against it.
+    @Published var frameViewport = CGRect(x: 0, y: 0, width: 1, height: 1)
+    private var pendingViewport = CGRect(x: 0, y: 0, width: 1, height: 1)
+    private var lastViewportSent = CGRect(x: 0, y: 0, width: 1, height: 1)
+    private var viewportSendScheduled = false
     let renderer = MetalVideoRenderer()
     private let decoder = VideoDecoder()
     private let audioPlayer = AudioPlayer()
@@ -69,6 +75,7 @@ final class SessionViewModel: ObservableObject {
         status = .idle
         displays = []
         activeDisplayID = 0
+        resetViewport()
         audioPlayer.stop()
     }
 
@@ -79,7 +86,35 @@ final class SessionViewModel: ObservableObject {
         activeDisplayID = displayID
         displaySize = CGSize(width: max(1, Double(display.width)), height: max(1, Double(display.height)))
         cursorNormalized = CGPoint(x: 0.5, y: 0.5)
+        resetViewport()
         send(.switchDisplay(SwitchDisplay(displayID: displayID)))
+    }
+
+    /// Ask the host to crop its capture to `rect` (normalized) — the magnifier. Coalesced to ~12 Hz
+    /// (with a trailing send) so a fast pinch/pan doesn't thrash the host's stream reconfiguration.
+    func requestViewport(_ rect: CGRect) {
+        pendingViewport = rect
+        guard !viewportSendScheduled else { return }
+        viewportSendScheduled = true
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(80))
+            guard let self else { return }
+            self.viewportSendScheduled = false
+            let rect = self.pendingViewport
+            guard rect != self.lastViewportSent else { return }
+            self.lastViewportSent = rect
+            self.send(.viewport(Viewport(
+                displayID: self.activeDisplayID,
+                normalizedX: rect.minX, normalizedY: rect.minY,
+                normalizedW: rect.width, normalizedH: rect.height)))
+        }
+    }
+
+    private func resetViewport() {
+        let full = CGRect(x: 0, y: 0, width: 1, height: 1)
+        frameViewport = full
+        pendingViewport = full
+        lastViewportSent = full
     }
 
     // MARK: - Input (client → host)
@@ -191,6 +226,9 @@ final class SessionViewModel: ObservableObject {
                     UIPasteboard.general.string = update.text
                 case .audioFrame(let audio):
                     audioPlayer.play(sampleRate: Double(audio.sampleRate), channels: UInt32(audio.channels), planarData: audio.data)
+                case .viewport(let v):
+                    // Host confirmed the region its frames now represent — settle the residual zoom to it.
+                    frameViewport = CGRect(x: v.normalizedX, y: v.normalizedY, width: v.normalizedW, height: v.normalizedH)
                 case .error(let error):
                     status = .failed("Host error: \(error.message)")
                     return

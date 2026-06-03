@@ -27,10 +27,14 @@ struct ContentView: View {
         if session.status == .streaming {
             GeometryReader { geo in
                 let size = geo.size
-                let z = zoom
-                // The Metal renderer aspect-fits (letterboxes) the video, so "center the cursor"
-                // must be computed against the video's actual rect inside the view — not the full
-                // view bounds — or the cursor drifts off-center on mismatched aspect ratios.
+                // Target viewport: the display region the gesture wants, aspect-preserving (equal
+                // width/height fractions = 1/zoom), centered on the cursor and clamped on-screen.
+                let tw = min(1, 1 / zoom)
+                let target = CGRect(
+                    x: min(max(0, session.cursorNormalized.x - tw / 2), 1 - tw),
+                    y: min(max(0, session.cursorNormalized.y - tw / 2), 1 - tw),
+                    width: tw, height: tw)
+                // The Metal renderer aspect-fits the (display-aspect) video; its rect inside the view.
                 let videoAspect = session.displaySize.width / max(1, session.displaySize.height)
                 let viewAspect = size.width / max(1, size.height)
                 let videoSize = videoAspect > viewAspect
@@ -38,14 +42,19 @@ struct ContentView: View {
                     : CGSize(width: size.height * videoAspect, height: size.height)
                 let videoOrigin = CGPoint(x: (size.width - videoSize.width) / 2,
                                           y: (size.height - videoSize.height) / 2)
-                let cursorView = CGPoint(x: videoOrigin.x + session.cursorNormalized.x * videoSize.width,
-                                         y: videoOrigin.y + session.cursorNormalized.y * videoSize.height)
-                // Pan to bring the cursor to the view center under scaleEffect(anchor: .center),
-                // clamped so the scaled video keeps covering the view.
-                let limitX = max(0, (z * videoSize.width - size.width) / 2)
-                let limitY = max(0, (z * videoSize.height - size.height) / 2)
-                let panX = min(limitX, max(-limitX, z * (size.width / 2 - cursorView.x)))
-                let panY = min(limitY, max(-limitY, z * (size.height / 2 - cursorView.y)))
+                // The host already cropped its frames to `frameViewport`. Render the RESIDUAL zoom of
+                // `target` on top of that: while the host catches up the residual provides instant
+                // (digital) zoom; once frame == target the residual is identity → crisp host-cropped 1:1.
+                let frame = session.frameViewport
+                let residual = frame.width > 0 ? frame.width / target.width : 1
+                let lfx = frame.width > 0 ? (target.midX - frame.minX) / frame.width : 0.5
+                let lfy = frame.height > 0 ? (target.midY - frame.minY) / frame.height : 0.5
+                let centerView = CGPoint(x: videoOrigin.x + lfx * videoSize.width,
+                                         y: videoOrigin.y + lfy * videoSize.height)
+                let limitX = max(0, (residual * videoSize.width - size.width) / 2)
+                let limitY = max(0, (residual * videoSize.height - size.height) / 2)
+                let panX = min(limitX, max(-limitX, residual * (size.width / 2 - centerView.x)))
+                let panY = min(limitY, max(-limitY, residual * (size.height / 2 - centerView.y)))
 
                 ZStack(alignment: .top) {
                     TrackpadVideoView(
@@ -57,11 +66,13 @@ struct ContentView: View {
                         onZoom: { zoom = min(4, max(1, $0)) }
                     )
                     .frame(width: size.width, height: size.height)
-                    .scaleEffect(z, anchor: .center)
+                    .scaleEffect(residual, anchor: .center)
                     .offset(x: panX, y: panY)
                     // Smooth the follow so throttled host cursor reports don't make the pan jitter,
                     // while staying responsive (short, critically damped — no overshoot).
                     .animation(.spring(response: 0.1, dampingFraction: 1.0), value: session.cursorNormalized)
+                    // Tell the host to crop to the target region (the magnifier) as zoom/pan change.
+                    .onChange(of: target) { _, newTarget in session.requestViewport(newTarget) }
 
                     // Invisible first-responder that surfaces the system keyboard when toggled.
                     KeyboardCaptureView(
@@ -96,6 +107,7 @@ struct ContentView: View {
                                 Menu {
                                     ForEach(session.displays, id: \.id) { display in
                                         Button {
+                                            zoom = 1   // start the new display un-cropped
                                             session.switchDisplay(to: display.id)
                                         } label: {
                                             Label(display.name,

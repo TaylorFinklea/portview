@@ -117,8 +117,11 @@ struct PortviewHostApp {
         }
         let fileReceiver = FileReceiver()
 
-        // Injector and video pump are (re)bound to the active display; switching re-targets both.
+        // Injector, capture engine, and video pump are (re)bound to the active display; switching
+        // re-targets all three. `currentCapture` lets viewport (magnifier) requests re-crop the
+        // live stream. All of these are touched only from this inbound loop's task.
         var injector = makeInjector(for: firstDisplay, connection: connection)
+        var currentCapture: CaptureEngine?
         var videoTask: Task<Void, Never>?
 
         func display(forID id: UInt32) -> SCDisplay {
@@ -127,7 +130,9 @@ struct PortviewHostApp {
         func startVideo(on display: SCDisplay) {
             videoTask?.cancel()
             injector = makeInjector(for: display, connection: connection)
-            videoTask = Task { await pumpVideo(connection, display: display) }
+            let capture = CaptureEngine(width: display.width, height: display.height)
+            currentCapture = capture
+            videoTask = Task { await pumpVideo(connection, display: display, capture: capture) }
             print("Streaming display \(display.displayID) (\(display.width)x\(display.height)).")
         }
 
@@ -146,6 +151,17 @@ struct PortviewHostApp {
                 startVideo(on: display(forID: start.displayID))
             case .switchDisplay(let switchMessage):
                 startVideo(on: display(forID: switchMessage.displayID))
+            case .viewport(let viewport):
+                // Magnifier: re-crop the live capture, then — only if the crop actually applied —
+                // confirm the active region back to the client so it can settle its residual zoom.
+                // Awaiting here (inside the inbound loop) keeps confirmations ordered with requests
+                // and tied to the session's lifetime (no orphaned/racing Tasks).
+                let applied = await currentCapture?.setViewport(
+                    normalizedX: viewport.normalizedX, normalizedY: viewport.normalizedY,
+                    normalizedW: viewport.normalizedW, normalizedH: viewport.normalizedH) ?? false
+                if applied {
+                    try? await connection.send(.viewport(viewport))
+                }
             case .pointerMove, .pointerButton, .scroll, .typeText, .keyEvent:
                 injector.handle(message)
             case .clipboardUpdate(let update):
@@ -180,8 +196,7 @@ struct PortviewHostApp {
     /// Capture → HEVC encode → serialize → send. The encoder is built to match the actual
     /// pixel-buffer dimensions (points vs pixels differ on Retina), and a single bad frame is
     /// skipped (re-requesting a keyframe) rather than aborting the whole stream.
-    static func pumpVideo(_ connection: PortviewConnection, display: SCDisplay) async {
-        let capture = CaptureEngine(width: display.width, height: display.height)
+    static func pumpVideo(_ connection: PortviewConnection, display: SCDisplay, capture: CaptureEngine) async {
         do {
             try capture.start(display: display, maxFPS: 60)
         } catch {

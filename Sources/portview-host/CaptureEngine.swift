@@ -38,6 +38,10 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     private var audioConverter: AVAudioConverter?
     private var audioOutputFormat: AVAudioFormat?
 
+    // Retained so `setViewport` can re-crop the live stream (the "magnifier"). Output dimensions
+    // stay constant, so the encoder is unaffected; only the captured region changes.
+    private var config: SCStreamConfiguration?
+
     init(width: Int, height: Int) {
         self.width = width
         self.height = height
@@ -60,8 +64,37 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
         self.stream = stream
+        self.config = config
         stream.startCapture { error in
             if let error { print("capture start error: \(error)") }
+        }
+    }
+
+    /// Re-crop the live capture to a normalized region of the display (the magnifier). The region
+    /// is captured at native density and scaled to the unchanged output size, so it's encoded at
+    /// full resolution. Returns `true` only once the new configuration is actually in effect, so the
+    /// caller can confirm the crop to the client only when frames really reflect it. A no-op change
+    /// (within a point of the current crop) returns `true` without reconfiguring — this avoids
+    /// thrashing the live stream on sub-point jitter near a settled zoom.
+    func setViewport(normalizedX nx: Double, normalizedY ny: Double,
+                     normalizedW nw: Double, normalizedH nh: Double) async -> Bool {
+        guard let stream, let config else { return false }
+        // Near-full (within 1%) → no crop; `.zero` captures the whole display.
+        let newRect: CGRect = (nw >= 0.99 && nh >= 0.99)
+            ? .zero
+            : CGRect(x: nx * Double(width), y: ny * Double(height),
+                     width: nw * Double(width), height: nh * Double(height))
+        let current = config.sourceRect
+        let unchanged = abs(newRect.minX - current.minX) < 1 && abs(newRect.minY - current.minY) < 1
+            && abs(newRect.width - current.width) < 1 && abs(newRect.height - current.height) < 1
+        if unchanged { return true }
+        config.sourceRect = newRect
+        do {
+            try await stream.updateConfiguration(config)
+            return true
+        } catch {
+            print("viewport update failed: \(error)")
+            return false
         }
     }
 
