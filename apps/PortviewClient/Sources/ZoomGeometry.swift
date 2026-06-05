@@ -27,14 +27,10 @@ struct ZoomGeometry {
         let viewAspect = view.width / max(1, view.height)
         let displayAspect = displaySize.width / max(1, displaySize.height)
 
-        // The host's current crop. Its pixel aspect — NOT necessarily the display's — drives the
-        // aspect-fit, because the host now crops to (and sizes its buffer to) the visible region.
-        let f = (frameViewport.width > 0 && frameViewport.height > 0)
-            ? frameViewport : CGRect(x: 0, y: 0, width: 1, height: 1)
-        let frameAspect = (f.width * displaySize.width) / max(1, f.height * displaySize.height)
-        let videoSize: CGSize = frameAspect > viewAspect
-            ? CGSize(width: view.width, height: view.width / frameAspect)
-            : CGSize(width: view.height * frameAspect, height: view.height)
+        // Aspect-fit rect of the (display-aspect) host frame inside the view.
+        let videoSize: CGSize = displayAspect > viewAspect
+            ? CGSize(width: view.width, height: view.width / displayAspect)
+            : CGSize(width: view.height * displayAspect, height: view.height)
         let videoOrigin = CGPoint(x: (view.width - videoSize.width) / 2,
                                   y: (view.height - videoSize.height) / 2)
 
@@ -50,25 +46,17 @@ struct ZoomGeometry {
         let cy = windowH < 1 ? min(max(cursor.y, windowH / 2), 1 - windowH / 2) : 0.5
         let window = CGRect(x: cx - windowW / 2, y: cy - windowH / 2, width: windowW, height: windowH)
 
-        // Crop request = the *tight* visible part of the window (what actually has content), padded a
-        // little for pan headroom, clamped. NOT squared: the host sizes its output buffer to this
-        // region's native pixels, so it's encoded at full display density (crisp) instead of the
-        // whole display scaled down. (At zoom 1 the visible region is the whole display → no crop.)
+        // Padded, display-aspect (square-normalized) crop bounding the visible part of the window.
         let visX0 = max(0, window.minX), visY0 = max(0, window.minY)
         let visX1 = min(1, window.maxX), visY1 = min(1, window.maxY)
-        let visible = CGRect(x: visX0, y: visY0,
-                             width: max(0.0001, visX1 - visX0), height: max(0.0001, visY1 - visY0))
-        let padX = visible.width * 0.08, padY = visible.height * 0.08
-        let cropX0 = max(0, visible.minX - padX), cropY0 = max(0, visible.minY - padY)
-        let cropX1 = min(1, visible.maxX + padX), cropY1 = min(1, visible.maxY + padY)
-        let tight = CGRect(x: cropX0, y: cropY0, width: cropX1 - cropX0, height: cropY1 - cropY0)
-        // Hysteresis: keep the host's current crop while the visible window stays inside it and the
-        // crop isn't far larger than needed — so panning within a crop doesn't constantly re-crop the
-        // stream. Re-crop only when panning past the edge or after a zoom change shrinks the window.
-        let frameTooBig = f.width > tight.width * 1.6 || f.height > tight.height * 1.6
-        cropRequest = (f.contains(visible) && !frameTooBig) ? f : tight
+        let side = min(1, max(visX1 - visX0, visY1 - visY0) * 1.4)
+        let ccx = min(max((visX0 + visX1) / 2, side / 2), 1 - side / 2)
+        let ccy = min(max((visY0 + visY1) / 2, side / 2), 1 - side / 2)
+        cropRequest = CGRect(x: ccx - side / 2, y: ccy - side / 2, width: side, height: side)
 
         // Render the window aspect-fit, mapped through the host's current crop.
+        let f = (frameViewport.width > 0 && frameViewport.height > 0)
+            ? frameViewport : CGRect(x: 0, y: 0, width: 1, height: 1)
         let wvx0 = videoOrigin.x + (window.minX - f.minX) / f.width * videoSize.width
         let wvy0 = videoOrigin.y + (window.minY - f.minY) / f.height * videoSize.height
         let wvw = window.width / f.width * videoSize.width
