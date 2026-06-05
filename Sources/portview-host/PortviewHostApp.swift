@@ -130,10 +130,14 @@ struct PortviewHostApp {
         func startVideo(on display: SCDisplay) {
             videoTask?.cancel()
             injector = makeInjector(for: display, connection: connection)
-            let capture = CaptureEngine(width: display.width, height: display.height)
+            let output = captureOutputSize(for: display)
+            let capture = CaptureEngine(
+                width: output.width, height: output.height,
+                sourceWidth: display.width, sourceHeight: display.height
+            )
             currentCapture = capture
             videoTask = Task { await pumpVideo(connection, display: display, capture: capture) }
-            print("Streaming display \(display.displayID) (\(display.width)x\(display.height)).")
+            print("Streaming display \(display.displayID) source \(display.width)x\(display.height), output \(output.width)x\(output.height).")
         }
 
         for await message in connection.inbound {
@@ -193,6 +197,18 @@ struct PortviewHostApp {
         return injector
     }
 
+    /// Prefer the display's backing-pixel dimensions when CoreGraphics exposes a higher-resolution
+    /// mode than ScreenCaptureKit's display dimensions. This keeps zoomed text from starting with a
+    /// half-resolution source frame.
+    private static func captureOutputSize(for display: SCDisplay) -> (width: Int, height: Int) {
+        let pixelWidth = CGDisplayPixelsWide(display.displayID)
+        let pixelHeight = CGDisplayPixelsHigh(display.displayID)
+        guard pixelWidth > 0, pixelHeight > 0 else {
+            return (display.width, display.height)
+        }
+        return (max(display.width, pixelWidth), max(display.height, pixelHeight))
+    }
+
     /// Capture → HEVC encode → serialize → send. The encoder is built to match the actual
     /// pixel-buffer dimensions (points vs pixels differ on Retina), and a single bad frame is
     /// skipped (re-requesting a keyframe) rather than aborting the whole stream.
@@ -240,8 +256,10 @@ struct PortviewHostApp {
             guard let activeEncoder = encoder else { continue }
 
             do {
+                let cropRequestedKeyframe = await capture.consumeKeyframeRequest()
+                let forceKeyframe = needsKeyframe || cropRequestedKeyframe
                 let encodeStart = ProcessInfo.processInfo.systemUptime
-                let encoded = try await activeEncoder.encode(frame.pixelBuffer, presentationTime: frame.pts, forceKeyframe: needsKeyframe)
+                let encoded = try await activeEncoder.encode(frame.pixelBuffer, presentationTime: frame.pts, forceKeyframe: forceKeyframe)
                 let encodeMs = (ProcessInfo.processInfo.systemUptime - encodeStart) * 1_000.0
                 let sample = try VideoSampleSerializer.serialize(encoded)
                 let payload = sample.serialized()

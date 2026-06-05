@@ -13,7 +13,7 @@ struct QualityHUD: View {
             if let host = diagnostics.host {
                 line("Host", "\(format(host.fps)) fps  \(format(host.encodedMbps)) Mbps")
                 line("Enc", "\(host.encoderWidth)x\(host.encoderHeight)  @\(host.configuredBitrate / 1_000_000) Mbps  \(format(host.averageEncodeMs)) ms")
-                line("Host bpp", "\(format(hostBitsPerPixel(host)))  \(host.averageFrameBytes) B/f")
+                line("Host bpp", "\(formatBPP(hostBitsPerPixel(host)))  \(host.averageFrameBytes) B/f")
                 line("Crop", rect(host))
             } else {
                 line("Host", "waiting")
@@ -21,7 +21,7 @@ struct QualityHUD: View {
 
             if diagnostics.frameWidth > 0 {
                 line("Recv", "\(format(diagnostics.receivedFPS)) fps  \(format(diagnostics.receivedMbps)) Mbps")
-                line("Client bpp", "\(format(diagnostics.bitsPerPixelPerFrame))  \(Int(diagnostics.averageFrameBytes.rounded())) B/f")
+                line("Client bpp", "\(formatBPP(diagnostics.bitsPerPixelPerFrame))  \(Int(diagnostics.averageFrameBytes.rounded())) B/f")
                 line("Decode", "\(diagnostics.frameWidth)x\(diagnostics.frameHeight)  \(format(diagnostics.averageDecodeMs)) ms")
             } else {
                 line("Recv", "waiting")
@@ -65,5 +65,9 @@ struct QualityHUD: View {
 
     private func format(_ value: Double) -> String {
         String(format: "%.2f", value)
+    }
+
+    private func formatBPP(_ value: Double) -> String {
+        String(format: "%.4f", value)
     }
 }

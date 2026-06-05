@@ -22,11 +22,21 @@ struct SendableAudioFrame: Sendable {
 
 private actor ViewportState {
     private var rect = CGRect(x: 0, y: 0, width: 1, height: 1)
+    private var keyframeRequested = false
 
     func get() -> CGRect { rect }
 
-    func set(_ rect: CGRect) {
+    func set(_ rect: CGRect, requestKeyframe: Bool) {
         self.rect = rect
+        if requestKeyframe {
+            keyframeRequested = true
+        }
+    }
+
+    func consumeKeyframeRequest() -> Bool {
+        let requested = keyframeRequested
+        keyframeRequested = false
+        return requested
     }
 }
 
@@ -43,6 +53,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     let audioFrames: AsyncStream<SendableAudioFrame>
     let width: Int
     let height: Int
+    private let sourceWidth: Int
+    private let sourceHeight: Int
 
     // Audio is converted to a canonical non-interleaved Float32 format; the converter is
     // (re)built from the first audio buffer's format.
@@ -54,10 +66,13 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     private var config: SCStreamConfiguration?
 
     func currentViewport() async -> CGRect { await viewportState.get() }
+    func consumeKeyframeRequest() async -> Bool { await viewportState.consumeKeyframeRequest() }
 
-    init(width: Int, height: Int) {
+    init(width: Int, height: Int, sourceWidth: Int? = nil, sourceHeight: Int? = nil) {
         self.width = width
         self.height = height
+        self.sourceWidth = sourceWidth ?? width
+        self.sourceHeight = sourceHeight ?? height
         (frames, continuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(2))
         (audioFrames, audioContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(8))
         super.init()
@@ -98,19 +113,19 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             : CGRect(x: nx, y: ny, width: nw, height: nh)
         let newRect: CGRect = (nw >= 0.99 && nh >= 0.99)
             ? .zero
-            : CGRect(x: nx * Double(width), y: ny * Double(height),
-                     width: nw * Double(width), height: nh * Double(height))
+            : CGRect(x: nx * Double(sourceWidth), y: ny * Double(sourceHeight),
+                     width: nw * Double(sourceWidth), height: nh * Double(sourceHeight))
         let current = config.sourceRect
         let unchanged = abs(newRect.minX - current.minX) < 1 && abs(newRect.minY - current.minY) < 1
             && abs(newRect.width - current.width) < 1 && abs(newRect.height - current.height) < 1
         if unchanged {
-            await viewportState.set(normalizedRect)
+            await viewportState.set(normalizedRect, requestKeyframe: false)
             return true
         }
         config.sourceRect = newRect
         do {
             try await stream.updateConfiguration(config)
-            await viewportState.set(normalizedRect)
+            await viewportState.set(normalizedRect, requestKeyframe: true)
             return true
         } catch {
             print("viewport update failed: \(error)")

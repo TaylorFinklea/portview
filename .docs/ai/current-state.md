@@ -13,8 +13,10 @@ User device-tested latest app: zoom is better but still softer/blurry vs VNC. Ch
 - Added `QualityStats` protocol msg (19) + tests; host emits ~1 Hz encoder stats: configured bitrate, actual encoded Mbps/fps, avg bytes/frame, keyframes, avg encode ms, encoder dimensions, active viewport.
 - Client computes receive Mbps/fps, bpp/frame, avg decode ms, frame size; streaming toolbar gauge toggles a compact Quality HUD.
 - Metal renderer now has runtime sampler toggle (Linear ↔ Nearest) while HUD is visible; use this to distinguish encoded softness from final texture filtering.
-- Verify run: `swift test --package-path /Users/tfinklea/git/screenshare` → 74 tests / 26 suites green. `xcodegen generate`; `xcodebuild ... -destination "generic/platform=iOS Simulator" ... build` → BUILD SUCCEEDED.
-- Next device run: zoom into text, open HUD, capture Host/Recv Mbps, Host bpp/Client bpp, encode/decode ms, crop, sampler mode, and whether Nearest looks materially sharper.
+- ON-DEVICE HUD #1: Linear looked better than Nearest, but still smoothed. HUD showed the real issue: `Enc 1710x1107 @34 Mbps`, Host/Recv only `~0.06 Mbps`, `~886 B/f`, and at 4x zoom `Crop w1.00 h1.00` / `Frame w1.00 h1.00` → pure digital zoom into a low-res/full-frame source; host magnifier was not helping.
+- Follow-up fix: host now chooses CoreGraphics backing-pixel output when larger than `SCDisplay.width/height`; viewport `sourceRect` still uses source display coordinates. Zoom crop padding now tightens toward 1.0 at high zoom so 4x portrait zoom can produce a non-full crop. Applied crop requests force the next video frame to be a keyframe. Max zoom raised to 6x. HUD bpp precision now 4 decimals.
+- Verify run after follow-up: `swift test --package-path /Users/tfinklea/git/screenshare` → 74 tests / 26 suites green. `xcodegen generate`; `xcodebuild ... -destination "generic/platform=iOS Simulator" ... build` → BUILD SUCCEEDED.
+- Next device run: confirm HUD encoder size increases above 1710x1107 if backing pixels are exposed; at 4x/6x, confirm Crop/Frame become less than 1.00 after settle; compare clarity and record Host/Recv Mbps + bpp.
 
 ## Previous Session (2026-06-02 #3 — QUIC swap + zoom fixes)
 

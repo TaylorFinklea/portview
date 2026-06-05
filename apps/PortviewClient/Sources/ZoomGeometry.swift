@@ -49,7 +49,11 @@ struct ZoomGeometry {
         // Padded, display-aspect (square-normalized) crop bounding the visible part of the window.
         let visX0 = max(0, window.minX), visY0 = max(0, window.minY)
         let visX1 = min(1, window.maxX), visY1 = min(1, window.maxY)
-        let side = min(1, max(visX1 - visX0, visY1 - visY0) * 1.4)
+        // Keep some pan headroom at low zoom, but do not let padding defeat the magnifier at
+        // high zoom. On portrait phones a 1.4x padded display-aspect crop can stay full-screen
+        // even at 4x, leaving the client to do pure digital zoom.
+        let padding = max(1.0, min(1.4, 1.4 - max(0, z - 1) * 0.15))
+        let side = min(1, max(visX1 - visX0, visY1 - visY0) * padding)
         let ccx = min(max((visX0 + visX1) / 2, side / 2), 1 - side / 2)
         let ccy = min(max((visY0 + visY1) / 2, side / 2), 1 - side / 2)
         cropRequest = CGRect(x: ccx - side / 2, y: ccy - side / 2, width: side, height: side)

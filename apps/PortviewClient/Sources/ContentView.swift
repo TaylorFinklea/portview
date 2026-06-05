@@ -43,7 +43,7 @@ struct ContentView: View {
                         onMove: { dx, dy in session.sendPointerMove(dx: dx, dy: dy) },
                         onScroll: { dx, dy in session.sendScroll(dx: dx, dy: dy) },
                         onClick: { session.sendClick() },
-                        onZoom: { zoom = min(4, max(1, $0)) }
+                        onZoom: { zoom = min(6, max(1, $0)) }
                     )
                     .frame(width: size.width, height: size.height)
                     .scaleEffect(zoomGeometry.renderScale, anchor: .center)
