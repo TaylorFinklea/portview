@@ -130,14 +130,10 @@ struct PortviewHostApp {
         func startVideo(on display: SCDisplay) {
             videoTask?.cancel()
             injector = makeInjector(for: display, connection: connection)
-            let output = captureOutputSize(for: display)
-            let capture = CaptureEngine(
-                width: output.width, height: output.height,
-                sourceWidth: display.width, sourceHeight: display.height
-            )
+            let capture = CaptureEngine(width: display.width, height: display.height)
             currentCapture = capture
             videoTask = Task { await pumpVideo(connection, display: display, capture: capture) }
-            print("Streaming display \(display.displayID) source \(display.width)x\(display.height), output \(output.width)x\(output.height).")
+            print("Streaming display \(display.displayID) source \(display.width)x\(display.height).")
         }
 
         for await message in connection.inbound {
@@ -195,18 +191,6 @@ struct PortviewHostApp {
             Task { try? await connection.send(.cursorPosition(CursorPosition(normalizedX: nx, normalizedY: ny))) }
         }
         return injector
-    }
-
-    /// Prefer the display's backing-pixel dimensions when CoreGraphics exposes a higher-resolution
-    /// mode than ScreenCaptureKit's display dimensions. This keeps zoomed text from starting with a
-    /// half-resolution source frame.
-    private static func captureOutputSize(for display: SCDisplay) -> (width: Int, height: Int) {
-        let pixelWidth = CGDisplayPixelsWide(display.displayID)
-        let pixelHeight = CGDisplayPixelsHigh(display.displayID)
-        guard pixelWidth > 0, pixelHeight > 0 else {
-            return (display.width, display.height)
-        }
-        return (max(display.width, pixelWidth), max(display.height, pixelHeight))
     }
 
     /// Capture → HEVC encode → serialize → send. The encoder is built to match the actual

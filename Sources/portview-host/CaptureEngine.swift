@@ -53,8 +53,6 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     let audioFrames: AsyncStream<SendableAudioFrame>
     let width: Int
     let height: Int
-    private let sourceWidth: Int
-    private let sourceHeight: Int
 
     // Audio is converted to a canonical non-interleaved Float32 format; the converter is
     // (re)built from the first audio buffer's format.
@@ -68,11 +66,9 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     func currentViewport() async -> CGRect { await viewportState.get() }
     func consumeKeyframeRequest() async -> Bool { await viewportState.consumeKeyframeRequest() }
 
-    init(width: Int, height: Int, sourceWidth: Int? = nil, sourceHeight: Int? = nil) {
+    init(width: Int, height: Int) {
         self.width = width
         self.height = height
-        self.sourceWidth = sourceWidth ?? width
-        self.sourceHeight = sourceHeight ?? height
         (frames, continuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(2))
         (audioFrames, audioContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(8))
         super.init()
@@ -80,9 +76,12 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
 
     func start(display: SCDisplay, maxFPS: Int) throws {
         let filter = SCContentFilter(display: display, excludingWindows: [])
+        let outputSize = CaptureSizing.outputSize(
+            width: width, height: height, pointPixelScale: filter.pointPixelScale
+        )
         let config = SCStreamConfiguration()
-        config.width = width
-        config.height = height
+        config.width = outputSize.width
+        config.height = outputSize.height
         config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(maxFPS))
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.showsCursor = true
@@ -113,8 +112,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             : CGRect(x: nx, y: ny, width: nw, height: nh)
         let newRect: CGRect = (nw >= 0.99 && nh >= 0.99)
             ? .zero
-            : CGRect(x: nx * Double(sourceWidth), y: ny * Double(sourceHeight),
-                     width: nw * Double(sourceWidth), height: nh * Double(sourceHeight))
+            : CGRect(x: nx * Double(width), y: ny * Double(height),
+                     width: nw * Double(width), height: nh * Double(height))
         let current = config.sourceRect
         let unchanged = abs(newRect.minX - current.minX) < 1 && abs(newRect.minY - current.minY) < 1
             && abs(newRect.width - current.width) < 1 && abs(newRect.height - current.height) < 1

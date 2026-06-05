@@ -12,7 +12,7 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 
 ### Now
 - [x] On-device verification of the "do all of it" features — user confirmed all new features work.
-- [ ] **On-device video quality diagnosis with HUD** — screenshot #1 showed pure digital zoom into full 1710x1107 frame (`Crop/Frame w1.00`, ~0.06 Mbps actual). Follow-up build captures backing pixels when available, tightens high-zoom crop, forces keyframe after crop, raises max zoom to 6x, and shows 4-decimal bpp. Device test: confirm encoder size >1710x1107 if available; confirm Crop/Frame <1.00 at 4x/6x after settle; record clarity + Host/Recv Mbps + bpp.
+- [ ] **On-device video quality diagnosis with HUD** — screenshot #1 showed pure digital zoom into full 1710x1107 frame (`Crop/Frame w1.00`, ~0.06 Mbps actual). Follow-up #1 moved crop but only to `w0.93 h0.93`; screenshot #2 still encoded `1710x1107`, `~0.05 Mbps`, `810 B/f`, `bpp 0.0034`. Current build uses `SCContentFilter.pointPixelScale` for output size (not CoreGraphics pixels), keeps `sourceRect` in display points, and adds encoder quality hints. Device test: confirm encoder size >1710x1107 (likely ~3420x2214 on 2x), record clarity + Host/Recv Mbps/B/f/bpp + Crop/Frame; if still soft, tune effective crop/bitrate next.
 - [ ] **On-device test of QUIC + zoom overhaul** — QUIC is now the default transport (only loopback-verified so far): confirm connect/stream/control/clipboard/audio/files all still work over QUIC, ideally over a real/Tailscale link to gauge the latency win. Confirm zoom behavior while collecting HUD data.
 
 ### Next

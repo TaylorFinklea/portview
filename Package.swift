@@ -24,6 +24,10 @@ let package = Package(
             name: "portview-host",
             dependencies: ["PortviewProtocol", "PortviewTransport", "PortviewMedia"]
         ),
+        .testTarget(
+            name: "PortviewHostTests",
+            dependencies: ["portview-host"]
+        ),
         .target(name: "PortviewMedia", dependencies: ["PortviewProtocol"]),
         .testTarget(
             name: "PortviewMediaTests",
