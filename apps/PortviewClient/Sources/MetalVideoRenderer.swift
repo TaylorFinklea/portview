@@ -11,8 +11,11 @@ final class MetalVideoRenderer {
     private let device: MTLDevice?
     private let commandQueue: MTLCommandQueue?
     private let pipeline: MTLRenderPipelineState?
+    private let linearSampler: MTLSamplerState?
+    private let nearestSampler: MTLSamplerState?
     private var textureCache: CVMetalTextureCache?
     private weak var layer: CAMetalLayer?
+    var samplerMode: VideoSamplerMode = .linear
 
     init() {
         let device = MTLCreateSystemDefaultDevice()
@@ -21,8 +24,12 @@ final class MetalVideoRenderer {
         if let device {
             CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &textureCache)
             pipeline = Self.makePipeline(device: device)
+            linearSampler = Self.makeSampler(device: device, filter: .linear)
+            nearestSampler = Self.makeSampler(device: device, filter: .nearest)
         } else {
             pipeline = nil
+            linearSampler = nil
+            nearestSampler = nil
         }
     }
 
@@ -53,13 +60,16 @@ final class MetalVideoRenderer {
         pass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
         pass.colorAttachments[0].storeAction = .store
 
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+        let sampler = samplerMode == .linear ? linearSampler : nearestSampler
+        guard let sampler,
+              let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
 
         var scale = Self.aspectFitScale(content: CGSize(width: width, height: height), into: layer.drawableSize)
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBytes(&scale, length: MemoryLayout<SIMD2<Float>>.size, index: 0)
         encoder.setFragmentTexture(sourceTexture, index: 0)
+        encoder.setFragmentSamplerState(sampler, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
         commandBuffer.present(drawable)
@@ -93,8 +103,7 @@ final class MetalVideoRenderer {
             out.uv = uvs[vid];
             return out;
         }
-        fragment float4 portview_fragment(VSOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
-            constexpr sampler s(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+        fragment float4 portview_fragment(VSOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]]) {
             return tex.sample(s, in.uv);
         }
         """
@@ -104,6 +113,15 @@ final class MetalVideoRenderer {
         descriptor.fragmentFunction = library.makeFunction(name: "portview_fragment")
         descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
         return try? device.makeRenderPipelineState(descriptor: descriptor)
+    }
+
+    private static func makeSampler(device: MTLDevice, filter: MTLSamplerMinMagFilter) -> MTLSamplerState? {
+        let descriptor = MTLSamplerDescriptor()
+        descriptor.minFilter = filter
+        descriptor.magFilter = filter
+        descriptor.sAddressMode = .clampToEdge
+        descriptor.tAddressMode = .clampToEdge
+        return device.makeSamplerState(descriptor: descriptor)
     }
 }
 

@@ -18,6 +18,7 @@ public enum AnyMessage: Equatable, Sendable {
     case fileChunk(FileChunk)
     case audioFrame(AudioFrame)
     case viewport(Viewport)
+    case qualityStats(QualityStats)
 
     public var messageType: MessageType {
         switch self {
@@ -39,6 +40,7 @@ public enum AnyMessage: Equatable, Sendable {
         case .fileChunk: .fileChunk
         case .audioFrame: .audioFrame
         case .viewport: .viewport
+        case .qualityStats: .qualityStats
         }
     }
 }

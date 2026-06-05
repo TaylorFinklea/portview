@@ -15,6 +15,8 @@ struct ContentView: View {
     @State private var showScanner = false
     @State private var showFileImporter = false
     @State private var zoom: CGFloat = 1
+    @State private var showQualityHUD = false
+    @State private var samplerMode: VideoSamplerMode = .linear
     @State private var keyboardActive = false
     /// Sticky modifiers armed for the next keystroke (cleared after it's sent).
     @State private var armed: KeyModifiers = []
@@ -82,6 +84,17 @@ struct ContentView: View {
                                 Button { zoom = 1 } label: { Image(systemName: "minus.magnifyingglass") }
                                     .padding(8).background(.ultraThinMaterial, in: Circle())
                             }
+                            Button { showQualityHUD.toggle() } label: { Image(systemName: "gauge") }
+                                .padding(8).background(.ultraThinMaterial, in: Circle())
+                            if showQualityHUD {
+                                Button {
+                                    samplerMode = samplerMode.next
+                                    session.renderer.samplerMode = samplerMode
+                                } label: {
+                                    Image(systemName: samplerMode == .linear ? "circle.lefthalf.filled" : "circle.righthalf.filled")
+                                }
+                                .padding(8).background(.ultraThinMaterial, in: Circle())
+                            }
                             if session.displays.count > 1 {
                                 Menu {
                                     ForEach(session.displays, id: \.id) { display in
@@ -141,8 +154,22 @@ struct ContentView: View {
                                 Spacer()
                             }
                         }
+
+                        if showQualityHUD {
+                            HStack {
+                                QualityHUD(
+                                    diagnostics: session.qualityDiagnostics,
+                                    zoom: zoom,
+                                    renderScale: zoomGeometry.renderScale,
+                                    frameViewport: session.frameViewport,
+                                    samplerMode: samplerMode
+                                )
+                                Spacer()
+                            }
+                        }
                     }
                     .padding()
+                    .onAppear { session.renderer.samplerMode = samplerMode }
                     .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item]) { result in
                         if case .success(let url) = result {
                             guard url.startAccessingSecurityScopedResource() else { return }

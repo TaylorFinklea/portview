@@ -219,6 +219,7 @@ struct PortviewHostApp {
         var encoderHeight = 0
         var sequence: UInt64 = 0
         var needsKeyframe = true
+        var stats = QualityStatsAccumulator()
 
         for await frame in capture.frames {
             if Task.isCancelled { break }  // display switch / disconnect — stop this capture promptly
@@ -239,18 +240,31 @@ struct PortviewHostApp {
             guard let activeEncoder = encoder else { continue }
 
             do {
+                let encodeStart = ProcessInfo.processInfo.systemUptime
                 let encoded = try await activeEncoder.encode(frame.pixelBuffer, presentationTime: frame.pts, forceKeyframe: needsKeyframe)
+                let encodeMs = (ProcessInfo.processInfo.systemUptime - encodeStart) * 1_000.0
                 let sample = try VideoSampleSerializer.serialize(encoded)
+                let payload = sample.serialized()
                 sequence += 1
                 needsKeyframe = false
+                stats.recordFrame(byteCount: payload.count, isKeyframe: sample.isKeyframe, encodeMs: encodeMs)
                 try await connection.send(.videoFrame(VideoFrame(
                     sequence: sequence,
                     ptsMicros: UInt64(max(0, CMTimeGetSeconds(frame.pts)) * 1_000_000),
                     isKeyframe: sample.isKeyframe,
                     displayID: UInt32(display.displayID),
                     width: UInt32(bufferWidth), height: UInt32(bufferHeight),
-                    data: sample.serialized()
+                    data: payload
                 )))
+                if let quality = stats.snapshotIfDue(
+                    displayID: UInt32(display.displayID),
+                    encoderWidth: encoderWidth,
+                    encoderHeight: encoderHeight,
+                    configuredBitrate: activeEncoder.averageBitRate,
+                    viewport: await capture.currentViewport()
+                ) {
+                    try? await connection.send(.qualityStats(quality))
+                }
             } catch {
                 needsKeyframe = true
                 if sequence == 0 { print("frame skipped (will retry as keyframe): \(error)") }

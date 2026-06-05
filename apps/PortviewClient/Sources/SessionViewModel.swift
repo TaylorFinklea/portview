@@ -25,9 +25,11 @@ final class SessionViewModel: ObservableObject {
     /// Normalized region of the display the host's current frames represent (the magnifier crop).
     /// Updated when the host confirms a viewport; the client renders the residual zoom against it.
     @Published var frameViewport = CGRect(x: 0, y: 0, width: 1, height: 1)
+    @Published var qualityDiagnostics = QualityDiagnostics()
     private var pendingViewport = CGRect(x: 0, y: 0, width: 1, height: 1)
     private var lastViewportSent = CGRect(x: 0, y: 0, width: 1, height: 1)
     private var viewportSendScheduled = false
+    private var qualityTracker = QualityDiagnosticsTracker()
     let renderer = MetalVideoRenderer()
     private let decoder = VideoDecoder()
     private let audioPlayer = AudioPlayer()
@@ -76,6 +78,7 @@ final class SessionViewModel: ObservableObject {
         displays = []
         activeDisplayID = 0
         resetViewport()
+        resetQualityDiagnostics()
         audioPlayer.stop()
     }
 
@@ -87,6 +90,7 @@ final class SessionViewModel: ObservableObject {
         displaySize = CGSize(width: max(1, Double(display.width)), height: max(1, Double(display.height)))
         cursorNormalized = CGPoint(x: 0.5, y: 0.5)
         resetViewport()
+        resetQualityDiagnostics()
         send(.switchDisplay(SwitchDisplay(displayID: displayID)))
     }
 
@@ -115,6 +119,11 @@ final class SessionViewModel: ObservableObject {
         frameViewport = full
         pendingViewport = full
         lastViewportSent = full
+    }
+
+    private func resetQualityDiagnostics() {
+        qualityTracker = QualityDiagnosticsTracker()
+        qualityDiagnostics = QualityDiagnostics()
     }
 
     // MARK: - Input (client → host)
@@ -216,9 +225,14 @@ final class SessionViewModel: ObservableObject {
                     client.didStartStreaming()
                     status = .streaming
                 case .videoFrame(let frame):
+                    let decodeStart = ProcessInfo.processInfo.systemUptime
                     if let sample = try? rebuild(frame),
                        let pixelBuffer = try? await decoder.decode(sample) {
+                        let decodeMs = (ProcessInfo.processInfo.systemUptime - decodeStart) * 1_000.0
                         renderer.render(pixelBuffer)
+                        if let snapshot = qualityTracker.recordDecodedFrame(frame, decodeMs: decodeMs) {
+                            qualityDiagnostics = snapshot
+                        }
                     }
                 case .cursorPosition(let cursor):
                     cursorNormalized = CGPoint(x: cursor.normalizedX, y: cursor.normalizedY)
@@ -229,6 +243,8 @@ final class SessionViewModel: ObservableObject {
                 case .viewport(let v):
                     // Host confirmed the region its frames now represent — settle the residual zoom to it.
                     frameViewport = CGRect(x: v.normalizedX, y: v.normalizedY, width: v.normalizedW, height: v.normalizedH)
+                case .qualityStats(let stats):
+                    qualityDiagnostics = qualityTracker.updateHostStats(stats)
                 case .error(let error):
                     status = .failed("Host error: \(error.message)")
                     return

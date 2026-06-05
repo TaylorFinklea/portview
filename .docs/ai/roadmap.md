@@ -12,7 +12,8 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 
 ### Now
 - [x] On-device verification of the "do all of it" features — user confirmed all new features work.
-- [ ] **On-device test of QUIC + zoom overhaul** — QUIC is now the default transport (only loopback-verified so far): confirm connect/stream/control/clipboard/audio/files all still work over QUIC, ideally over a real/Tailscale link to gauge the latency win. Confirm the zoom overhaul: jumpy/off-center fixes + the host-side magnifier (crisp zoom — does the residual settle look seamless, any reconfig stutter?).
+- [ ] **On-device video quality diagnosis with HUD** — zoom is better but still softer than VNC. Build includes a Quality HUD (gauge button) and Linear/Nearest sampler toggle. During device test, record Host/Recv Mbps, Host bpp/Client bpp, encode/decode ms, crop, sampler mode, and whether Nearest is sharper. Use results to choose encoder/crop/render fix.
+- [ ] **On-device test of QUIC + zoom overhaul** — QUIC is now the default transport (only loopback-verified so far): confirm connect/stream/control/clipboard/audio/files all still work over QUIC, ideally over a real/Tailscale link to gauge the latency win. Confirm zoom behavior while collecting HUD data.
 
 ### Next
 - [ ] QUIC lane-splitting (per-frame unidirectional video streams); validate QUIC latency over a real/Tailscale link.
@@ -20,7 +21,7 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 - [ ] Magnifier follow-ups (if on-device testing shows them): tune the residual-settle timing; consider raising encode bitrate when cropped; smooth the crop transition.
 
 ### Later
-- [ ] M6 polish: adaptive bitrate/fps, reconnect + APNs re-wake, settings, quality HUD. TCC onboarding UI. Device keypairs + revocable PairingStore.
+- [ ] M6 polish: adaptive bitrate/fps, reconnect + APNs re-wake, settings, TCC onboarding UI. Device keypairs + revocable PairingStore. *(Quality HUD now exists as dev diagnostics; product polish still TBD.)*
 
 ## Milestones
 

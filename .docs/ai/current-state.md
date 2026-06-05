@@ -6,7 +6,17 @@
 
 `main`
 
-## Latest Session (2026-06-02 #3 — QUIC swap + zoom fixes)
+## Latest Session (2026-06-05 — video quality diagnostics)
+
+User device-tested latest app: zoom is better but still softer/blurry vs VNC. Chose instrumentation before more features.
+
+- Added `QualityStats` protocol msg (19) + tests; host emits ~1 Hz encoder stats: configured bitrate, actual encoded Mbps/fps, avg bytes/frame, keyframes, avg encode ms, encoder dimensions, active viewport.
+- Client computes receive Mbps/fps, bpp/frame, avg decode ms, frame size; streaming toolbar gauge toggles a compact Quality HUD.
+- Metal renderer now has runtime sampler toggle (Linear ↔ Nearest) while HUD is visible; use this to distinguish encoded softness from final texture filtering.
+- Verify run: `swift test --package-path /Users/tfinklea/git/screenshare` → 74 tests / 26 suites green. `xcodegen generate`; `xcodebuild ... -destination "generic/platform=iOS Simulator" ... build` → BUILD SUCCEEDED.
+- Next device run: zoom into text, open HUD, capture Host/Recv Mbps, Host bpp/Client bpp, encode/decode ms, crop, sampler mode, and whether Nearest looks materially sharper.
+
+## Previous Session (2026-06-02 #3 — QUIC swap + zoom fixes)
 
 User confirmed all "do all of it" features work on device. Then: "switch to QUIC and actually test it" + "zoomed-in experience is still terrible."
 

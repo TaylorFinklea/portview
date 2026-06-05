@@ -20,12 +20,23 @@ struct SendableAudioFrame: Sendable {
     let data: [UInt8]
 }
 
+private actor ViewportState {
+    private var rect = CGRect(x: 0, y: 0, width: 1, height: 1)
+
+    func get() -> CGRect { rect }
+
+    func set(_ rect: CGRect) {
+        self.rect = rect
+    }
+}
+
 /// Captures a display with ScreenCaptureKit and exposes frames as an `AsyncStream`.
 /// `.bufferingNewest(2)` drops stale frames so latency can't accumulate behind a slow encoder.
 final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
     private var stream: SCStream?
     private let queue = DispatchQueue(label: "portview.capture")
     private let audioQueue = DispatchQueue(label: "portview.capture.audio")
+    private let viewportState = ViewportState()
     private let continuation: AsyncStream<SendableFrame>.Continuation
     let frames: AsyncStream<SendableFrame>
     private let audioContinuation: AsyncStream<SendableAudioFrame>.Continuation
@@ -41,6 +52,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     // Retained so `setViewport` can re-crop the live stream (the "magnifier"). Output dimensions
     // stay constant, so the encoder is unaffected; only the captured region changes.
     private var config: SCStreamConfiguration?
+
+    func currentViewport() async -> CGRect { await viewportState.get() }
 
     init(width: Int, height: Int) {
         self.width = width
@@ -80,6 +93,9 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
                      normalizedW nw: Double, normalizedH nh: Double) async -> Bool {
         guard let stream, let config else { return false }
         // Near-full (within 1%) → no crop; `.zero` captures the whole display.
+        let normalizedRect: CGRect = (nw >= 0.99 && nh >= 0.99)
+            ? CGRect(x: 0, y: 0, width: 1, height: 1)
+            : CGRect(x: nx, y: ny, width: nw, height: nh)
         let newRect: CGRect = (nw >= 0.99 && nh >= 0.99)
             ? .zero
             : CGRect(x: nx * Double(width), y: ny * Double(height),
@@ -87,10 +103,14 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         let current = config.sourceRect
         let unchanged = abs(newRect.minX - current.minX) < 1 && abs(newRect.minY - current.minY) < 1
             && abs(newRect.width - current.width) < 1 && abs(newRect.height - current.height) < 1
-        if unchanged { return true }
+        if unchanged {
+            await viewportState.set(normalizedRect)
+            return true
+        }
         config.sourceRect = newRect
         do {
             try await stream.updateConfiguration(config)
+            await viewportState.set(normalizedRect)
             return true
         } catch {
             print("viewport update failed: \(error)")

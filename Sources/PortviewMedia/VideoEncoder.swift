@@ -7,6 +7,7 @@ import CoreVideo
 /// One pixel buffer in → one encoded `CMSampleBuffer` out.
 public final class VideoEncoder: @unchecked Sendable {
     private let session: VTCompressionSession
+    public let averageBitRate: Int
 
     public init(width: Int, height: Int, codec: CMVideoCodecType = kCMVideoCodecType_HEVC,
                 averageBitRate: Int? = nil) throws {
@@ -40,6 +41,7 @@ public final class VideoEncoder: @unchecked Sendable {
         // LAN/QUIC link bandwidth isn't the constraint, so this is generous (clamped 12–80 Mbps).
         // Callers can override.
         let bitRate = averageBitRate ?? min(80_000_000, max(12_000_000, Int(Double(width * height) * 18.0)))
+        self.averageBitRate = bitRate
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitRate as CFNumber)
         VTCompressionSessionPrepareToEncodeFrames(session)
     }

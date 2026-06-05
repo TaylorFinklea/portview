@@ -34,6 +34,7 @@ public enum Frame {
         case .fileChunk(let m): encode(m)
         case .audioFrame(let m): encode(m)
         case .viewport(let m): encode(m)
+        case .qualityStats(let m): encode(m)
         }
     }
 
@@ -71,6 +72,7 @@ public enum Frame {
         case .fileChunk: return .fileChunk(try FileChunk(from: &r))
         case .audioFrame: return .audioFrame(try AudioFrame(from: &r))
         case .viewport: return .viewport(try Viewport(from: &r))
+        case .qualityStats: return .qualityStats(try QualityStats(from: &r))
         }
     }
 }
