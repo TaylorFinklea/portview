@@ -34,10 +34,12 @@ public final class VideoEncoder: @unchecked Sendable {
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_HEVC_Main_AutoLevel)
-        // Set an explicit target bitrate (VideoToolbox's default is conservative → soft/pixelated).
-        // Heuristic ≈ 0.1 bits/pixel/frame × 60 fps, clamped; callers can override. This is what the
-        // host magnifier's cropped region is encoded at, so it directly affects zoom crispness.
-        let bitRate = averageBitRate ?? min(50_000_000, max(8_000_000, Int(Double(width * height) * 6.0)))
+        // Set an explicit target bitrate (VideoToolbox's default is conservative → soft text). The
+        // whole display is encoded at this rate and the client digitally zooms into it, so bits per
+        // pixel is what makes zoomed-in text crisp. Heuristic ≈ 0.3 bits/pixel/frame × 60 fps; on a
+        // LAN/QUIC link bandwidth isn't the constraint, so this is generous (clamped 12–80 Mbps).
+        // Callers can override.
+        let bitRate = averageBitRate ?? min(80_000_000, max(12_000_000, Int(Double(width * height) * 18.0)))
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bitRate as CFNumber)
         VTCompressionSessionPrepareToEncodeFrames(session)
     }
