@@ -6,7 +6,17 @@
 
 `main`
 
-## Latest Session (2026-06-05 — video quality diagnostics)
+## Latest Session (2026-06-05 — persistent pairing + motion rollback)
+
+- Fixed saved pairing persistence for QR/manual reconnects: new `PairingCoordinator` keeps pending payload outside the connect form; streaming view commits only after `.streaming`, so view replacement no longer drops the save.
+- Saved Macs section now appears before QR pairing; tapping a saved Mac reconnects with stored host/port/cert pin and re-saves on success to keep it most-recent.
+- Added `PortviewClientTests` XcodeGen unit-test target + `PairingCoordinatorTests` (red: missing coordinator; green after implementation).
+- Device build for `Roshar` → BUILD SUCCEEDED; installed `dev.finklea.portview` via `xcrun devicectl`.
+- User reported the high-res/quality-hint build looked less smooth and jerky. Rolled back interactive capture output to display-point dimensions and removed VideoToolbox quality-over-speed hints; keep explicit bitrate heuristic.
+- Verify: `swift test --package-path /Users/tfinklea/git/screenshare` → 76 tests / 27 suites green. `xcodebuild test ... -destination "platform=iOS Simulator,name=iPhone 17"` → 1 test green.
+- Caveat: motion rollback is host-side; restart `portview-host` before retesting. Host identity is still ephemeral per server run; saved pairings are valid while the same host process/port/cert is running.
+
+## Previous Session (2026-06-05 — video quality diagnostics)
 
 User device-tested latest app: zoom is better but still softer/blurry vs VNC. Chose instrumentation before more features.
 
@@ -16,9 +26,9 @@ User device-tested latest app: zoom is better but still softer/blurry vs VNC. Ch
 - ON-DEVICE HUD #1: Linear looked better than Nearest, but still smoothed. HUD showed the real issue: `Enc 1710x1107 @34 Mbps`, Host/Recv only `~0.06 Mbps`, `~886 B/f`, and at 4x zoom `Crop w1.00 h1.00` / `Frame w1.00 h1.00` → pure digital zoom into a low-res/full-frame source; host magnifier was not helping.
 - Follow-up #1: crop padding tightens at high zoom, crop changes force next frame keyframe, max zoom 6x, HUD bpp precision 4 decimals. Verify: 74 tests / 26 suites; iOS sim build green.
 - ON-DEVICE HUD #2: crop now moves, but not enough: `Crop x0.00 y0.02 w0.93 h0.93`, `Frame x0.00 y0.02 w0.93 h0.93`; encoder still `1710x1107 @34 Mbps`, actual `~0.05 Mbps`, `810 B/f`, `bpp 0.0034` → CoreGraphics backing-pixel probe did not raise ScreenCaptureKit output.
-- Follow-up #2: SDK headers show `SCDisplay.width/height` are points; `SCContentFilter.pointPixelScale` is the scale. Host now sets `SCStreamConfiguration.width/height = display points * filter.pointPixelScale` via tested `CaptureSizing`, while `sourceRect` stays in display-point coordinates. Encoder now biases quality (`Quality=1.0`, quality over speed, expected fps, 1s keyframe cap).
-- Verify run after follow-up #2: `swift test --package-path /Users/tfinklea/git/screenshare` → 76 tests / 27 suites green. `xcodegen generate`; `xcodebuild ... -destination "generic/platform=iOS Simulator" ... build` → BUILD SUCCEEDED.
-- Next device run: confirm HUD encoder size increases above `1710x1107` (likely `~3420x2214` on 2x), configured bitrate may clamp near `80 Mbps`; compare clarity and record actual Host/Recv Mbps, B/f, bpp, Crop/Frame. If still soft after Enc grows, next suspect = effective crop too wide / actual static-frame bitrate too low.
+- Follow-up #2: SDK headers show `SCDisplay.width/height` are points; `SCContentFilter.pointPixelScale` is the scale. Tried `SCStreamConfiguration.width/height = display points * filter.pointPixelScale` plus encoder quality hints.
+- ON-DEVICE HUD #3: high-res/quality-hint build looked less smooth and jerky. Latest session reverted interactive output to display-point dimensions and removed quality-over-speed hints.
+- Next device run after restarting host: confirm smoothness returns, then record HUD Host/Recv Mbps, B/f, bpp, Crop/Frame. If soft but smooth, tune effective crop + bitrate/adaptive rate next; do not re-pursue full-frame Retina output as the default interactive path.
 
 ## Previous Session (2026-06-02 #3 — QUIC swap + zoom fixes)
 

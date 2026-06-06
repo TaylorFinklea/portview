@@ -34,10 +34,28 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: K7CBQW6MPG
+  PortviewClientTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "26.0"
+    sources:
+      - Tests
+    dependencies:
+      - target: PortviewClient
+      - package: Portview
+        product: PortviewTransport
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.finklea.portview.tests
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   PortviewClient:
     build:
       targets:
         PortviewClient: all
+        PortviewClientTests: [test]
+    test:
+      targets:
+        - PortviewClientTests
     run:
       config: Debug

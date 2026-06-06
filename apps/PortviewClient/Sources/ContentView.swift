@@ -7,8 +7,7 @@ struct ContentView: View {
     @StateObject private var session = SessionViewModel()
     @StateObject private var discovery = DiscoveryModel()
     @StateObject private var savedHosts = SavedHostsStore()
-    /// Pairing to persist if the in-flight connection reaches `.streaming`.
-    @State private var pendingSave: PairingPayload?
+    @StateObject private var pairing = PairingCoordinator()
     @State private var host = ""
     @State private var port = ""
     @State private var pin = ""
@@ -182,22 +181,15 @@ struct ContentView: View {
                 }
             }
             .ignoresSafeArea()
+            .onAppear { commitPendingPairingIfStreaming() }
         } else {
             NavigationStack {
                 Form {
-                    Section("Pair by QR") {
-                        Button {
-                            showScanner = true
-                        } label: {
-                            Label("Scan the QR shown on your Mac", systemImage: "qrcode.viewfinder")
-                        }
-                    }
-
                     if !savedHosts.hosts.isEmpty {
                         Section("Saved Macs") {
                             ForEach(savedHosts.hosts) { saved in
                                 Button {
-                                    pendingSave = saved.payload
+                                    pairing.markPending(saved.payload)
                                     session.connect(payload: saved.payload)
                                 } label: {
                                     VStack(alignment: .leading, spacing: 2) {
@@ -208,6 +200,14 @@ struct ContentView: View {
                                 }
                             }
                             .onDelete { savedHosts.remove(atOffsets: $0) }
+                        }
+                    }
+
+                    Section("Pair by QR") {
+                        Button {
+                            showScanner = true
+                        } label: {
+                            Label("Scan the QR shown on your Mac", systemImage: "qrcode.viewfinder")
                         }
                     }
 
@@ -238,7 +238,7 @@ struct ContentView: View {
                             .font(.system(.body, design: .monospaced))
                         Button("Connect manually") {
                             if let parsedPort = UInt16(port) {
-                                pendingSave = PairingPayload(host: host, port: parsedPort, pinHex: pin, name: host)
+                                pairing.markPending(PairingPayload(host: host, port: parsedPort, pinHex: pin, name: host))
                                 session.connect(host: host, port: parsedPort, pinHex: pin)
                             }
                         }
@@ -259,21 +259,21 @@ struct ContentView: View {
                     QRScannerView { code in
                         showScanner = false
                         if let payload = PairingPayload(urlString: code) {
-                            pendingSave = payload
+                            pairing.markPending(payload)
                             session.connect(payload: payload)
                         }
                     }
                     .ignoresSafeArea()
                 }
-                .onChange(of: session.status) { _, newValue in
-                    if newValue == .streaming, let payload = pendingSave {
-                        savedHosts.remember(payload)
-                        pendingSave = nil
-                    }
-                }
                 .onAppear { discovery.start() }
                 .onDisappear { discovery.stop() }
             }
+        }
+    }
+
+    private func commitPendingPairingIfStreaming() {
+        pairing.commitIfStreaming(session.status == .streaming) { payload in
+            savedHosts.remember(payload)
         }
     }
 }

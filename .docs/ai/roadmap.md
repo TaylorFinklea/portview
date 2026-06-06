@@ -12,12 +12,13 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 
 ### Now
 - [x] On-device verification of the "do all of it" features — user confirmed all new features work.
-- [ ] **On-device video quality diagnosis with HUD** — screenshot #1 showed pure digital zoom into full 1710x1107 frame (`Crop/Frame w1.00`, ~0.06 Mbps actual). Follow-up #1 moved crop but only to `w0.93 h0.93`; screenshot #2 still encoded `1710x1107`, `~0.05 Mbps`, `810 B/f`, `bpp 0.0034`. Current build uses `SCContentFilter.pointPixelScale` for output size (not CoreGraphics pixels), keeps `sourceRect` in display points, and adds encoder quality hints. Device test: confirm encoder size >1710x1107 (likely ~3420x2214 on 2x), record clarity + Host/Recv Mbps/B/f/bpp + Crop/Frame; if still soft, tune effective crop/bitrate next.
+- [ ] **On-device video quality diagnosis with HUD** — screenshot #1 showed pure digital zoom into full 1710x1107 frame (`Crop/Frame w1.00`, ~0.06 Mbps actual). Follow-up #1 moved crop but only to `w0.93 h0.93`; screenshot #2 still encoded `1710x1107`, `~0.05 Mbps`, `810 B/f`, `bpp 0.0034`. The full-frame Retina attempt (`SCContentFilter.pointPixelScale` output + encoder quality hints) looked less smooth/jerky on device, so it was rolled back to point-sized interactive capture with real-time encoder defaults. Device test after host restart: confirm smoothness returns; if still soft, tune effective crop + bitrate/adaptive rate instead of defaulting to full-frame Retina output.
 - [ ] **On-device test of QUIC + zoom overhaul** — QUIC is now the default transport (only loopback-verified so far): confirm connect/stream/control/clipboard/audio/files all still work over QUIC, ideally over a real/Tailscale link to gauge the latency win. Confirm zoom behavior while collecting HUD data.
 
 ### Next
 - [ ] QUIC lane-splitting (per-frame unidirectional video streams); validate QUIC latency over a real/Tailscale link.
 - [ ] Mac→iPhone file transfer; tight A/V lip-sync.
+- [ ] Persist host identity in Keychain so saved pairings survive host restarts; current saved pairing works while the same server process/port/cert is still running.
 - [ ] Magnifier follow-ups (if on-device testing shows them): tune the residual-settle timing; consider raising encode bitrate when cropped; smooth the crop transition.
 
 ### Later
@@ -41,7 +42,7 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 - [x] Pinch-to-zoom on the video that follows the cursor (host reports `CursorPosition`; client clamped layer transform). *(Approximates view-bounds, ignores letterbox; hardware-verify pending.)*
 - [x] Bonjour advertise (`_portview._tcp`) + NWBrowser discovery + client list; manual IP/port retained. *(LAN-functional verify needs devices.)*
 - [x] QR pairing — host terminal QR + pairing URL (`PairingPayload`); client camera scanner → auto-connect. Cert pinning enforced. *(Device keypairs + revocable PairingStore still to do.)*
-- [x] Saved-Macs list (`SavedHostsStore`, UserDefaults; one-tap reconnect, persists on successful stream). *(TCC onboarding still to do.)*
+- [x] Saved-Macs list (`SavedHostsStore`, UserDefaults; one-tap reconnect, persists on successful stream). Persistence bug fixed 2026-06-05: QR/manual pending pairings now survive the connect-form → streaming view switch and commit only after `.streaming`.
 - [x] Modifier keys / chords (⌘⇧⌥⌃) — `KeyModifiers` + char-or-special `KeyEvent`; host CGEventFlags + ANSI keycodes; client sticky modifier bar.
 - [x] Separate 2-finger scroll from pinch-zoom (per-gesture intent lock).
 
