@@ -6,7 +6,15 @@
 
 `main`
 
-## Latest Session (2026-06-05 — persistent pairing + motion rollback)
+## Latest Session (2026-06-10 — motion debounce follow-up)
+
+- User retest after `3d8309b`: rendering quality back to prior baseline, but motion jerkiness worse.
+- Root-cause hypothesis: client still sent viewport/crop requests during continuous pointer movement; host `SCStream.updateConfiguration` + keyframe requests can stutter the interactive path.
+- Implemented `ViewportRequestScheduler`: 250 ms latest-only idle debounce, reset cancellation, near-duplicate suppression; `SessionViewModel` delegates host crop requests to it.
+- Verify: `swiftc -typecheck apps/PortviewClient/Sources/ViewportRequestScheduler.swift`; `git diff --check`; `swift test --package-path /Users/tfinklea/git/screenshare` → 76 tests / 27 suites; `xcodebuild test -project apps/PortviewClient/PortviewClient.xcodeproj -scheme PortviewClient -destination 'platform=iOS Simulator,name=iPhone 17'` → 4 tests; Roshar device build → BUILD SUCCEEDED; `devicectl` installed `dev.finklea.portview`.
+- Caveat: device build still emits existing warnings: `UIScreen.main` deprecated in `MetalVideoRenderer.swift`; interface orientations validation.
+
+## Previous Session (2026-06-05 — persistent pairing + motion rollback)
 
 - Fixed saved pairing persistence for QR/manual reconnects: new `PairingCoordinator` keeps pending payload outside the connect form; streaming view commits only after `.streaming`, so view replacement no longer drops the save.
 - Saved Macs section now appears before QR pairing; tapping a saved Mac reconnects with stored host/port/cert pin and re-saves on success to keep it most-recent.

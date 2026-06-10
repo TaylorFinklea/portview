@@ -26,10 +26,14 @@ final class SessionViewModel: ObservableObject {
     /// Updated when the host confirms a viewport; the client renders the residual zoom against it.
     @Published var frameViewport = CGRect(x: 0, y: 0, width: 1, height: 1)
     @Published var qualityDiagnostics = QualityDiagnostics()
-    private var pendingViewport = CGRect(x: 0, y: 0, width: 1, height: 1)
-    private var lastViewportSent = CGRect(x: 0, y: 0, width: 1, height: 1)
-    private var viewportSendScheduled = false
     private var qualityTracker = QualityDiagnosticsTracker()
+    private lazy var viewportRequests = ViewportRequestScheduler { [weak self] rect in
+        guard let self else { return }
+        self.send(.viewport(Viewport(
+            displayID: self.activeDisplayID,
+            normalizedX: rect.minX, normalizedY: rect.minY,
+            normalizedW: rect.width, normalizedH: rect.height)))
+    }
     let renderer = MetalVideoRenderer()
     private let decoder = VideoDecoder()
     private let audioPlayer = AudioPlayer()
@@ -94,31 +98,17 @@ final class SessionViewModel: ObservableObject {
         send(.switchDisplay(SwitchDisplay(displayID: displayID)))
     }
 
-    /// Ask the host to crop its capture to `rect` (normalized) — the magnifier. Coalesced to ~8 Hz
-    /// (with a trailing send) so a fast pinch/pan doesn't thrash the host's stream reconfiguration.
+    /// Ask the host to crop its capture to `rect` (normalized) — the magnifier. Debounced until
+    /// cursor/zoom movement settles so ScreenCaptureKit stream reconfiguration doesn't stutter the
+    /// interactive path.
     func requestViewport(_ rect: CGRect) {
-        pendingViewport = rect
-        guard !viewportSendScheduled else { return }
-        viewportSendScheduled = true
-        Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(120))
-            guard let self else { return }
-            self.viewportSendScheduled = false
-            let rect = self.pendingViewport
-            guard rect != self.lastViewportSent else { return }
-            self.lastViewportSent = rect
-            self.send(.viewport(Viewport(
-                displayID: self.activeDisplayID,
-                normalizedX: rect.minX, normalizedY: rect.minY,
-                normalizedW: rect.width, normalizedH: rect.height)))
-        }
+        viewportRequests.request(rect)
     }
 
     private func resetViewport() {
         let full = CGRect(x: 0, y: 0, width: 1, height: 1)
         frameViewport = full
-        pendingViewport = full
-        lastViewportSent = full
+        viewportRequests.reset()
     }
 
     private func resetQualityDiagnostics() {
