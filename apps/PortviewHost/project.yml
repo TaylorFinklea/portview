@@ -1,0 +1,35 @@
+name: PortviewHost
+options:
+  bundleIdPrefix: dev.finklea
+  deploymentTarget:
+    macOS: "26.0"
+packages:
+  Portview:
+    path: ../..
+targets:
+  PortviewHost:
+    type: application
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - Sources
+    dependencies:
+      - package: Portview
+        product: PortviewHostCore
+    info:
+      path: PortviewHost-Info.plist
+      properties:
+        CFBundleDisplayName: "Portview Host"
+        LSApplicationCategoryType: public.app-category.utilities
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.finklea.portview.host
+        CODE_SIGN_STYLE: Automatic
+        DEVELOPMENT_TEAM: K7CBQW6MPG
+schemes:
+  PortviewHost:
+    build:
+      targets:
+        PortviewHost: all
+    run:
+      config: Debug

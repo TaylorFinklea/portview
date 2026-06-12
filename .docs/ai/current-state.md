@@ -6,7 +6,14 @@
 
 `main`
 
-## Latest Session (2026-06-10 — motion debounce follow-up)
+## Latest Session (2026-06-11 — macOS host app)
+
+- Added `PortviewHostCore` shared library; moved host runtime out of CLI so both CLI and app use the same ScreenCaptureKit/QUIC/session code.
+- Added XcodeGen macOS `PortviewHost.app` target (`dev.finklea.portview.host`) with SwiftUI status window, Screen Recording/Accessibility settings links, pairing details, and copy pairing URL.
+- CLI `portview-host` remains a thin developer fallback; its Screen Recording help now points normal device testing at `PortviewHost.app`.
+- Verify: `swift test --package-path /Users/tfinklea/git/screenshare` → 81 tests / 28 suites; `swift build --package-path /Users/tfinklea/git/screenshare --product portview-host` → complete; `xcodegen generate` in `apps/PortviewHost`; `xcodebuild build -project apps/PortviewHost/PortviewHost.xcodeproj -scheme PortviewHost -destination 'platform=macOS'` → BUILD SUCCEEDED. Manual next: launch app, grant Screen Recording to Portview Host.app, then continue HUD/motion retest.
+
+## Previous Session (2026-06-10 — motion debounce follow-up)
 
 - User retest after `3d8309b`: rendering quality back to prior baseline, but motion jerkiness worse.
 - Root-cause hypothesis: client still sent viewport/crop requests during continuous pointer movement; host `SCStream.updateConfiguration` + keyframe requests can stutter the interactive path.

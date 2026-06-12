@@ -1,5 +1,5 @@
 import Testing
-@testable import portview_host
+@testable import PortviewHostCore
 
 @Suite struct CaptureSizingTests {
     @Test func pointPixelScaleDoesNotInflateInteractiveOutput() {

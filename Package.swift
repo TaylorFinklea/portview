@@ -8,6 +8,7 @@ let package = Package(
         .library(name: "PortviewProtocol", targets: ["PortviewProtocol"]),
         .library(name: "PortviewTransport", targets: ["PortviewTransport"]),
         .library(name: "PortviewMedia", targets: ["PortviewMedia"]),
+        .library(name: "PortviewHostCore", targets: ["PortviewHostCore"]),
     ],
     targets: [
         .target(name: "PortviewProtocol"),
@@ -20,13 +21,17 @@ let package = Package(
             name: "PortviewTransportTests",
             dependencies: ["PortviewTransport", "PortviewProtocol"]
         ),
+        .target(
+            name: "PortviewHostCore",
+            dependencies: ["PortviewProtocol", "PortviewTransport", "PortviewMedia"]
+        ),
         .executableTarget(
             name: "portview-host",
-            dependencies: ["PortviewProtocol", "PortviewTransport", "PortviewMedia"]
+            dependencies: ["PortviewHostCore"]
         ),
         .testTarget(
             name: "PortviewHostTests",
-            dependencies: ["portview-host"]
+            dependencies: ["PortviewHostCore"]
         ),
         .target(name: "PortviewMedia", dependencies: ["PortviewProtocol"]),
         .testTarget(

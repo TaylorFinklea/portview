@@ -1,19 +1,31 @@
 # Running Portview (POC)
 
-Portview is two apps over a shared, tested core (`PortviewProtocol`, `PortviewTransport`, `PortviewMedia`):
+Portview is two apps over a shared, tested core (`PortviewProtocol`, `PortviewTransport`, `PortviewMedia`, `PortviewHostCore`):
 
-- **`portview-host`** — a macOS `swift run` executable that captures the screen, hardware-HEVC-encodes it, and serves it.
+- **Mac host** (`apps/PortviewHost`) — a signed macOS app that captures the screen, hardware-HEVC-encodes it, and serves it under Portview's own Screen Recording identity.
 - **iOS client** (`apps/PortviewClient`) — a SwiftUI app that connects, decodes, and displays the Mac's screen.
 
-> **POC status.** The core pipeline (capture → HEVC encode → certificate-pinned TLS → HEVC decode → display) is wired end to end. The transport is **TLS-over-TCP** for the POC (QUIC is the production target; see `.docs/ai/decisions.md`). You connect by entering the host's **IP + port + pin** — Bonjour discovery and QR pairing are the next milestone. **Viewing only so far**; trackpad control is the next milestone after that.
+> **POC status.** The core pipeline (capture → HEVC encode → certificate-pinned QUIC → HEVC decode → display/control) is wired end to end. Bonjour discovery, QR pairing, clipboard, audio, file transfer, multi-monitor, Metal rendering, and the diagnostics HUD are implemented. The current manual test focus is device-side motion/quality tuning.
 
 ## 1. Run the Mac host
+
+```bash
+cd apps/PortviewHost
+xcodegen generate
+open PortviewHost.xcodeproj
+```
+
+In Xcode, pick **My Mac** and Run. On first run macOS blocks screen capture until you grant permission: **System Settings ▸ Privacy & Security ▸ Screen Recording**, enable **Portview Host.app**, fully quit/reopen the app if macOS asks, then run again. The host window shows the address, pin, and pairing URL.
+
+Developer CLI fallback:
 
 ```bash
 swift run portview-host
 ```
 
-On first run macOS blocks screen capture until you grant permission: **System Settings ▸ Privacy & Security ▸ Screen Recording**, enable your terminal (or the host), then run again. The host prints something like:
+The CLI still works for development, but Screen Recording permission attaches to your terminal app rather than Portview. Prefer `PortviewHost.app` for device testing.
+
+When ready, the host shows details like:
 
 ```
 🪟  Portview host ready
@@ -21,7 +33,7 @@ On first run macOS blocks screen capture until you grant permission: **System Se
  Pin:   3a7f…  (64 hex chars)
 ```
 
-Note the **port** and **pin**, plus your Mac's **LAN IP** (System Settings ▸ Wi-Fi ▸ Details — e.g. `10.0.0.5`). The phone must be on the same Wi-Fi (or reach the Mac over your Tailscale).
+Note the **address**, **pin**, and **pairing URL**. The phone must be on the same Wi-Fi or reach the Mac over your Tailscale.
 
 ## 2. Run the iOS client
 
@@ -31,11 +43,11 @@ xcodegen generate          # regenerates PortviewClient.xcodeproj from project.y
 open PortviewClient.xcodeproj
 ```
 
-In Xcode: pick your iPhone as the destination (set your Signing Team on the `PortviewClient` target for a real device), then Run. In the app, enter the Mac's **IP**, **port**, and **pin**, and tap **Connect** — the Mac's screen appears.
+In Xcode: pick your iPhone as the destination, then Run. Use QR pairing, Bonjour discovery, a saved Mac, or manual **IP/port/pin** entry to connect.
 
 To try it in the **iOS Simulator** (host and client on the same Mac), use `127.0.0.1` as the IP.
 
 ## What works / what's next
 
-- ✅ Live screen view, host → iPhone, HEVC over certificate-pinned TLS.
-- ⏭️ Next: trackpad control (input lane), Bonjour discovery + QR pairing, then audio · clipboard · file transfer · multi-monitor · QUIC transport · Metal renderer. See `.docs/ai/roadmap.md`.
+- ✅ Live screen view, trackpad/keyboard control, clipboard, audio, file transfer, multi-monitor, QUIC transport, Metal renderer, diagnostics HUD.
+- ⏭️ Next: on-device motion/quality retest, QUIC validation over real/Tailscale link, then adaptive bitrate/fps polish. See `.docs/ai/roadmap.md`.

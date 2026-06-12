@@ -20,7 +20,8 @@ enum NetworkInterface {
             let result = getnameinfo(address, socklen_t(address.pointee.sa_len),
                                      &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
             guard result == 0 else { continue }
-            let ip = String(cString: host)
+            let end = host.firstIndex(of: 0) ?? host.endIndex
+            let ip = String(decoding: host[..<end].map { UInt8(bitPattern: $0) }, as: UTF8.self)
             let name = String(cString: current.pointee.ifa_name)
             if name == "en0" { return ip }                 // prefer the primary Wi-Fi/Ethernet
             if fallback == nil, name.hasPrefix("en") { fallback = ip }

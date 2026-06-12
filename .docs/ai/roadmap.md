@@ -12,7 +12,7 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 
 ### Now
 - [x] On-device verification of the "do all of it" features — user confirmed all new features work.
-- [ ] **On-device video quality diagnosis with HUD** — screenshot #1 showed pure digital zoom into full 1710x1107 frame (`Crop/Frame w1.00`, ~0.06 Mbps actual). Follow-up #1 moved crop but only to `w0.93 h0.93`; screenshot #2 still encoded `1710x1107`, `~0.05 Mbps`, `810 B/f`, `bpp 0.0034`. The full-frame Retina attempt (`SCContentFilter.pointPixelScale` output + encoder quality hints) looked less smooth/jerky and was rolled back. Latest patch debounces viewport/crop sends until 250 ms idle to avoid `SCStream.updateConfiguration` churn during movement; automated verify + Roshar build/install completed 2026-06-10. Human device test pending: confirm movement smoothness first, then record HUD Mbps/B/f/bpp + Crop/Frame; if still soft but smooth, tune effective crop + bitrate/adaptive rate.
+- [ ] **On-device video quality diagnosis with HUD** — screenshot #1 showed pure digital zoom into full 1710x1107 frame (`Crop/Frame w1.00`, ~0.06 Mbps actual). Follow-up #1 moved crop but only to `w0.93 h0.93`; screenshot #2 still encoded `1710x1107`, `~0.05 Mbps`, `810 B/f`, `bpp 0.0034`. The full-frame Retina attempt (`SCContentFilter.pointPixelScale` output + encoder quality hints) looked less smooth/jerky and was rolled back. Latest client patch debounces viewport/crop sends until 250 ms idle; latest host packaging adds `PortviewHost.app` so Screen Recording grants attach to Portview instead of Terminal (automated verify: SwiftPM tests 81/28, CLI build, XcodeGen, macOS app BUILD SUCCEEDED). Human device test pending: launch/grant `PortviewHost.app`, confirm movement smoothness first, then record HUD Mbps/B/f/bpp + Crop/Frame; if still soft but smooth, tune effective crop + bitrate/adaptive rate.
 - [ ] **On-device test of QUIC + zoom overhaul** — QUIC is now the default transport (only loopback-verified so far): confirm connect/stream/control/clipboard/audio/files all still work over QUIC, ideally over a real/Tailscale link to gauge the latency win. Confirm zoom behavior while collecting HUD data.
 
 ### Next
@@ -32,7 +32,7 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 - [x] `PortviewMedia`: VideoToolbox HEVC encode + decode (round-trip recovers color); HEVC sample serialization; **full encode→pinned-TLS→decode pipeline POC, color-verified, autonomous**.
 - [x] Host: `portview-host` exe — SCStream capture → VideoEncoder → serialize → serve. Compiles; runs with a Screen-Recording grant.
 - [x] Client: iOS app — receive → deserialize → AVSampleBufferDisplayLayer render. Compiles for iOS 26 sim (BUILD SUCCEEDED). *(CAMetalLayer is a later latency optimization.)*
-- [x] Package macOS host (SwiftPM exe) + iOS client app (xcodegen). Run guide: `apps/README.md`. *(Running on a real iPhone needs Xcode + your signing team.)*
+- [x] Package macOS host (`PortviewHost.app` + SwiftPM CLI fallback) + iOS client app (xcodegen). Run guide: `apps/README.md`. *(Running on a real iPhone needs Xcode + your signing team.)*
 - [ ] Latency harness; confirm <50 ms motion-to-photon
 - [x] Resolve open Qs: iOS 26 QUIC datagrams (supported; deferred) ✓; HEVC encode works on macOS 26 ✓ (EnableLowLatencyRateControl accepted)
 
