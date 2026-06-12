@@ -21,6 +21,9 @@ targets:
       properties:
         CFBundleDisplayName: "Portview Host"
         LSApplicationCategoryType: public.app-category.utilities
+        NSLocalNetworkUsageDescription: "Portview publishes and accepts local-network connections from your iPhone to mirror and control this Mac."
+        NSBonjourServices:
+          - _portview._udp
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.finklea.portview.host

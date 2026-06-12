@@ -45,4 +45,35 @@ import Testing
 
         #expect(event == .accessibilityWarning(HostRunner.accessibilityHelp(for: .terminal)))
     }
+
+    @Test func serveConnectionsCancelsActiveSessionsWhenStreamEnds() async {
+        let (connections, connectionContinuation) = AsyncStream<Int>.makeStream()
+        let (started, startedContinuation) = AsyncStream<Void>.makeStream()
+        let (cancelled, cancelledContinuation) = AsyncStream<Void>.makeStream()
+
+        let serving = Task {
+            await HostRunner.serveConnections(connections) { _ in
+                startedContinuation.yield(())
+                await withTaskCancellationHandler {
+                    while !Task.isCancelled {
+                        try? await Task.sleep(for: .milliseconds(10))
+                    }
+                } onCancel: {
+                    cancelledContinuation.yield(())
+                }
+            }
+        }
+
+        connectionContinuation.yield(1)
+        #expect(await firstValue(from: started) != nil)
+
+        connectionContinuation.finish()
+        #expect(await firstValue(from: cancelled) != nil)
+        await serving.value
+    }
+}
+
+private func firstValue<Element>(from stream: AsyncStream<Element>) async -> Element? {
+    for await value in stream { return value }
+    return nil
 }

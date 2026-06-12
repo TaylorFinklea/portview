@@ -77,6 +77,7 @@ public struct HostRunner: Sendable {
             let serviceName = Host.current().localizedName ?? "Mac"
             let listener = try PortviewListener(quicIdentity: tlsIdentity, serviceName: serviceName)
             let port = try await listener.start()
+            defer { listener.cancel() }
 
             let ip = NetworkInterface.primaryIPv4() ?? "<your-Mac-LAN-IP>"
             let payload = PairingPayload(host: ip, port: port.rawValue, pinHex: pinHex, name: serviceName)
@@ -100,8 +101,12 @@ public struct HostRunner: Sendable {
             }
 
             let sendableDisplays = SendableDisplays(displays)
-            for await connection in listener.connections {
-                Task { await Self.serve(connection, displays: sendableDisplays) }
+            await withTaskCancellationHandler {
+                await Self.serveConnections(listener.connections) { connection in
+                    await Self.serve(connection, displays: sendableDisplays)
+                }
+            } onCancel: {
+                listener.cancel()
             }
         } catch {
             onEvent(.failed("Portview host error: \(error)"))
@@ -170,9 +175,30 @@ public struct HostRunner: Sendable {
         .accessibilityWarning(Self.accessibilityHelp(for: identity))
     }
 
+    static func serveConnections<Connection: Sendable>(
+        _ connections: AsyncStream<Connection>,
+        serve: @escaping @Sendable (Connection) async -> Void
+    ) async {
+        await withTaskGroup(of: Void.self) { group in
+            for await connection in connections {
+                if Task.isCancelled { break }
+                group.addTask { await serve(connection) }
+            }
+            group.cancelAll()
+        }
+    }
+
     /// Run one client session. A single inbound loop handles the handshake and then
     /// input messages (injected as CGEvents); video streams concurrently from a child task.
     private static func serve(_ connection: PortviewConnection, displays: SendableDisplays) async {
+        await withTaskCancellationHandler {
+            await serveSession(connection, displays: displays)
+        } onCancel: {
+            connection.close()
+        }
+    }
+
+    private static func serveSession(_ connection: PortviewConnection, displays: SendableDisplays) async {
         let displays = displays.values
         guard let firstDisplay = displays.first else { return }
         let displayInfos = displays.map {
@@ -192,6 +218,13 @@ public struct HostRunner: Sendable {
         var injector = makeInjector(for: firstDisplay, connection: connection)
         var currentCapture: CaptureEngine?
         var videoTask: Task<Void, Never>?
+        defer {
+            clipboard.stop()
+            fileReceiver.cancelAll()
+            videoTask?.cancel()
+            currentCapture?.stop()
+            connection.close()
+        }
 
         func display(forID id: UInt32) -> SCDisplay {
             displays.first { UInt32($0.displayID) == id } ?? firstDisplay
@@ -240,17 +273,11 @@ public struct HostRunner: Sendable {
             case .fileChunk(let chunk):
                 fileReceiver.chunk(chunk)
             case .bye:
-                clipboard.stop()
-                fileReceiver.cancelAll()
-                videoTask?.cancel()
                 return
             default:
                 break
             }
         }
-        clipboard.stop()
-        fileReceiver.cancelAll()
-        videoTask?.cancel()
     }
 
     /// Build an `InputInjector` whose cursor clamping + reporting are bound to `display`.

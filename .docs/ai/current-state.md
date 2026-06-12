@@ -11,7 +11,8 @@
 - Added `PortviewHostCore` shared library; moved host runtime out of CLI so both CLI and app use the same ScreenCaptureKit/QUIC/session code.
 - Added XcodeGen macOS `PortviewHost.app` target (`dev.finklea.portview.host`) with SwiftUI status window, Screen Recording/Accessibility settings links, pairing details, and copy pairing URL.
 - CLI `portview-host` remains a thin developer fallback; its Screen Recording help now points normal device testing at `PortviewHost.app`.
-- Verify: `swift test --package-path /Users/tfinklea/git/screenshare` → 81 tests / 28 suites; `swift build --package-path /Users/tfinklea/git/screenshare --product portview-host` → complete; `xcodegen generate` in `apps/PortviewHost`; `xcodebuild build -project apps/PortviewHost/PortviewHost.xcodeproj -scheme PortviewHost -destination 'platform=macOS'` → BUILD SUCCEEDED. Manual next: launch app, grant Screen Recording to Portview Host.app, then continue HUD/motion retest.
+- Review follow-up: Stop Hosting now cancels structured per-client session tasks and closes connections; app plist declares `NSLocalNetworkUsageDescription` + `_portview._udp` Bonjour service.
+- Verify: `swift test --package-path /Users/tfinklea/git/screenshare` → 82 tests / 28 suites; `swift build --package-path /Users/tfinklea/git/screenshare --product portview-host` → complete; `xcodegen generate` in `apps/PortviewHost`; generated plist contains local-network/Bonjour keys; `xcodebuild build -project apps/PortviewHost/PortviewHost.xcodeproj -scheme PortviewHost -destination 'platform=macOS'` → BUILD SUCCEEDED. Manual next: launch app, grant Screen Recording to Portview Host.app, then continue HUD/motion retest.
 
 ## Previous Session (2026-06-10 — motion debounce follow-up)
 
