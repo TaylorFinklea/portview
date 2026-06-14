@@ -6,7 +6,16 @@
 
 `main`
 
-## Latest Session (2026-06-11 — macOS host app)
+## Latest Session (2026-06-13 — persistent host identity design)
+
+- Resumed from Codex's state: build-green at `7e2bc07`, `swift test` = 82 tests / 28 suites pass, working tree clean.
+- Brainstormed + wrote design spec for **persistent host identity + stable port** (commit `909c2a8`): `docs/superpowers/specs/2026-06-13-persistent-host-identity-design.md`.
+- Scope (user-approved): identity + stable port, host-only. Approach A — persist the openssl p12 blob + chosen port as one Keychain generic-password item, re-import on launch; cert `-days 2`→3650 (re-mint <30d left); `PortviewListener` gains optional `port:`; `HostRunner` wires both; CLI degrades to ephemeral on Keychain failure.
+- Root cause: both the pin (fresh cert/launch) AND the port (ephemeral `NWListener` bind) float → saved pairings break on restart.
+- IP-stability deliberately split out as a separate roadmap Next item.
+- NEXT: user reviews spec → writing-plans → TDD implement.
+
+## Previous Session (2026-06-11 — macOS host app)
 
 - Added `PortviewHostCore` shared library; moved host runtime out of CLI so both CLI and app use the same ScreenCaptureKit/QUIC/session code.
 - Added XcodeGen macOS `PortviewHost.app` target (`dev.finklea.portview.host`) with SwiftUI status window, Screen Recording/Accessibility settings links, pairing details, and copy pairing URL.

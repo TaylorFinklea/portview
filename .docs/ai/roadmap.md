@@ -11,6 +11,7 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 ## Now / Next / Later
 
 ### Now
+- [ ] **Persistent host identity + stable port** — IN DESIGN (spec committed `909c2a8`): `docs/superpowers/specs/2026-06-13-persistent-host-identity-design.md`. Scope (user-approved) expanded the original "Keychain identity" item to also bind a stable port — the listener picks an ephemeral UDP port each launch, so a stable pin alone doesn't fix saved reconnect. Host-only. Approach A: persist the openssl-minted p12 blob + chosen port as one Keychain generic-password item, re-import on launch, bump cert `-days 2`→3650, add optional `port:` to `PortviewListener`, wire both in `HostRunner`; CLI degrades to ephemeral on Keychain failure. <!-- next: user reviews spec → writing-plans → TDD implement -->
 - [x] On-device verification of the "do all of it" features — user confirmed all new features work.
 - [ ] **On-device video quality diagnosis with HUD** — screenshot #1 showed pure digital zoom into full 1710x1107 frame (`Crop/Frame w1.00`, ~0.06 Mbps actual). Follow-up #1 moved crop but only to `w0.93 h0.93`; screenshot #2 still encoded `1710x1107`, `~0.05 Mbps`, `810 B/f`, `bpp 0.0034`. The full-frame Retina attempt (`SCContentFilter.pointPixelScale` output + encoder quality hints) looked less smooth/jerky and was rolled back. Latest client patch debounces viewport/crop sends until 250 ms idle; latest host packaging adds `PortviewHost.app` so Screen Recording grants attach to Portview instead of Terminal (automated verify: SwiftPM tests 82/28, CLI build, XcodeGen, macOS app BUILD SUCCEEDED). Human device test pending: launch/grant `PortviewHost.app`, confirm movement smoothness first, then record HUD Mbps/B/f/bpp + Crop/Frame; if still soft but smooth, tune effective crop + bitrate/adaptive rate.
 - [ ] **On-device test of QUIC + zoom overhaul** — QUIC is now the default transport (only loopback-verified so far): confirm connect/stream/control/clipboard/audio/files all still work over QUIC, ideally over a real/Tailscale link to gauge the latency win. Confirm zoom behavior while collecting HUD data.
@@ -18,8 +19,8 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 ### Next
 - [ ] QUIC lane-splitting (per-frame unidirectional video streams); validate QUIC latency over a real/Tailscale link.
 - [ ] Mac→iPhone file transfer; tight A/V lip-sync.
-- [ ] Persist host identity in Keychain so saved pairings survive host restarts; current saved pairing works while the same server process/port/cert is still running.
 - [ ] Magnifier follow-ups (if on-device testing shows them): tune the residual-settle timing; consider raising encode bitrate when cropped; smooth the crop transition.
+- [ ] **IP stability** (split out of the persistent-identity work) — `SavedHost.host` is a LAN IPv4 from `primaryIPv4()`; a DHCP change still breaks reconnect even with stable pin+port. Bonjour rediscovery or a stable Tailscale IP covers it.
 
 ### Later
 - [ ] M6 polish: adaptive bitrate/fps, reconnect + APNs re-wake, settings, TCC onboarding UI. Device keypairs + revocable PairingStore. *(Quality HUD now exists as dev diagnostics; product polish still TBD.)*
