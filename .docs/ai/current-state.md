@@ -6,14 +6,13 @@
 
 `main`
 
-## Latest Session (2026-06-13 — persistent host identity design)
+## Latest Session (2026-06-13 — persistent host identity + stable port: DONE, build-green)
 
-- Resumed from Codex's state: build-green at `7e2bc07`, `swift test` = 82 tests / 28 suites pass, working tree clean.
-- Brainstormed + wrote design spec for **persistent host identity + stable port** (commit `909c2a8`): `docs/superpowers/specs/2026-06-13-persistent-host-identity-design.md`.
-- Scope (user-approved): identity + stable port, host-only. Approach A — persist the openssl p12 blob + chosen port as one Keychain generic-password item, re-import on launch; cert `-days 2`→3650 (re-mint <30d left); `PortviewListener` gains optional `port:`; `HostRunner` wires both; CLI degrades to ephemeral on Keychain failure.
-- Root cause: both the pin (fresh cert/launch) AND the port (ephemeral `NWListener` bind) float → saved pairings break on restart.
-- IP-stability deliberately split out as a separate roadmap Next item.
-- NEXT: user reviews spec → writing-plans → TDD implement.
+- Resumed from Codex's state (build-green at `7e2bc07`); implemented **persistent host identity + stable port** end-to-end. Spec `909c2a8`, impl `e1a9db4`. Decision in decisions.md (2026-06-13).
+- `TLSIdentity.loadOrCreatePersistent`/`persistPort`: openssl p12 blob + bound port as one Keychain generic-password item; re-import on launch; re-mint absent/expired (cert `-days 2`→3650, <30d threshold); ephemeral fallback on Keychain failure. `PortviewListener` optional `port:`. `HostRunner` re-binds persisted port (fallback if taken) + surfaces non-persistence/port-fallback via `HostRunnerEvent.message`. App + CLI use DISTINCT Keychain items.
+- TDD throughout (RED→GREEN each). 15-finding adversarial multi-agent review applied (app/CLI service split was a real critical; errSecDuplicateItem, listener-leak, process lock); 2 findings rejected with rationale (see decisions.md).
+- Verify: `swift test` = **94 tests / 32 suites**; `swift build --product portview-host`; `xcodebuild PortviewHost` (macOS) BUILD SUCCEEDED; `xcodebuild PortviewClient` (iOS sim) BUILD SUCCEEDED. Real `KeychainIdentityStore` round-trip test passed (keychain usable under `swift test` here).
+- NEXT (human device verify): launch `PortviewHost.app`, pair from client, **restart the app**, reconnect from Saved Macs without rescanning → expect same pin + port. Then resume the still-pending HUD/QUIC device tests (roadmap Now).
 
 ## Previous Session (2026-06-11 — macOS host app)
 
