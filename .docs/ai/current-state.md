@@ -6,7 +6,16 @@
 
 `main`
 
-## Latest Session (2026-06-13 — persistent host identity + stable port: DONE, build-green)
+## Latest Session (2026-06-14 — IP-stable saved-Mac reconnect: DONE, build-green)
+
+- Client-only follow-up to the 2026-06-13 work: a saved Mac now reconnects after a LAN IP change (DHCP). Commit `4fe9d79`. Decision in decisions.md (2026-06-14).
+- `SavedHost.reconnectEndpoints(among:)` → ordered candidates: name-matched live Bonjour endpoint first (re-resolves current IP), saved `host:port` fallback. `SessionViewModel.run(endpoints:)` tries until the pinned handshake succeeds (initial connect only). `ContentView` saved-Mac tap passes `discovery.hosts`. Pin unchanged → cert pinning still gates (Bonjour name = routing hint only).
+- TDD (RED→GREEN). 3-dim adversarial review (8 confirmed): accepted 2 cheap coverage tests (manual-IP fallback, duplicate-name single-endpoint); rejected the rest with rationale (cancellation not a regression; saved-IP-refresh is the deferred follow-up; run-loop mock tests = YAGNI). See decisions.md.
+- Verify: `xcodebuild test PortviewClient` (iOS sim) = **9/9**, `** TEST SUCCEEDED **`. Host SwiftPM/packages untouched (still 94/32 from prior session).
+- DEFERRED follow-up (roadmap Next): refresh the stored fallback IP after a Bonjour reconnect (needs `PortviewConnection` to expose the resolved remote endpoint).
+- NEXT (human device verify): the 2026-06-13 restart test, PLUS — pair, change the Mac's LAN IP (or rejoin Wi-Fi), reconnect from Saved Macs without rescanning → should connect via Bonjour. Then the still-pending HUD/QUIC device tests (roadmap Now).
+
+## Previous Session (2026-06-13 — persistent host identity + stable port: DONE, build-green)
 
 - Resumed from Codex's state (build-green at `7e2bc07`); implemented **persistent host identity + stable port** end-to-end. Spec `909c2a8`, impl `e1a9db4`. Decision in decisions.md (2026-06-13).
 - `TLSIdentity.loadOrCreatePersistent`/`persistPort`: openssl p12 blob + bound port as one Keychain generic-password item; re-import on launch; re-mint absent/expired (cert `-days 2`→3650, <30d threshold); ephemeral fallback on Keychain failure. `PortviewListener` optional `port:`. `HostRunner` re-binds persisted port (fallback if taken) + surfaces non-persistence/port-fallback via `HostRunnerEvent.message`. App + CLI use DISTINCT Keychain items.

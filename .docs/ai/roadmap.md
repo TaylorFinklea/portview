@@ -20,7 +20,8 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 - [ ] QUIC lane-splitting (per-frame unidirectional video streams); validate QUIC latency over a real/Tailscale link.
 - [ ] Mac→iPhone file transfer; tight A/V lip-sync.
 - [ ] Magnifier follow-ups (if on-device testing shows them): tune the residual-settle timing; consider raising encode bitrate when cropped; smooth the crop transition.
-- [ ] **IP stability** (split out of the persistent-identity work) — `SavedHost.host` is a LAN IPv4 from `primaryIPv4()`; a DHCP change still breaks reconnect even with stable pin+port. Bonjour rediscovery or a stable Tailscale IP covers it.
+- [x] **IP stability** (split out of the persistent-identity work) — DONE (build-green; device-verify pending), commit `4fe9d79`. Saved-Mac reconnect now prefers a live Bonjour host matching by name (re-resolves the current IP), then the saved `host:port` fallback; pin unchanged so cert pinning still gates. Decision in decisions.md (2026-06-14). <!-- follow-up below: refresh the stored fallback IP after a Bonjour reconnect -->
+- [ ] **Refresh saved fallback IP after a Bonjour reconnect** (review-flagged, deferred) — after reconnecting via Bonjour to a new IP, the saved entry keeps the OLD IP (re-saved as-is). Harmless on-LAN (name-rediscovery works every time) but leaves the off-LAN fallback stale + the UI subtitle wrong. Needs `PortviewConnection` to expose the resolved remote endpoint (`currentPath?.remoteEndpoint`) so reconnect can rewrite `SavedHost.host:port`. `tier_floor: senior`, `complexity: S`.
 
 ### Later
 - [ ] M6 polish: adaptive bitrate/fps, reconnect + APNs re-wake, settings, TCC onboarding UI. Device keypairs + revocable PairingStore. *(Quality HUD now exists as dev diagnostics; product polish still TBD.)*
