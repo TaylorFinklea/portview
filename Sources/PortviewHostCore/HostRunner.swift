@@ -37,6 +37,17 @@ public enum HostRunnerEvent: Equatable, Sendable {
 }
 
 public struct HostRunner: Sendable {
+    /// Keychain service under which the host's persistent TLS identity + bound port are stored,
+    /// so the pin a client pins and the port it targets both survive host restarts. The signed app
+    /// and the unsigned CLI use DISTINCT items so they never contend or churn each other's pin (the
+    /// app is the supported, restart-surviving path; the CLI is a developer fallback).
+    static func identityKeychainService(for identity: HostPermissionIdentity) -> String {
+        switch identity {
+        case .app: return "dev.finklea.portview.host.identity"
+        case .terminal: return "dev.finklea.portview.host.identity.cli"
+        }
+    }
+
     public init() {}
 
     public func events(identity: HostPermissionIdentity) -> AsyncStream<HostRunnerEvent> {
@@ -71,20 +82,34 @@ public struct HostRunner: Sendable {
                 onEvent(.message("Display \(display.displayID): \(display.width)x\(display.height)"))
             }
 
-            let tlsIdentity = try TLSIdentity.makeEphemeralSelfSigned(commonName: "Portview Host")
+            // Persisted identity: a stable pin across restarts (mints + stores on first run).
+            let keychainService = Self.identityKeychainService(for: identity)
+            let persistedIdentity = try TLSIdentity.loadOrCreatePersistent(service: keychainService)
+            let tlsIdentity = persistedIdentity.identity
             let pinHex = try tlsIdentity.certificateSHA256().map { String(format: "%02x", $0) }.joined()
+            if !persistedIdentity.persistent {
+                onEvent(.message("⚠️ Couldn't persist the host identity to the keychain; this pairing's pin will change when the host restarts (re-pair after a restart)."))
+            }
 
             let serviceName = Host.current().localizedName ?? "Mac"
-            let listener = try PortviewListener(quicIdentity: tlsIdentity, serviceName: serviceName)
-            let port = try await listener.start()
+            // Re-bind the persisted port so a saved pairing's host:port stays valid; persist whatever
+            // port actually bound (first run, or a fallback when the preferred port was taken).
+            let (listener, port) = try await Self.startListener(
+                identity: tlsIdentity, serviceName: serviceName, preferredPort: persistedIdentity.port)
             defer { listener.cancel() }
+            if let preferred = persistedIdentity.port, preferred != port {
+                onEvent(.message("ℹ️ Preferred port \(preferred) was unavailable; bound \(port) instead. Reconnect from the QR/pairing URL to refresh saved pairings."))
+            }
+            if persistedIdentity.persistent, !TLSIdentity.persistPort(port, service: keychainService) {
+                onEvent(.message("⚠️ Bound port \(port) but couldn't persist it; the port may change on the next restart."))
+            }
 
             let ip = NetworkInterface.primaryIPv4() ?? "<your-Mac-LAN-IP>"
-            let payload = PairingPayload(host: ip, port: port.rawValue, pinHex: pinHex, name: serviceName)
+            let payload = PairingPayload(host: ip, port: port, pinHex: pinHex, name: serviceName)
             let details = HostReadyDetails(
                 serviceName: serviceName,
                 address: ip,
-                port: port.rawValue,
+                port: port,
                 pinHex: pinHex,
                 pairingURL: payload.urlString
             )
@@ -115,6 +140,33 @@ public struct HostRunner: Sendable {
                 onEvent(.failed(Self.screenRecordingHelp(for: identity)))
             }
         }
+    }
+
+    /// Start the QUIC listener, preferring `preferredPort` for a stable endpoint. If that port is
+    /// unavailable, fall back to an OS-assigned one (so the host always starts). Returns the
+    /// listener and the actually-bound port.
+    static func startListener(
+        identity: TLSIdentity,
+        serviceName: String,
+        preferredPort: UInt16?
+    ) async throws -> (listener: PortviewListener, port: UInt16) {
+        if let preferredPort {
+            do {
+                let listener = try PortviewListener(quicIdentity: identity, serviceName: serviceName, port: preferredPort)
+                do {
+                    let port = try await listener.start()
+                    return (listener, port.rawValue)
+                } catch {
+                    listener.cancel()  // release the partially-started listener before falling back
+                    throw error
+                }
+            } catch {
+                print("Preferred port \(preferredPort) unavailable (\(error)); using an OS-assigned port.")
+            }
+        }
+        let listener = try PortviewListener(quicIdentity: identity, serviceName: serviceName)
+        let port = try await listener.start()
+        return (listener, port.rawValue)
     }
 
     public static func readyMessage(_ details: HostReadyDetails) -> String {

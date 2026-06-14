@@ -46,6 +46,15 @@ import Testing
         #expect(event == .accessibilityWarning(HostRunner.accessibilityHelp(for: .terminal)))
     }
 
+    @Test func identityServiceDiffersForAppAndCLI() {
+        let app = HostRunner.identityKeychainService(for: .app(displayName: "Portview Host"))
+        let cli = HostRunner.identityKeychainService(for: .terminal)
+
+        #expect(app != cli)  // signed app and unsigned CLI must not share a keychain item
+        // The displayName must not affect the app's service key (all app launches share one identity).
+        #expect(HostRunner.identityKeychainService(for: .app(displayName: "Other")) == app)
+    }
+
     @Test func serveConnectionsCancelsActiveSessionsWhenStreamEnds() async {
         let (connections, connectionContinuation) = AsyncStream<Int>.makeStream()
         let (started, startedContinuation) = AsyncStream<Void>.makeStream()

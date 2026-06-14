@@ -125,20 +125,27 @@ public final class PortviewListener: @unchecked Sendable {
     /// Incoming connections, each a ready `PortviewConnection`.
     public let connections: AsyncStream<PortviewConnection>
 
-    /// TLS-over-TCP listener (the default/POC transport).
-    public convenience init(identity: TLSIdentity, serviceName: String? = nil) throws {
-        try self.init(parameters: TLSParameters.server(identity: identity), serviceName: serviceName)
+    /// TLS-over-TCP listener (the default/POC transport). `port` binds a specific port (for a
+    /// stable, restart-surviving endpoint); `nil` lets the OS assign an ephemeral one.
+    public convenience init(identity: TLSIdentity, serviceName: String? = nil, port: UInt16? = nil) throws {
+        try self.init(parameters: TLSParameters.server(identity: identity), serviceName: serviceName, port: port)
     }
 
     /// QUIC listener (additive/experimental). Each inbound QUIC stream arrives as a connection.
-    public convenience init(quicIdentity identity: TLSIdentity, serviceName: String? = nil) throws {
-        try self.init(parameters: QUICParameters.server(identity: identity), serviceName: serviceName)
+    /// `port` binds a specific port (stable host endpoint); `nil` = OS-assigned ephemeral port.
+    public convenience init(quicIdentity identity: TLSIdentity, serviceName: String? = nil, port: UInt16? = nil) throws {
+        try self.init(parameters: QUICParameters.server(identity: identity), serviceName: serviceName, port: port)
     }
 
-    private init(parameters: NWParameters, serviceName: String?) throws {
+    private init(parameters: NWParameters, serviceName: String?, port: UInt16?) throws {
         let queue = DispatchQueue(label: "portview.listener")
         self.queue = queue
-        let listener = try NWListener(using: parameters)
+        let listener: NWListener
+        if let port, let endpointPort = NWEndpoint.Port(rawValue: port) {
+            listener = try NWListener(using: parameters, on: endpointPort)
+        } else {
+            listener = try NWListener(using: parameters)
+        }
         if let serviceName {
             listener.service = NWListener.Service(name: serviceName, type: PortviewTransport.bonjourServiceType)
         }
