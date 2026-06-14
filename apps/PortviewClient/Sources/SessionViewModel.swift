@@ -50,12 +50,12 @@ final class SessionViewModel: ObservableObject {
             status = .failed("Invalid port.")
             return
         }
-        start(endpoint: .hostPort(host: NWEndpoint.Host(host), port: nwPort), pinHex: pinHex)
+        start(endpoints: [.hostPort(host: NWEndpoint.Host(host), port: nwPort)], pinHex: pinHex)
     }
 
     /// Connect to a Bonjour-discovered host (user still supplies the pin).
     func connect(to host: DiscoveredHost, pinHex: String) {
-        start(endpoint: host.endpoint, pinHex: pinHex)
+        start(endpoints: [host.endpoint], pinHex: pinHex)
     }
 
     /// Connect from a scanned QR pairing payload (host, port, and pin all included).
@@ -63,14 +63,25 @@ final class SessionViewModel: ObservableObject {
         connect(host: payload.host, port: payload.port, pinHex: payload.pinHex)
     }
 
-    private func start(endpoint: NWEndpoint, pinHex: String) {
+    /// Reconnect a saved Mac, preferring its live Bonjour endpoint (survives a LAN IP change) and
+    /// falling back to the saved host:port. The saved pin is unchanged, so cert pinning still
+    /// gates the connection regardless of which candidate wins.
+    func reconnect(saved: SavedHost, discovered: [DiscoveredHost]) {
+        start(endpoints: saved.reconnectEndpoints(among: discovered), pinHex: saved.pinHex)
+    }
+
+    private func start(endpoints: [NWEndpoint], pinHex: String) {
         guard let pin = Data(hexString: pinHex), pin.count == 32 else {
             status = .failed("Pin must be 64 hex characters.")
             return
         }
+        guard !endpoints.isEmpty else {
+            status = .failed("No address to connect to.")
+            return
+        }
         status = .connecting
         task?.cancel()
-        task = Task { [weak self] in await self?.run(endpoint: endpoint, pin: pin) }
+        task = Task { [weak self] in await self?.run(endpoints: endpoints, pin: pin) }
     }
 
     func disconnect() {
@@ -188,9 +199,24 @@ final class SessionViewModel: ObservableObject {
         Task { try? await connection.send(message) }
     }
 
-    private func run(endpoint: NWEndpoint, pin: Data) async {
+    private func run(endpoints: [NWEndpoint], pin: Data) async {
         do {
-            let connection = try await PortviewConnection.connectQUIC(to: endpoint, pinnedCertificateSHA256: pin)
+            // Try candidates in order; the first whose pinned handshake succeeds wins. Only the
+            // initial connect falls through candidates — a mid-stream drop never re-targets.
+            var connection: PortviewConnection?
+            var lastError: Error?
+            for endpoint in endpoints {
+                if Task.isCancelled { return }
+                do {
+                    connection = try await PortviewConnection.connectQUIC(to: endpoint, pinnedCertificateSHA256: pin)
+                    break
+                } catch {
+                    lastError = error
+                }
+            }
+            guard let connection else {
+                throw lastError ?? PortviewClientError.noReachableEndpoint
+            }
             self.connection = connection
             var client = ClientHandshake(
                 deviceID: UIDevice.current.identifierForVendor?.uuidString ?? "ios-client",
@@ -256,4 +282,8 @@ final class SessionViewModel: ObservableObject {
         let encoded = try EncodedVideoSample(serialized: frame.data)
         return try VideoSampleSerializer.deserialize(encoded)
     }
+}
+
+private enum PortviewClientError: Error {
+    case noReachableEndpoint
 }

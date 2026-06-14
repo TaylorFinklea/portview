@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import PortviewTransport
 
 /// A Mac the user has successfully paired with, persisted for one-tap reconnect.
@@ -11,6 +12,22 @@ struct SavedHost: Identifiable, Codable, Equatable {
 
     var payload: PairingPayload {
         PairingPayload(host: host, port: port, pinHex: pinHex, name: name)
+    }
+
+    /// Ordered connection candidates for reconnecting this Mac. A live Bonjour host matching by
+    /// name comes first (its service endpoint re-resolves to the current address, so reconnect
+    /// survives a LAN IP change); the saved `host:port` follows as the off-LAN / fallback path.
+    /// The pin is unchanged either way, so certificate pinning still anchors trust — the Bonjour
+    /// name is only a routing hint, never a trust decision.
+    func reconnectEndpoints(among discovered: [DiscoveredHost]) -> [NWEndpoint] {
+        var endpoints: [NWEndpoint] = []
+        if let match = discovered.first(where: { $0.name == name }) {
+            endpoints.append(match.endpoint)
+        }
+        if let nwPort = NWEndpoint.Port(rawValue: port) {
+            endpoints.append(.hostPort(host: NWEndpoint.Host(host), port: nwPort))
+        }
+        return endpoints
     }
 }
 

@@ -190,7 +190,7 @@ struct ContentView: View {
                             ForEach(savedHosts.hosts) { saved in
                                 Button {
                                     pairing.markPending(saved.payload)
-                                    session.connect(payload: saved.payload)
+                                    session.reconnect(saved: saved, discovered: discovery.hosts)
                                 } label: {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(saved.name)
