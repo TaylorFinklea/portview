@@ -46,15 +46,31 @@ final class SavedHostsStore: ObservableObject {
 
     init() { load() }
 
-    /// Upsert by host+port (keeping the existing id), then move to the front as most-recent.
+    /// Upsert (match by name first, then host+port), keeping the existing id, and move to the front
+    /// as most-recent. Matching by name lets a saved Mac that moved to a new IP refresh in place
+    /// (rather than creating a duplicate) when it reconnects via Bonjour.
     func remember(name: String, host: String, port: UInt16, pinHex: String) {
-        var entry = SavedHost(name: name.isEmpty ? host : name, host: host, port: port, pinHex: pinHex)
-        if let index = hosts.firstIndex(where: { $0.host == host && $0.port == port }) {
-            entry.id = hosts[index].id
-            hosts.remove(at: index)
-        }
-        hosts.insert(entry, at: 0)
+        let entry = SavedHost(name: name.isEmpty ? host : name, host: host, port: port, pinHex: pinHex)
+        hosts = Self.upserting(hosts, with: entry)
         save()
+    }
+
+    /// Pure upsert used by `remember` (and unit-tested without touching UserDefaults).
+    nonisolated static func upserting(_ hosts: [SavedHost], with entry: SavedHost) -> [SavedHost] {
+        var result = hosts
+        var newEntry = entry
+        // Match by name, then host:port, then the pinned cert (stable per Mac) — so a Mac first
+        // saved manually (name == its IP) folds into one entry when later seen via Bonjour under its
+        // real name + a new IP, instead of leaving a stale duplicate.
+        let match = result.firstIndex { $0.name == entry.name }
+            ?? result.firstIndex { $0.host == entry.host && $0.port == entry.port }
+            ?? result.firstIndex { $0.pinHex == entry.pinHex }
+        if let match {
+            newEntry.id = result[match].id
+            result.remove(at: match)
+        }
+        result.insert(newEntry, at: 0)
+        return result
     }
 
     func remember(_ payload: PairingPayload) {
@@ -63,6 +79,11 @@ final class SavedHostsStore: ObservableObject {
 
     func remove(atOffsets offsets: IndexSet) {
         hosts.remove(atOffsets: offsets)
+        save()
+    }
+
+    func removeAll() {
+        hosts.removeAll()
         save()
     }
 

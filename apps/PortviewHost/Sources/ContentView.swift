@@ -298,6 +298,22 @@ struct ContentView: View {
                 .glassCard(accent: accessibilityStatus == .granted)
             }
             .buttonStyle(.plain)
+
+            Button {
+                model.sendFileToClient()
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "arrow.up.doc").font(.system(size: 16)).foregroundStyle(Glass.signal)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Send a file").font(.system(size: 13.5, weight: .semibold)).foregroundStyle(Glass.text1)
+                        Text("to the connected iPhone").font(.system(size: 11)).foregroundStyle(Glass.text2)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 17).padding(.vertical, 15)
+                .glassCard()
+            }
+            .buttonStyle(.plain)
         }
     }
 

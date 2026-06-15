@@ -21,6 +21,11 @@ public final class PortviewConnection: @unchecked Sendable {
     /// Messages received from the peer, in arrival order.
     public let inbound: AsyncStream<AnyMessage>
 
+    /// The live connection's resolved remote endpoint (a `.hostPort` once the path is up), so a
+    /// discovered/paired Mac can be remembered with a concrete IP and a saved Mac's IP can be
+    /// refreshed after it moves. Nil until the path resolves.
+    public var resolvedRemoteEndpoint: NWEndpoint? { connection.currentPath?.remoteEndpoint }
+
     init(connection: NWConnection, queue: DispatchQueue) {
         self.connection = connection
         self.queue = queue

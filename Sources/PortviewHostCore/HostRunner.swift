@@ -60,6 +60,28 @@ public final class HostControl: @unchecked Sendable {
         connections[id] = nil
     }
 
+    /// Send a file to the connected iPhone (Mac→iPhone transfer): an offer then ordered 64 KB
+    /// chunks, interleaved with the live stream over the same connection.
+    public func sendFile(name: String, data: Data, to sessionID: String) {
+        lock.lock()
+        let connection = connections[sessionID]
+        lock.unlock()
+        guard let connection else { return }
+        let bytes = [UInt8](data)
+        let transferID = UInt32.random(in: 1...UInt32.max)
+        Task {
+            try? await connection.send(.fileOffer(FileOffer(transferID: transferID, name: name, size: UInt64(bytes.count))))
+            let chunkSize = 64 * 1024
+            var offset = 0
+            repeat {
+                let end = min(offset + chunkSize, bytes.count)
+                let isLast = end >= bytes.count
+                try? await connection.send(.fileChunk(FileChunk(transferID: transferID, isLast: isLast, data: Array(bytes[offset..<end]))))
+                offset = end
+            } while offset < bytes.count
+        }
+    }
+
     /// Close every active client session. The listener stays up and keeps advertising, so we first
     /// send a graceful `bye` (and let it flush) — the client treats that as a deliberate close and
     /// will NOT auto-reconnect, whereas a bare close looks like a network drop and would re-bind.
@@ -317,6 +339,10 @@ public struct HostRunner: Sendable {
         let fileReceiver = FileReceiver()
         // Identifies this session for the host UI; set once the client handshake names the device.
         var connectedDeviceID: String?
+        // Client-requested stream params (StartSession), honored by capture + encoder and reused
+        // when the display is switched mid-session.
+        var requestedFPS = 60
+        var requestedBitrate: Int?
 
         // Injector, capture engine, and video pump are (re)bound to the active display; switching
         // re-targets all three. `currentCapture` lets viewport (magnifier) requests re-crop the
@@ -344,7 +370,9 @@ public struct HostRunner: Sendable {
             injector = makeInjector(for: display, connection: connection)
             let capture = CaptureEngine(width: display.width, height: display.height)
             currentCapture = capture
-            videoTask = Task { await pumpVideo(connection, display: display, capture: capture, emit: emit) }
+            let fps = requestedFPS
+            let bitrate = requestedBitrate
+            videoTask = Task { await pumpVideo(connection, display: display, capture: capture, fps: fps, bitrate: bitrate, emit: emit) }
             print("Streaming display \(display.displayID) source \(display.width)x\(display.height).")
         }
 
@@ -368,6 +396,8 @@ public struct HostRunner: Sendable {
                 }
             case .startSession(let start):
                 do { try server.handle(start) } catch { print("startSession error: \(error)"); return }
+                requestedFPS = StreamParameters.captureFPS(requested: start.maxFPS)
+                requestedBitrate = StreamParameters.encoderBitrate(requested: start.targetBitrate)
                 startVideo(on: display(forID: start.displayID))
             case .switchDisplay(let switchMessage):
                 startVideo(on: display(forID: switchMessage.displayID))
@@ -414,10 +444,12 @@ public struct HostRunner: Sendable {
         _ connection: PortviewConnection,
         display: SCDisplay,
         capture: CaptureEngine,
+        fps: Int = 60,
+        bitrate: Int? = nil,
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in }
     ) async {
         do {
-            try capture.start(display: display, maxFPS: 60)
+            try capture.start(display: display, maxFPS: fps)
         } catch {
             print("capture start error: \(error)")
             return
@@ -446,7 +478,7 @@ public struct HostRunner: Sendable {
             let bufferHeight = CVPixelBufferGetHeight(frame.pixelBuffer)
             if encoder == nil || bufferWidth != encoderWidth || bufferHeight != encoderHeight {
                 do {
-                    encoder = try VideoEncoder(width: bufferWidth, height: bufferHeight)
+                    encoder = try VideoEncoder(width: bufferWidth, height: bufferHeight, averageBitRate: bitrate)
                     encoderWidth = bufferWidth
                     encoderHeight = bufferHeight
                     needsKeyframe = true

@@ -21,14 +21,22 @@ final class SessionViewModel: ObservableObject {
     /// Displays the host offered (from ServerHello) and which one is currently streaming.
     @Published var displays: [DisplayInfo] = []
     @Published var activeDisplayID: UInt32 = 0
-    /// Transient status of an in-flight file push (nil when none).
+    /// Transient status of an in-flight file push/receive (nil when none).
     @Published var transferStatus: String?
+    /// A file received from the Mac (Mac→iPhone transfer), ready to share/save; nil when none.
+    @Published var receivedFile: ReceivedFile?
+    private let incomingFiles = IncomingFileTransfers()
     /// Normalized region of the display the host's current frames represent (the magnifier crop).
     /// Updated when the host confirms a viewport; the client renders the residual zoom against it.
     @Published var frameViewport = CGRect(x: 0, y: 0, width: 1, height: 1)
     @Published var qualityDiagnostics = QualityDiagnostics()
     /// The name of the Mac this session is bound to (for reconnect status copy); nil before connect.
     @Published private(set) var hostName: String?
+    /// Set when a stream succeeds: the host to remember, carrying the connection's resolved concrete
+    /// IP (so discovered Macs persist and a moved saved Mac's IP refreshes). Nil otherwise.
+    @Published private(set) var connectedHostToSave: PairingPayload?
+    private var sessionName: String?
+    private var sessionPinHex: String?
     private var qualityTracker = QualityDiagnosticsTracker()
     private lazy var viewportRequests = ViewportRequestScheduler { [weak self] rect in
         guard let self else { return }
@@ -101,6 +109,12 @@ final class SessionViewModel: ObservableObject {
         }
         status = .connecting
         hostName = reconnectName
+        sessionName = reconnectName
+        sessionPinHex = pinHex
+        connectedHostToSave = nil
+        // A received file is a local artifact: it survives a disconnect (so the user can finish
+        // sharing it) and is only cleared when a new session starts.
+        receivedFile = nil
         task?.cancel()
         task = Task { [weak self] in await self?.run(endpoints: endpoints, pin: pin, reconnectName: reconnectName) }
     }
@@ -112,6 +126,10 @@ final class SessionViewModel: ObservableObject {
         task = nil
         status = .idle
         hostName = nil
+        connectedHostToSave = nil
+        sessionName = nil
+        sessionPinHex = nil
+        incomingFiles.removeAll()
         displays = []
         activeDisplayID = 0
         resetViewport()
@@ -281,6 +299,10 @@ final class SessionViewModel: ObservableObject {
     /// Run the handshake then the inbound loop for one connection. Returns when the connection
     /// closes (`.streamed`/`.notStreamed`) or the host reports a terminal error (`.hostError`).
     private func streamSession(_ connection: PortviewConnection) async throws -> SessionEnd {
+        // Fresh inbound-transfer slate per attempt (incl. each reconnect): release any orphaned
+        // partial transfer from a dropped session and clear its stale "Receiving…" status.
+        incomingFiles.removeAll()
+        transferStatus = nil
         var client = ClientHandshake(
             deviceID: UIDevice.current.identifierForVendor?.uuidString ?? "ios-client",
             deviceName: UIDevice.current.name,
@@ -296,13 +318,20 @@ final class SessionViewModel: ObservableObject {
                 displays = hello.displays
                 activeDisplayID = display.id
                 displaySize = CGSize(width: max(1, Double(display.width)), height: max(1, Double(display.height)))
+                let prefs = ClientSettings.load()
                 let start = try client.handle(
                     hello, displayID: display.id,
                     maxWidth: display.width, maxHeight: display.height,
-                    maxFPS: 60, targetBitrate: 25_000_000
+                    maxFPS: prefs.maxFPS, targetBitrate: prefs.targetBitrate
                 )
                 try await connection.send(.startSession(start))
                 client.didStartStreaming()
+                // Remember this host with the connection's RESOLVED concrete IP — this is what lets a
+                // discovered (Bonjour `.service`) pairing persist, and a moved saved Mac refresh.
+                if let (host, port) = Self.hostPort(from: connection.resolvedRemoteEndpoint),
+                   let pinHex = sessionPinHex {
+                    connectedHostToSave = PairingPayload(host: host, port: port, pinHex: pinHex, name: sessionName ?? host)
+                }
                 status = .streaming
                 didStream = true
             case .videoFrame(let frame):
@@ -326,6 +355,19 @@ final class SessionViewModel: ObservableObject {
                 frameViewport = CGRect(x: v.normalizedX, y: v.normalizedY, width: v.normalizedW, height: v.normalizedH)
             case .qualityStats(let stats):
                 qualityDiagnostics = qualityTracker.updateHostStats(stats)
+            case .fileOffer(let offer):
+                // The name is peer-supplied; offer() sanitizes it and opens the destination, or
+                // rejects an unsafe name (path-traversal defense).
+                if let name = incomingFiles.offer(offer) {
+                    transferStatus = "Receiving \(name)…"
+                } else {
+                    transferStatus = "Rejected file with an unsafe name"
+                }
+            case .fileChunk(let chunk):
+                if let file = incomingFiles.chunk(chunk) {
+                    receivedFile = file
+                    transferStatus = "Received \(file.name)"
+                }
             case .bye:
                 // Host ended the session deliberately (e.g. its Disconnect button) — a clean,
                 // terminal close, NOT a drop, so don't attempt to re-bind.
@@ -379,6 +421,20 @@ final class SessionViewModel: ObservableObject {
     /// Reconnect candidates, ordered: a live Bonjour host matching by name (re-resolves the current
     /// IP after a LAN change) first, then the endpoint we were connected to as the fallback. Pure +
     /// `nonisolated` so it is unit-testable and callable off the main actor.
+    /// Extract a concrete host:port from a connection's resolved endpoint (only `.hostPort` yields
+    /// one — a `.service`/`.host`/nil endpoint returns nil). Pure + `nonisolated` for unit testing.
+    nonisolated static func hostPort(from endpoint: NWEndpoint?) -> (host: String, port: UInt16)? {
+        guard let endpoint, case let .hostPort(host, port) = endpoint else { return nil }
+        let hostString: String
+        switch host {
+        case .ipv4(let address): hostString = "\(address)"
+        case .ipv6(let address): hostString = "\(address)"
+        case .name(let name, _): hostString = name
+        @unknown default: hostString = "\(host)"
+        }
+        return (hostString, port.rawValue)
+    }
+
     nonisolated static func reconnectCandidates(
         name: String, fallback: NWEndpoint, discovered: [DiscoveredHost]
     ) -> [NWEndpoint] {

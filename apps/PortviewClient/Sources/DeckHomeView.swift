@@ -11,6 +11,7 @@ struct DeckHomeView: View {
     let onPickDiscovered: (DiscoveredHost) -> Void
     let onScan: () -> Void
     let onManual: () -> Void
+    let onSettings: () -> Void
 
     /// Discovered hosts that aren't already saved (saved ones render from the store).
     private var newlyDiscovered: [DiscoveredHost] {
@@ -83,7 +84,7 @@ struct DeckHomeView: View {
     }
 
     private var header: some View {
-        HStack(alignment: .firstTextBaseline) {
+        HStack(alignment: .center, spacing: 10) {
             Text("Portview")
                 .font(.grotesk(30, .bold))
                 .tracking(-0.6)
@@ -93,6 +94,13 @@ struct DeckHomeView: View {
                 Text("\(totalMacs) Macs · \(onNetworkCount) on net")
                     .font(.mono(10))
                     .foregroundStyle(Glass.text3)
+            }
+            Button(action: onSettings) {
+                Image(systemName: "gearshape")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(Glass.text2)
+                    .frame(width: 34, height: 34)
+                    .background(.ultraThinMaterial, in: Circle())
             }
         }
     }

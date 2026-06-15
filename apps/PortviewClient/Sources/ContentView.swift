@@ -8,13 +8,14 @@ struct ContentView: View {
     @StateObject private var session = SessionViewModel()
     @StateObject private var discovery = DiscoveryModel()
     @StateObject private var savedHosts = SavedHostsStore()
-    @StateObject private var pairing = PairingCoordinator()
+    @StateObject private var settings = ClientSettingsStore()
 
     @State private var manualHost = ""
     @State private var manualPort = ""
     @State private var manualPin = ""
     @State private var showScanner = false
     @State private var showManual = false
+    @State private var showSettings = false
     @State private var showFileImporter = false
     @State private var pinPromptHost: DiscoveredHost?
     @State private var discoveredPin = ""
@@ -33,13 +34,18 @@ struct ContentView: View {
                 PairView(
                     onConnect: { payload in
                         showScanner = false
-                        pairing.markPending(payload)
                         session.connect(payload: payload)
                     },
                     onManual: { showScanner = false; showManual = true },
                     onClose: { showScanner = false })
             }
             .sheet(isPresented: $showManual) { manualConnectSheet }
+            .sheet(isPresented: $showSettings) {
+                SettingsView(settings: settings, savedHosts: savedHosts, onClose: { showSettings = false })
+            }
+            .sheet(item: Binding(get: { session.receivedFile }, set: { session.receivedFile = $0 })) { file in
+                ReceivedFileSheet(file: file) { session.receivedFile = nil }
+            }
             .alert("Pair with \(pinPromptHost?.name ?? "Mac")", isPresented: pinPromptPresented) {
                 TextField("Pin (64 hex chars)", text: $discoveredPin)
                 Button("Connect") {
@@ -52,8 +58,11 @@ struct ContentView: View {
                 Text("Enter the pin shown on \(pinPromptHost?.name ?? "the Mac").")
             }
             .onChange(of: session.status) { _, status in
-                if status == .streaming {
-                    pairing.commitIfStreaming(true) { savedHosts.remember($0) }
+                // Remember the host on first stream — for ALL paths — using the connection's resolved
+                // concrete IP (so a QR/manual/saved/discovered pairing persists, and a moved Mac's IP
+                // refreshes in place via SavedHostsStore's name-aware upsert).
+                if status == .streaming, let payload = session.connectedHostToSave {
+                    savedHosts.remember(payload)
                 }
             }
     }
@@ -78,7 +87,6 @@ struct ContentView: View {
                 discovery: discovery,
                 savedHosts: savedHosts,
                 onReconnectSaved: { saved in
-                    pairing.markPending(saved.payload)
                     session.reconnect(saved: saved, discovered: discovery.hosts)
                 },
                 onPickDiscovered: { host in
@@ -86,7 +94,8 @@ struct ContentView: View {
                     pinPromptHost = host
                 },
                 onScan: { showScanner = true },
-                onManual: { showManual = true })
+                onManual: { showManual = true },
+                onSettings: { showSettings = true })
             .onAppear { discovery.start() }
             .onDisappear { discovery.stop() }
         }
@@ -113,8 +122,6 @@ struct ContentView: View {
                 manualField("Pin (64 hex chars)", text: $manualPin, keyboard: .asciiCapable, mono: true)
                 Button("Connect") {
                     guard let port = UInt16(manualPort) else { return }
-                    let payload = PairingPayload(host: manualHost, port: port, pinHex: manualPin, name: manualHost)
-                    pairing.markPending(payload)
                     session.connect(host: manualHost, port: port, pinHex: manualPin)
                     showManual = false
                 }
@@ -138,5 +145,41 @@ struct ContentView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
             .glassCard()
+    }
+}
+
+/// Presents a file received from the Mac, with a share/save action.
+private struct ReceivedFileSheet: View {
+    let file: ReceivedFile
+    let onDone: () -> Void
+
+    var body: some View {
+        GlassCanvas(style: .deck) {
+            VStack(spacing: 18) {
+                Spacer()
+                Image(systemName: "arrow.down.doc.fill")
+                    .font(.system(size: 44, weight: .light))
+                    .foregroundStyle(Glass.signal)
+                Text("Received from your Mac").font(.mono(10)).eyebrow(10).foregroundStyle(Glass.text2)
+                Text(file.name)
+                    .font(.grotesk(18, .semibold))
+                    .foregroundStyle(Glass.text1Bright)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                ShareLink(item: file.url) {
+                    Label("Save or share", systemImage: "square.and.arrow.up")
+                }
+                .buttonStyle(AccentButtonStyle())
+                .padding(.horizontal, 40)
+                Button("Done", action: onDone)
+                    .font(.mono(11))
+                    .foregroundStyle(Glass.text3)
+                Spacer()
+            }
+            .frame(maxWidth: .infinity)
+            .padding(20)
+        }
+        .preferredColorScheme(.dark)
     }
 }

@@ -98,4 +98,118 @@ final class GlassMappingTests: XCTestCase {
             name: "Roshar", fallback: service.endpoint, discovered: [service])
         XCTAssertEqual(result, [service.endpoint])
     }
+
+    // MARK: - Client quality settings → handshake params
+
+    func testDefaultClientSettings() {
+        let settings = ClientSettings()
+        XCTAssertEqual(settings.bitrateMbps, 25)
+        XCTAssertEqual(settings.fps, 60)
+        XCTAssertEqual(settings.targetBitrate, 25_000_000)
+        XCTAssertEqual(settings.maxFPS, 60)
+    }
+
+    func testClientSettingsClampsBitrate() {
+        XCTAssertEqual(ClientSettings(bitrateMbps: 200, fps: 60).targetBitrate, 80_000_000)
+        XCTAssertEqual(ClientSettings(bitrateMbps: 1, fps: 60).targetBitrate, 4_000_000)
+        XCTAssertEqual(ClientSettings(bitrateMbps: 40, fps: 60).targetBitrate, 40_000_000)
+    }
+
+    func testClientSettingsNormalizesFPS() {
+        XCTAssertEqual(ClientSettings(bitrateMbps: 25, fps: 30).maxFPS, 30)
+        XCTAssertEqual(ClientSettings(bitrateMbps: 25, fps: 45).maxFPS, 60)
+    }
+
+    // MARK: - Resolved endpoint → host:port (for persisting discovered Macs)
+
+    func testHostPortFromResolvedHostPortEndpoint() {
+        let result = SessionViewModel.hostPort(from: .hostPort(host: "192.168.1.42", port: 7443))
+        XCTAssertEqual(result?.host, "192.168.1.42")
+        XCTAssertEqual(result?.port, 7443)
+    }
+
+    func testHostPortNilForServiceEndpoint() {
+        let service = NWEndpoint.service(name: "Roshar", type: "_portview._udp", domain: "local.", interface: nil)
+        XCTAssertNil(SessionViewModel.hostPort(from: service))
+    }
+
+    func testHostPortNilForNilEndpoint() {
+        XCTAssertNil(SessionViewModel.hostPort(from: nil))
+    }
+
+    // MARK: - Saved-host upsert (refresh by name; add by new name)
+
+    func testUpsertRefreshesSameNameWithNewIPKeepingID() {
+        let original = SavedHost(name: "Roshar", host: "10.0.0.5", port: 7443, pinHex: pin)
+        let moved = SavedHost(name: "Roshar", host: "10.0.0.9", port: 7443, pinHex: pin)
+        let result = SavedHostsStore.upserting([original], with: moved)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result.first?.host, "10.0.0.9")
+        XCTAssertEqual(result.first?.id, original.id) // same logical entry, refreshed
+    }
+
+    func testUpsertAddsNewName() {
+        // Distinct Macs have distinct pins (the pinned cert SHA) — so this adds rather than folds.
+        let roshar = SavedHost(name: "Roshar", host: "10.0.0.5", port: 7443, pinHex: pin)
+        let shadesmar = SavedHost(name: "Shadesmar", host: "10.0.0.6", port: 7443, pinHex: String(repeating: "c", count: 64))
+        let result = SavedHostsStore.upserting([roshar], with: shadesmar)
+        XCTAssertEqual(result.count, 2)
+        XCTAssertEqual(result.first?.name, "Shadesmar") // most-recent first
+    }
+
+    func testUpsertFallsBackToHostPortMatchWhenNamesDiffer() {
+        let manual = SavedHost(name: "10.0.0.5", host: "10.0.0.5", port: 7443, pinHex: pin)
+        let rePin = SavedHost(name: "10.0.0.5", host: "10.0.0.5", port: 7443, pinHex: String(repeating: "b", count: 64))
+        let result = SavedHostsStore.upserting([manual], with: rePin)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result.first?.pinHex, String(repeating: "b", count: 64))
+    }
+
+    /// A Mac saved manually (name == its IP) folds into one entry when later seen via Bonjour under
+    /// its real name + a new IP — matched by the stable pinned cert.
+    func testUpsertFoldsManualAndBonjourEntriesByPin() {
+        let manual = SavedHost(name: "10.0.0.5", host: "10.0.0.5", port: 7443, pinHex: pin)
+        let bonjour = SavedHost(name: "Roshar", host: "10.0.0.9", port: 7443, pinHex: pin)
+        let result = SavedHostsStore.upserting([manual], with: bonjour)
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result.first?.name, "Roshar")
+        XCTAssertEqual(result.first?.host, "10.0.0.9")
+    }
+
+    // MARK: - Inbound Mac→iPhone file transfer assembly
+
+    func testIncomingFileTransferStreamsAssembledFileToDisk() throws {
+        let transfers = IncomingFileTransfers()
+        XCTAssertEqual(transfers.offer(FileOffer(transferID: 7, name: "notes.txt", size: 5)), "notes.txt")
+        XCTAssertNil(transfers.chunk(FileChunk(transferID: 7, isLast: false, data: Array("hel".utf8))))
+        let done = transfers.chunk(FileChunk(transferID: 7, isLast: true, data: Array("lo".utf8)))
+        XCTAssertEqual(done?.name, "notes.txt")
+        let data = try XCTUnwrap(done.flatMap { try? Data(contentsOf: $0.url) })
+        XCTAssertEqual(String(decoding: data, as: UTF8.self), "hello")
+    }
+
+    func testIncomingFileTransferIgnoresUnknownTransfer() {
+        let transfers = IncomingFileTransfers()
+        XCTAssertNil(transfers.chunk(FileChunk(transferID: 99, isLast: true, data: [1, 2, 3])))
+    }
+
+    func testIncomingFileTransferRejectsUnsafeOfferName() {
+        let transfers = IncomingFileTransfers()
+        XCTAssertNil(transfers.offer(FileOffer(transferID: 1, name: "..", size: 0)))
+        XCTAssertEqual(transfers.offer(FileOffer(transferID: 2, name: "../../x.txt", size: 0)), "x.txt")
+    }
+
+    func testSafeFilenameStripsPathTraversal() {
+        XCTAssertEqual(IncomingFileTransfers.safeFilename("notes.txt"), "notes.txt")
+        XCTAssertEqual(IncomingFileTransfers.safeFilename("../../etc/passwd"), "passwd")
+        XCTAssertEqual(IncomingFileTransfers.safeFilename("a/b/c.png"), "c.png")
+    }
+
+    func testSafeFilenameRejectsTraversalTokens() {
+        XCTAssertNil(IncomingFileTransfers.safeFilename(".."))
+        XCTAssertNil(IncomingFileTransfers.safeFilename("."))
+        XCTAssertNil(IncomingFileTransfers.safeFilename(""))
+    }
+
+    private let pin = String(repeating: "a", count: 64)
 }

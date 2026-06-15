@@ -6,7 +6,17 @@
 
 `main`
 
-## Latest Session (2026-06-15 — Glass HUD redesign, both apps: DONE, build-green)
+## Latest Session (2026-06-15 #2 — three device-testable features: DONE, build-green)
+
+- "Burn through real features" → shipped 3 (build-green; device-verify pending). Decision: decisions.md (2026-06-15, top entry); roadmap Now `[x]` + Next items marked done.
+- **Quality controls**: host now HONORS client bitrate/fps (was hardcoded 60fps + heuristic — ignored the request). New `StreamParameters` (clamps) in HostCore; `HostRunner` threads requested fps/bitrate into capture + encoder. Client `ClientSettings` (persisted) + Glass **Settings** sheet (gear on Deck Home: bitrate 4–80 Mbps, fps 30/60, Forget-all, version), read at handshake. ⭐ the real crispness knob.
+- **Endpoint persistence**: `PortviewConnection.resolvedRemoteEndpoint`; `SessionViewModel` publishes `connectedHostToSave` (resolved IP) → unified remember-on-stream in ContentView. `SavedHostsStore.upserting` matches name→host:port→pin. Retired `PairingCoordinator` (+test). Fixes: discovered Macs persist; moved Mac's IP refreshes.
+- **Mac→iPhone file transfer**: host "Send a file" card (NSOpenPanel) → `HostControl.sendFile(to: sessionID)`; client `IncomingFileTransfers` streams chunks to a per-transfer temp dir → `ReceivedFile` → `ShareLink`. Completes M5 both ways.
+- Security: path-traversal in the received filename → sanitized to safe last-path-component at offer time (TDD'd). 3-dim adversarial review: 6/6 confirmed, ALL fixed (OOM→stream-to-disk; reconnect partial-state reset; sendFile target by id; manual/Bonjour dup→pin tiebreaker; temp aliasing→per-transfer dir; disconnect dropping received file→clear on start()).
+- TDD added: `StreamParametersTests` (6), client `GlassMappingTests` grew to 21 (settings/hostPort/upsert/file/safeFilename). Verify: `swift test` **110/34**, iOS `xcodebuild test` **31/31**, macOS **BUILD SUCCEEDED**. NOT pushed.
+- NEXT (human device verify, see roadmap Now device-verify comment): bitrate knob's visible effect; discovered-Mac persistence across relaunch; IP refresh after a move; a round-trip file send. Product-test checklist published to harness-deck.
+
+## Previous Session (2026-06-15 — Glass HUD redesign, both apps: DONE, build-green)
 
 - Implemented the locked **Glass HUD** design (claude.ai/design handoff, fetched via the share URL → gzip bundle in /tmp/portview_glass) in SwiftUI. All 6 iOS screens + 3 macOS host states. Decision: decisions.md (2026-06-15); roadmap Now `[x]`.
 - New files — iOS: `GlassTheme/TelemetryReadout/QualityPanel/ConnectingView/DeckHomeView/PairView/LiveHUDView` (+ `ContentView`/`SessionViewModel`/`SavedHostsStore` rewrites); macOS: `GlassTheme/QRCodeView` (+ `ContentView`/`HostAppModel`/`PortviewHostApp`); core: `HostSessions` (+ `HostRunner` events/`HostControl`). Fonts = System SF + SF Mono; Material glass (not Liquid Glass); real CoreImage QR.

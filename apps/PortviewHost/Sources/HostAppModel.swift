@@ -72,6 +72,22 @@ final class HostAppModel {
         control.disconnectAll()
     }
 
+    /// Pick a file and send it to the connected iPhone (Mac→iPhone transfer).
+    func sendFileToClient() {
+        guard let target = sessions.devices.first?.id else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let data = try? Data(contentsOf: url) else {
+            messages.append("couldn't read \(url.lastPathComponent)")
+            return
+        }
+        control.sendFile(name: url.lastPathComponent, data: data, to: target)
+        messages.append("sending \(url.lastPathComponent) → iPhone")
+    }
+
     func copyPairingURL() {
         guard case .ready(let details) = state else { return }
         NSPasteboard.general.clearContents()

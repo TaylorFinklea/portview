@@ -2,6 +2,20 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-15] Three device-testable features: quality controls, endpoint-based persistence, Mac→iPhone files
+
+**Context**: User asked to "burn through real features" they can test on-device. Picked three high-observability ones (ultracode; build-green, device-verify pending).
+
+**1. Quality controls — the host now HONORS the client's requested bitrate/fps.** Found that `serveSession` hardcoded `capture.start(maxFPS: 60)` and the encoder used a width·height heuristic, so the client's `StartSession.targetBitrate`/`maxFPS` were *ignored*. Now `serveSession` captures them (clamped via the new `StreamParameters`: fps 10–60, bitrate 2–120 Mbps; 0 = "unset" → fps 60 / heuristic) and threads them into `pumpVideo` (`capture.start(maxFPS:)` + `VideoEncoder(averageBitRate:)`), reused across display switches. Client: `ClientSettings` (persisted bitrate 4–80 Mbps + fps 30/60) read at handshake time via `ClientSettings.load()` instead of the old hardcoded 25 Mbps/60; a Glass **Settings** sheet (gear on Deck Home) edits them + "Forget all saved Macs" + version. This is the real knob for the long-running crispness investigation (raise bitrate → HUD shows it → crisper). Decided client-reads-UserDefaults-at-handshake over injecting a settings object (decoupled; applies next connect).
+
+**2. Resolved-endpoint persistence — unified, replacing `PairingCoordinator`.** `PortviewConnection.resolvedRemoteEndpoint` (`currentPath?.remoteEndpoint`) exposes the live concrete `host:port`. On first stream, `SessionViewModel` publishes `connectedHostToSave` (name + resolved IP + pin) for ALL paths; `ContentView` persists it. This fixes the two deferred items at once: discovered (Bonjour `.service`) pairings now persist with a concrete IP (review #2 from the Glass batch), and a moved saved Mac's IP refreshes in place. `SavedHostsStore.upserting` matches **name → host:port → pinHex** (the pinned cert is the stable per-Mac identity, so a manual-IP entry and a later Bonjour entry for the same Mac fold into one rather than duplicating). Retired `PairingCoordinator` (+ its test) — the resolved-endpoint signal supersedes the markPending/commit dance.
+
+**3. Mac→iPhone file transfer (completes M5 both directions).** Host "Send a file" card → `NSOpenPanel` → `HostControl.sendFile(…, to: sessionID)` streams `FileOffer`+64 KB `FileChunk`s over the active connection. Client `IncomingFileTransfers` **streams each chunk straight to disk** (a per-transfer UUID temp dir), never buffering the whole file (bounded iPhone memory), then publishes a `ReceivedFile` the UI offers via `ShareLink`.
+
+**Security + adversarial review.** Automated security pass flagged **path traversal** — the host-supplied filename was joined into a temp path; now sanitized to a safe last-path-component at offer time (`..`/`.`/empty rejected), TDD'd. A 3-dimension review found 6 (all confirmed, all fixed): the in-memory-buffering OOM risk (→ stream to disk, MEDIUM), partial-transfer state not reset across reconnect (→ reset at each `streamSession` start), nondeterministic multi-client send target (→ target by `sessionID`), manual-vs-Bonjour duplicate (→ pin tiebreaker), temp-file aliasing (→ per-transfer dir), and disconnect dropping an in-hand received file (→ clear `receivedFile` on `start()` not `disconnect()`, so it survives a disconnect for sharing).
+
+**Verify**: package `swift test` 110/34; iOS `xcodebuild test` 31/31; macOS BUILD SUCCEEDED. Device-verify pending (see roadmap Now): the quality knob's visible effect, discovered-Mac persistence across relaunch, IP refresh after a move, and a round-trip file send.
+
 ## [2026-06-15] Glass HUD visual direction across both apps (design handoff)
 
 **Context**: A claude.ai/design handoff (`design_handoff_portview_glass_hud`, fetched as a gzip bundle from the share URL) locked the "Glass HUD" look — 6 iOS screens + 3 macOS host states — to recreate in the existing SwiftUI, wired to real types (no parallel state). User chose "build everything" (incl. the two states needing new model surface) + System fonts.
