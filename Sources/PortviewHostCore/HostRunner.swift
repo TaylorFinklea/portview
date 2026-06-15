@@ -34,6 +34,47 @@ public enum HostRunnerEvent: Equatable, Sendable {
     case ready(HostReadyDetails)
     case accessibilityWarning(String)
     case failed(String)
+    /// A client finished the handshake and began a session (carries the device's reported name).
+    case deviceConnected(id: String, name: String)
+    /// A client's session ended.
+    case deviceDisconnected(id: String)
+    /// Periodic live-session telemetry for the connected-device card.
+    case sessionStats(HostSessionStats)
+}
+
+/// A thread-safe registry of active client connections so the host UI can disconnect them without
+/// tearing down the listener (which would otherwise churn the bound port and break saved pairings).
+public final class HostControl: @unchecked Sendable {
+    private let lock = NSLock()
+    private var connections: [String: PortviewConnection] = [:]
+
+    public init() {}
+
+    func register(_ id: String, _ connection: PortviewConnection) {
+        lock.lock(); defer { lock.unlock() }
+        connections[id] = connection
+    }
+
+    func deregister(_ id: String) {
+        lock.lock(); defer { lock.unlock() }
+        connections[id] = nil
+    }
+
+    /// Close every active client session. The listener stays up and keeps advertising, so we first
+    /// send a graceful `bye` (and let it flush) — the client treats that as a deliberate close and
+    /// will NOT auto-reconnect, whereas a bare close looks like a network drop and would re-bind.
+    public func disconnectAll() {
+        lock.lock()
+        let active = Array(connections.values)
+        connections.removeAll()
+        lock.unlock()
+        for connection in active {
+            Task {
+                try? await connection.send(.bye(Bye(reason: "Disconnected by host")))
+                connection.close()
+            }
+        }
+    }
 }
 
 public struct HostRunner: Sendable {
@@ -50,10 +91,10 @@ public struct HostRunner: Sendable {
 
     public init() {}
 
-    public func events(identity: HostPermissionIdentity) -> AsyncStream<HostRunnerEvent> {
+    public func events(identity: HostPermissionIdentity, control: HostControl? = nil) -> AsyncStream<HostRunnerEvent> {
         AsyncStream { continuation in
             let task = Task {
-                await run(identity: identity) { event in
+                await run(identity: identity, control: control) { event in
                     continuation.yield(event)
                 }
                 continuation.finish()
@@ -64,6 +105,7 @@ public struct HostRunner: Sendable {
 
     public func run(
         identity: HostPermissionIdentity,
+        control: HostControl? = nil,
         onEvent: @escaping @Sendable (HostRunnerEvent) -> Void
     ) async {
         guard CGRequestScreenCaptureAccess() else {
@@ -128,7 +170,7 @@ public struct HostRunner: Sendable {
             let sendableDisplays = SendableDisplays(displays)
             await withTaskCancellationHandler {
                 await Self.serveConnections(listener.connections) { connection in
-                    await Self.serve(connection, displays: sendableDisplays)
+                    await Self.serve(connection, displays: sendableDisplays, emit: onEvent, control: control)
                 }
             } onCancel: {
                 listener.cancel()
@@ -242,15 +284,25 @@ public struct HostRunner: Sendable {
 
     /// Run one client session. A single inbound loop handles the handshake and then
     /// input messages (injected as CGEvents); video streams concurrently from a child task.
-    private static func serve(_ connection: PortviewConnection, displays: SendableDisplays) async {
+    private static func serve(
+        _ connection: PortviewConnection,
+        displays: SendableDisplays,
+        emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in },
+        control: HostControl? = nil
+    ) async {
         await withTaskCancellationHandler {
-            await serveSession(connection, displays: displays)
+            await serveSession(connection, displays: displays, emit: emit, control: control)
         } onCancel: {
             connection.close()
         }
     }
 
-    private static func serveSession(_ connection: PortviewConnection, displays: SendableDisplays) async {
+    private static func serveSession(
+        _ connection: PortviewConnection,
+        displays: SendableDisplays,
+        emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in },
+        control: HostControl? = nil
+    ) async {
         let displays = displays.values
         guard let firstDisplay = displays.first else { return }
         let displayInfos = displays.map {
@@ -263,6 +315,8 @@ public struct HostRunner: Sendable {
             Task { try? await connection.send(.clipboardUpdate(ClipboardUpdate(text: text))) }
         }
         let fileReceiver = FileReceiver()
+        // Identifies this session for the host UI; set once the client handshake names the device.
+        var connectedDeviceID: String?
 
         // Injector, capture engine, and video pump are (re)bound to the active display; switching
         // re-targets all three. `currentCapture` lets viewport (magnifier) requests re-crop the
@@ -276,6 +330,10 @@ public struct HostRunner: Sendable {
             videoTask?.cancel()
             currentCapture?.stop()
             connection.close()
+            if let connectedDeviceID {
+                control?.deregister(connectedDeviceID)
+                emit(.deviceDisconnected(id: connectedDeviceID))
+            }
         }
 
         func display(forID id: UInt32) -> SCDisplay {
@@ -286,7 +344,7 @@ public struct HostRunner: Sendable {
             injector = makeInjector(for: display, connection: connection)
             let capture = CaptureEngine(width: display.width, height: display.height)
             currentCapture = capture
-            videoTask = Task { await pumpVideo(connection, display: display, capture: capture) }
+            videoTask = Task { await pumpVideo(connection, display: display, capture: capture, emit: emit) }
             print("Streaming display \(display.displayID) source \(display.width)x\(display.height).")
         }
 
@@ -295,6 +353,14 @@ public struct HostRunner: Sendable {
             case .clientHello(let hello):
                 do {
                     try await connection.send(.serverHello(server.handle(hello)))
+                    if connectedDeviceID == nil {
+                        // Identify the session per-connection (not by the device's stable id): on a
+                        // reconnect the old session's disconnect must not evict the new one's entry.
+                        let sessionID = UUID().uuidString
+                        connectedDeviceID = sessionID
+                        control?.register(sessionID, connection)
+                        emit(.deviceConnected(id: sessionID, name: hello.deviceName))
+                    }
                 } catch {
                     print("handshake error: \(error)")
                     videoTask?.cancel()
@@ -344,7 +410,12 @@ public struct HostRunner: Sendable {
     /// Capture → HEVC encode → serialize → send. The encoder is built to match the actual
     /// pixel-buffer dimensions (points vs pixels differ on Retina), and a single bad frame is
     /// skipped (re-requesting a keyframe) rather than aborting the whole stream.
-    static func pumpVideo(_ connection: PortviewConnection, display: SCDisplay, capture: CaptureEngine) async {
+    static func pumpVideo(
+        _ connection: PortviewConnection,
+        display: SCDisplay,
+        capture: CaptureEngine,
+        emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in }
+    ) async {
         do {
             try capture.start(display: display, maxFPS: 60)
         } catch {
@@ -414,6 +485,12 @@ public struct HostRunner: Sendable {
                     viewport: await capture.currentViewport()
                 ) {
                     try? await connection.send(.qualityStats(quality))
+                    emit(.sessionStats(HostSessionStats(
+                        throughputMbps: quality.encodedMbps,
+                        fps: quality.fps,
+                        encodeMs: quality.averageEncodeMs,
+                        displayWidth: display.width,
+                        displayHeight: display.height)))
                 }
             } catch {
                 needsKeyframe = true

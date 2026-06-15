@@ -29,6 +29,12 @@ struct SavedHost: Identifiable, Codable, Equatable {
         }
         return endpoints
     }
+
+    /// Whether this saved Mac is currently discoverable on the LAN (a live Bonjour host matches by
+    /// name). Drives the Deck Home tile's reachability treatment: on-network (signal) vs off (idle).
+    func isOnNetwork(among discovered: [DiscoveredHost]) -> Bool {
+        discovered.contains { $0.name == name }
+    }
 }
 
 /// Persists paired hosts in `UserDefaults` so returning users skip the QR rescan.

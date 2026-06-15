@@ -1,279 +1,142 @@
 import SwiftUI
-import UniformTypeIdentifiers
 import PortviewProtocol
 import PortviewTransport
 
+/// Top-level router for the Glass HUD client. Owns session/discovery/pairing state and the live HUD
+/// controls; switches between the connect flow (Deck Home → Pair/Connecting) and the live surface.
 struct ContentView: View {
     @StateObject private var session = SessionViewModel()
     @StateObject private var discovery = DiscoveryModel()
     @StateObject private var savedHosts = SavedHostsStore()
     @StateObject private var pairing = PairingCoordinator()
-    @State private var host = ""
-    @State private var port = ""
-    @State private var pin = ""
+
+    @State private var manualHost = ""
+    @State private var manualPort = ""
+    @State private var manualPin = ""
     @State private var showScanner = false
+    @State private var showManual = false
     @State private var showFileImporter = false
+    @State private var pinPromptHost: DiscoveredHost?
+    @State private var discoveredPin = ""
+
+    // Live HUD state (kept here so it survives view switches; passed to LiveHUDView).
     @State private var zoom: CGFloat = 1
     @State private var showQualityHUD = false
     @State private var samplerMode: VideoSamplerMode = .linear
     @State private var keyboardActive = false
-    /// Sticky modifiers armed for the next keystroke (cleared after it's sent).
     @State private var armed: KeyModifiers = []
 
-    private let modifierKeys: [(label: String, mod: KeyModifiers)] = [
-        ("⌘", .command), ("⇧", .shift), ("⌥", .option), ("⌃", .control)
-    ]
-
     var body: some View {
-        if session.status == .streaming {
-            GeometryReader { geo in
-                let size = geo.size
-                let zoomGeometry = ZoomGeometry(
-                    view: size,
-                    displaySize: session.displaySize,
-                    cursor: session.cursorNormalized,
-                    zoom: zoom,
-                    frameViewport: session.frameViewport)
-
-                ZStack(alignment: .top) {
-                    TrackpadVideoView(
-                        renderer: session.renderer,
-                        zoom: zoom,
-                        onMove: { dx, dy in session.sendPointerMove(dx: dx, dy: dy) },
-                        onScroll: { dx, dy in session.sendScroll(dx: dx, dy: dy) },
-                        onClick: { session.sendClick() },
-                        onZoom: { zoom = min(6, max(1, $0)) }
-                    )
-                    .frame(width: size.width, height: size.height)
-                    .scaleEffect(zoomGeometry.renderScale, anchor: .center)
-                    .offset(x: zoomGeometry.pan.x, y: zoomGeometry.pan.y)
-                    // Smooth the follow so throttled host cursor reports don't make the pan jitter,
-                    // while staying responsive (short, critically damped — no overshoot).
-                    .animation(.spring(response: 0.1, dampingFraction: 1.0), value: session.cursorNormalized)
-                    // Ask the host to crop (the magnifier) to the padded display-aspect region around
-                    // the visible window, as zoom/pan change. Throttled + deduped in the view model.
-                    .onChange(of: zoomGeometry.cropRequest) { _, crop in session.requestViewport(crop) }
-
-                    // Invisible first-responder that surfaces the system keyboard when toggled.
-                    KeyboardCaptureView(
-                        isActive: $keyboardActive,
-                        onText: { text in
-                            if armed.isEmpty {
-                                session.sendText(text)
-                            } else {
-                                session.sendChar(text, modifiers: armed)
-                                armed = []
-                            }
-                        },
-                        onSpecial: { key in
-                            session.sendKey(key, modifiers: armed)
-                            armed = []
-                        }
-                    )
-                    .frame(width: 0, height: 0)
-
-                    VStack(spacing: 8) {
-                        HStack(spacing: 10) {
-                            Text("drag·move  tap·click  2-finger·scroll  pinch·zoom")
-                                .font(.caption2)
-                                .padding(.horizontal, 10).padding(.vertical, 6)
-                                .background(.ultraThinMaterial, in: Capsule())
-                            Spacer()
-                            if zoom > 1.01 {
-                                Button { zoom = 1 } label: { Image(systemName: "minus.magnifyingglass") }
-                                    .padding(8).background(.ultraThinMaterial, in: Circle())
-                            }
-                            Button { showQualityHUD.toggle() } label: { Image(systemName: "gauge") }
-                                .padding(8).background(.ultraThinMaterial, in: Circle())
-                            if showQualityHUD {
-                                Button {
-                                    samplerMode = samplerMode.next
-                                    session.renderer.samplerMode = samplerMode
-                                } label: {
-                                    Image(systemName: samplerMode == .linear ? "circle.lefthalf.filled" : "circle.righthalf.filled")
-                                }
-                                .padding(8).background(.ultraThinMaterial, in: Circle())
-                            }
-                            if session.displays.count > 1 {
-                                Menu {
-                                    ForEach(session.displays, id: \.id) { display in
-                                        Button {
-                                            zoom = 1   // start the new display un-cropped
-                                            session.switchDisplay(to: display.id)
-                                        } label: {
-                                            Label(display.name,
-                                                  systemImage: display.id == session.activeDisplayID ? "checkmark" : "display")
-                                        }
-                                    }
-                                } label: {
-                                    Image(systemName: "rectangle.on.rectangle")
-                                }
-                                .padding(8).background(.ultraThinMaterial, in: Circle())
-                            }
-                            Button { session.pasteToHost() } label: { Image(systemName: "doc.on.clipboard") }
-                                .padding(8).background(.ultraThinMaterial, in: Circle())
-                            Button { showFileImporter = true } label: { Image(systemName: "arrow.up.doc") }
-                                .padding(8).background(.ultraThinMaterial, in: Circle())
-                            Button { keyboardActive.toggle() } label: {
-                                Image(systemName: keyboardActive ? "keyboard.chevron.compact.down" : "keyboard")
-                            }
-                            .padding(8).background(.ultraThinMaterial, in: Circle())
-                            Button("Disconnect") { session.disconnect() }
-                                .padding(.horizontal, 14).padding(.vertical, 8)
-                                .background(.ultraThinMaterial, in: Capsule())
-                        }
-
-                        // Sticky modifier bar — arm ⌘/⇧/⌥/⌃, then the next key forms a chord.
-                        if keyboardActive {
-                            HStack(spacing: 8) {
-                                ForEach(modifierKeys.indices, id: \.self) { i in
-                                    let entry = modifierKeys[i]
-                                    let on = armed.contains(entry.mod)
-                                    Button { armed.formSymmetricDifference(entry.mod) } label: {
-                                        Text(entry.label)
-                                            .font(.system(size: 17, weight: .semibold))
-                                            .frame(width: 42, height: 36)
-                                            .foregroundStyle(on ? Color.white : Color.primary)
-                                            .background(
-                                                on ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.ultraThinMaterial),
-                                                in: RoundedRectangle(cornerRadius: 8)
-                                            )
-                                    }
-                                }
-                                Spacer()
-                            }
-                        }
-
-                        if let transferStatus = session.transferStatus {
-                            HStack {
-                                Text(transferStatus)
-                                    .font(.caption2)
-                                    .padding(.horizontal, 10).padding(.vertical, 6)
-                                    .background(.ultraThinMaterial, in: Capsule())
-                                Spacer()
-                            }
-                        }
-
-                        if showQualityHUD {
-                            HStack {
-                                QualityHUD(
-                                    diagnostics: session.qualityDiagnostics,
-                                    zoom: zoom,
-                                    renderScale: zoomGeometry.renderScale,
-                                    frameViewport: session.frameViewport,
-                                    samplerMode: samplerMode
-                                )
-                                Spacer()
-                            }
-                        }
-                    }
-                    .padding()
-                    .onAppear { session.renderer.samplerMode = samplerMode }
-                    .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item]) { result in
-                        if case .success(let url) = result {
-                            guard url.startAccessingSecurityScopedResource() else { return }
-                            defer { url.stopAccessingSecurityScopedResource() }
-                            if let data = try? Data(contentsOf: url) {
-                                session.sendFile(name: url.lastPathComponent, data: data)
-                            }
-                        }
-                    }
-                }
-            }
-            .ignoresSafeArea()
-            .onAppear { commitPendingPairingIfStreaming() }
-        } else {
-            NavigationStack {
-                Form {
-                    if !savedHosts.hosts.isEmpty {
-                        Section("Saved Macs") {
-                            ForEach(savedHosts.hosts) { saved in
-                                Button {
-                                    pairing.markPending(saved.payload)
-                                    session.reconnect(saved: saved, discovered: discovery.hosts)
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(saved.name)
-                                        Text("\(saved.host):\(String(saved.port))")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    }
-                                }
-                            }
-                            .onDelete { savedHosts.remove(atOffsets: $0) }
-                        }
-                    }
-
-                    Section("Pair by QR") {
-                        Button {
-                            showScanner = true
-                        } label: {
-                            Label("Scan the QR shown on your Mac", systemImage: "qrcode.viewfinder")
-                        }
-                    }
-
-                    if !discovery.hosts.isEmpty {
-                        Section("Discovered Macs (enter the pin, then tap)") {
-                            ForEach(discovery.hosts) { discovered in
-                                Button(discovered.name) {
-                                    session.connect(to: discovered, pinHex: pin)
-                                }
-                                .disabled(pin.isEmpty)
-                            }
-                        }
-                    }
-
-                    Section("Or connect manually") {
-                        TextField("IP address", text: $host)
-                            .keyboardType(.numbersAndPunctuation)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                        TextField("Port", text: $port)
-                            .keyboardType(.numberPad)
-                    }
-
-                    Section("Pin") {
-                        TextField("Pin (64 hex chars)", text: $pin)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .font(.system(.body, design: .monospaced))
-                        Button("Connect manually") {
-                            if let parsedPort = UInt16(port) {
-                                pairing.markPending(PairingPayload(host: host, port: parsedPort, pinHex: pin, name: host))
-                                session.connect(host: host, port: parsedPort, pinHex: pin)
-                            }
-                        }
-                        .disabled(host.isEmpty || port.isEmpty || pin.isEmpty)
-                    }
-
-                    switch session.status {
-                    case .connecting:
-                        ProgressView("Connecting…")
-                    case .failed(let message):
-                        Text(message).foregroundStyle(.red)
-                    default:
-                        EmptyView()
-                    }
-                }
-                .navigationTitle("🪟 Portview")
-                .sheet(isPresented: $showScanner) {
-                    QRScannerView { code in
+        content
+            .preferredColorScheme(.dark)
+            .fullScreenCover(isPresented: $showScanner) {
+                PairView(
+                    onConnect: { payload in
                         showScanner = false
-                        if let payload = PairingPayload(urlString: code) {
-                            pairing.markPending(payload)
-                            session.connect(payload: payload)
-                        }
-                    }
-                    .ignoresSafeArea()
-                }
-                .onAppear { discovery.start() }
-                .onDisappear { discovery.stop() }
+                        pairing.markPending(payload)
+                        session.connect(payload: payload)
+                    },
+                    onManual: { showScanner = false; showManual = true },
+                    onClose: { showScanner = false })
             }
+            .sheet(isPresented: $showManual) { manualConnectSheet }
+            .alert("Pair with \(pinPromptHost?.name ?? "Mac")", isPresented: pinPromptPresented) {
+                TextField("Pin (64 hex chars)", text: $discoveredPin)
+                Button("Connect") {
+                    if let host = pinPromptHost { session.connect(to: host, pinHex: discoveredPin) }
+                    pinPromptHost = nil
+                    discoveredPin = ""
+                }
+                Button("Cancel", role: .cancel) { pinPromptHost = nil; discoveredPin = "" }
+            } message: {
+                Text("Enter the pin shown on \(pinPromptHost?.name ?? "the Mac").")
+            }
+            .onChange(of: session.status) { _, status in
+                if status == .streaming {
+                    pairing.commitIfStreaming(true) { savedHosts.remember($0) }
+                }
+            }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch session.status {
+        case .streaming, .reconnecting:
+            LiveHUDView(
+                session: session,
+                zoom: $zoom,
+                showQualityHUD: $showQualityHUD,
+                samplerMode: $samplerMode,
+                keyboardActive: $keyboardActive,
+                armed: $armed,
+                showFileImporter: $showFileImporter)
+        case .connecting:
+            ConnectingView(hostName: session.hostName ?? "Mac", onCancel: { session.disconnect() })
+        case .idle, .failed:
+            DeckHomeView(
+                session: session,
+                discovery: discovery,
+                savedHosts: savedHosts,
+                onReconnectSaved: { saved in
+                    pairing.markPending(saved.payload)
+                    session.reconnect(saved: saved, discovered: discovery.hosts)
+                },
+                onPickDiscovered: { host in
+                    discoveredPin = ""
+                    pinPromptHost = host
+                },
+                onScan: { showScanner = true },
+                onManual: { showManual = true })
+            .onAppear { discovery.start() }
+            .onDisappear { discovery.stop() }
         }
     }
 
-    private func commitPendingPairingIfStreaming() {
-        pairing.commitIfStreaming(session.status == .streaming) { payload in
-            savedHosts.remember(payload)
+    private var pinPromptPresented: Binding<Bool> {
+        Binding(get: { pinPromptHost != nil }, set: { if !$0 { pinPromptHost = nil } })
+    }
+
+    private var manualConnectSheet: some View {
+        GlassCanvas(style: .deck) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack {
+                    Text("Connect manually").font(.grotesk(22, .bold)).foregroundStyle(Glass.text1)
+                    Spacer()
+                    Button { showManual = false } label: {
+                        Image(systemName: "xmark").font(.system(size: 13, weight: .semibold))
+                            .foregroundStyle(Glass.text2).frame(width: 30, height: 30)
+                            .background(.ultraThinMaterial, in: Circle())
+                    }
+                }
+                manualField("IP address", text: $manualHost, keyboard: .numbersAndPunctuation)
+                manualField("Port", text: $manualPort, keyboard: .numberPad)
+                manualField("Pin (64 hex chars)", text: $manualPin, keyboard: .asciiCapable, mono: true)
+                Button("Connect") {
+                    guard let port = UInt16(manualPort) else { return }
+                    let payload = PairingPayload(host: manualHost, port: port, pinHex: manualPin, name: manualHost)
+                    pairing.markPending(payload)
+                    session.connect(host: manualHost, port: port, pinHex: manualPin)
+                    showManual = false
+                }
+                .buttonStyle(AccentButtonStyle())
+                .disabled(manualHost.isEmpty || manualPort.isEmpty || manualPin.isEmpty)
+                .opacity(manualHost.isEmpty || manualPort.isEmpty || manualPin.isEmpty ? 0.5 : 1)
+                Spacer()
+            }
+            .padding(20)
         }
+        .preferredColorScheme(.dark)
+    }
+
+    private func manualField(_ placeholder: String, text: Binding<String>, keyboard: UIKeyboardType, mono: Bool = false) -> some View {
+        TextField("", text: text, prompt: Text(placeholder).foregroundStyle(Glass.text3))
+            .font(mono ? .mono(13) : .grotesk(14))
+            .foregroundStyle(Glass.text1)
+            .keyboardType(keyboard)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .glassCard()
     }
 }

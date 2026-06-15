@@ -7,11 +7,12 @@ import PortviewTransport
 import PortviewMedia
 
 /// Drives a Portview client session: connect (cert-pinned) → handshake → receive video
-/// frames → rebuild sample buffers → enqueue for display.
+/// frames → rebuild sample buffers → enqueue for display. If a live session drops, it re-binds the
+/// host over Bonjour (surviving a LAN IP change) before giving up — the `.reconnecting` state.
 @MainActor
 final class SessionViewModel: ObservableObject {
     enum Status: Equatable {
-        case idle, connecting, streaming, failed(String)
+        case idle, connecting, streaming, reconnecting, failed(String)
     }
 
     @Published var status: Status = .idle
@@ -26,6 +27,8 @@ final class SessionViewModel: ObservableObject {
     /// Updated when the host confirms a viewport; the client renders the residual zoom against it.
     @Published var frameViewport = CGRect(x: 0, y: 0, width: 1, height: 1)
     @Published var qualityDiagnostics = QualityDiagnostics()
+    /// The name of the Mac this session is bound to (for reconnect status copy); nil before connect.
+    @Published private(set) var hostName: String?
     private var qualityTracker = QualityDiagnosticsTracker()
     private lazy var viewportRequests = ViewportRequestScheduler { [weak self] rect in
         guard let self else { return }
@@ -45,32 +48,49 @@ final class SessionViewModel: ObservableObject {
     /// Must match the host's InputInjector sensitivity so the predicted cursor tracks the real one.
     private let inputSensitivity: CGFloat = 1.5
 
+    private var hasFailed: Bool {
+        if case .failed = status { return true }
+        return false
+    }
+
+    /// Total time to keep trying to re-bind a dropped session before failing.
+    private static let reconnectWindow: TimeInterval = 30
+    /// How long each rediscovery pass waits for the host to reappear on Bonjour.
+    private static let rediscoverTimeout: Duration = .seconds(6)
+
     func connect(host: String, port: UInt16, pinHex: String) {
         guard let nwPort = NWEndpoint.Port(rawValue: port) else {
             status = .failed("Invalid port.")
             return
         }
-        start(endpoints: [.hostPort(host: NWEndpoint.Host(host), port: nwPort)], pinHex: pinHex)
+        start(endpoints: [.hostPort(host: NWEndpoint.Host(host), port: nwPort)],
+              pinHex: pinHex, reconnectName: host)
     }
 
     /// Connect to a Bonjour-discovered host (user still supplies the pin).
     func connect(to host: DiscoveredHost, pinHex: String) {
-        start(endpoints: [host.endpoint], pinHex: pinHex)
+        start(endpoints: [host.endpoint], pinHex: pinHex, reconnectName: host.name)
     }
 
     /// Connect from a scanned QR pairing payload (host, port, and pin all included).
     func connect(payload: PairingPayload) {
-        connect(host: payload.host, port: payload.port, pinHex: payload.pinHex)
+        guard let nwPort = NWEndpoint.Port(rawValue: payload.port) else {
+            status = .failed("Invalid port.")
+            return
+        }
+        start(endpoints: [.hostPort(host: NWEndpoint.Host(payload.host), port: nwPort)],
+              pinHex: payload.pinHex, reconnectName: payload.name ?? payload.host)
     }
 
     /// Reconnect a saved Mac, preferring its live Bonjour endpoint (survives a LAN IP change) and
     /// falling back to the saved host:port. The saved pin is unchanged, so cert pinning still
     /// gates the connection regardless of which candidate wins.
     func reconnect(saved: SavedHost, discovered: [DiscoveredHost]) {
-        start(endpoints: saved.reconnectEndpoints(among: discovered), pinHex: saved.pinHex)
+        start(endpoints: saved.reconnectEndpoints(among: discovered),
+              pinHex: saved.pinHex, reconnectName: saved.name)
     }
 
-    private func start(endpoints: [NWEndpoint], pinHex: String) {
+    private func start(endpoints: [NWEndpoint], pinHex: String, reconnectName: String?) {
         guard let pin = Data(hexString: pinHex), pin.count == 32 else {
             status = .failed("Pin must be 64 hex characters.")
             return
@@ -80,8 +100,9 @@ final class SessionViewModel: ObservableObject {
             return
         }
         status = .connecting
+        hostName = reconnectName
         task?.cancel()
-        task = Task { [weak self] in await self?.run(endpoints: endpoints, pin: pin) }
+        task = Task { [weak self] in await self?.run(endpoints: endpoints, pin: pin, reconnectName: reconnectName) }
     }
 
     func disconnect() {
@@ -90,6 +111,7 @@ final class SessionViewModel: ObservableObject {
         task?.cancel()
         task = nil
         status = .idle
+        hostName = nil
         displays = []
         activeDisplayID = 0
         resetViewport()
@@ -141,8 +163,13 @@ final class SessionViewModel: ObservableObject {
     }
 
     func sendClick() {
-        send(.pointerButton(PointerButton(button: .left, isDown: true)))
-        send(.pointerButton(PointerButton(button: .left, isDown: false)))
+        // Down + up must stay ordered, so send both within a single Task (two independent Tasks
+        // could invert and leave a stuck click / corrupted drag state on the host).
+        guard let connection else { return }
+        Task {
+            try? await connection.send(.pointerButton(PointerButton(button: .left, isDown: true)))
+            try? await connection.send(.pointerButton(PointerButton(button: .left, isDown: false)))
+        }
     }
 
     func sendScroll(dx: CGFloat, dy: CGFloat) {
@@ -199,82 +226,193 @@ final class SessionViewModel: ObservableObject {
         Task { try? await connection.send(message) }
     }
 
-    private func run(endpoints: [NWEndpoint], pin: Data) async {
-        do {
-            // Try candidates in order; the first whose pinned handshake succeeds wins. Only the
-            // initial connect falls through candidates — a mid-stream drop never re-targets.
-            var connection: PortviewConnection?
-            var lastError: Error?
-            for endpoint in endpoints {
-                if Task.isCancelled { return }
-                do {
-                    connection = try await PortviewConnection.connectQUIC(to: endpoint, pinnedCertificateSHA256: pin)
-                    break
-                } catch {
-                    lastError = error
-                }
-            }
-            guard let connection else {
-                throw lastError ?? PortviewClientError.noReachableEndpoint
-            }
-            self.connection = connection
-            var client = ClientHandshake(
-                deviceID: UIDevice.current.identifierForVendor?.uuidString ?? "ios-client",
-                deviceName: UIDevice.current.name,
-                supportedCodecs: [.hevc]
-            )
-            try await connection.send(.clientHello(client.start()))
+    // MARK: - Connect / stream / reconnect
 
-            for await message in connection.inbound {
-                switch message {
-                case .serverHello(let hello):
-                    guard let display = hello.displays.first else { continue }
-                    displays = hello.displays
-                    activeDisplayID = display.id
-                    displaySize = CGSize(width: max(1, Double(display.width)), height: max(1, Double(display.height)))
-                    let start = try client.handle(
-                        hello, displayID: display.id,
-                        maxWidth: display.width, maxHeight: display.height,
-                        maxFPS: 60, targetBitrate: 25_000_000
-                    )
-                    try await connection.send(.startSession(start))
-                    client.didStartStreaming()
-                    status = .streaming
-                case .videoFrame(let frame):
-                    let decodeStart = ProcessInfo.processInfo.systemUptime
-                    if let sample = try? rebuild(frame),
-                       let pixelBuffer = try? await decoder.decode(sample) {
-                        let decodeMs = (ProcessInfo.processInfo.systemUptime - decodeStart) * 1_000.0
-                        renderer.render(pixelBuffer)
-                        if let snapshot = qualityTracker.recordDecodedFrame(frame, decodeMs: decodeMs) {
-                            qualityDiagnostics = snapshot
-                        }
+    private enum SessionEnd { case streamed, notStreamed, hostError, evicted }
+
+    private func run(endpoints: [NWEndpoint], pin: Data, reconnectName: String?) async {
+        var connectedEndpoint: NWEndpoint?
+        do {
+            let (connection, endpoint) = try await connectFirst(endpoints, pin: pin)
+            connectedEndpoint = endpoint
+            self.connection = connection
+            let end = try await streamSession(connection)
+            self.connection = nil
+            audioPlayer.stop()
+            switch end {
+            case .hostError, .evicted:
+                return // status already set (.failed / .idle); a host-initiated end is terminal
+            case .notStreamed:
+                if !hasFailed { status = .idle }
+                return
+            case .streamed:
+                break // stream closed after a successful session — try to re-bind below
+            }
+        } catch {
+            self.connection = nil
+            audioPlayer.stop()
+            if Task.isCancelled { return }
+            status = .failed("\(error)")
+            return
+        }
+
+        guard let reconnectName, let connectedEndpoint, !Task.isCancelled else {
+            if status == .streaming { status = .idle }
+            return
+        }
+        await reconnectLoop(name: reconnectName, fallback: connectedEndpoint, pin: pin)
+    }
+
+    /// Try each candidate endpoint in order; return the first whose pinned QUIC handshake succeeds.
+    private func connectFirst(_ endpoints: [NWEndpoint], pin: Data) async throws -> (PortviewConnection, NWEndpoint) {
+        var lastError: Error?
+        for endpoint in endpoints {
+            if Task.isCancelled { throw CancellationError() }
+            do {
+                let connection = try await PortviewConnection.connectQUIC(to: endpoint, pinnedCertificateSHA256: pin)
+                return (connection, endpoint)
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? PortviewClientError.noReachableEndpoint
+    }
+
+    /// Run the handshake then the inbound loop for one connection. Returns when the connection
+    /// closes (`.streamed`/`.notStreamed`) or the host reports a terminal error (`.hostError`).
+    private func streamSession(_ connection: PortviewConnection) async throws -> SessionEnd {
+        var client = ClientHandshake(
+            deviceID: UIDevice.current.identifierForVendor?.uuidString ?? "ios-client",
+            deviceName: UIDevice.current.name,
+            supportedCodecs: [.hevc]
+        )
+        try await connection.send(.clientHello(client.start()))
+        var didStream = false
+
+        for await message in connection.inbound {
+            switch message {
+            case .serverHello(let hello):
+                guard let display = hello.displays.first else { continue }
+                displays = hello.displays
+                activeDisplayID = display.id
+                displaySize = CGSize(width: max(1, Double(display.width)), height: max(1, Double(display.height)))
+                let start = try client.handle(
+                    hello, displayID: display.id,
+                    maxWidth: display.width, maxHeight: display.height,
+                    maxFPS: 60, targetBitrate: 25_000_000
+                )
+                try await connection.send(.startSession(start))
+                client.didStartStreaming()
+                status = .streaming
+                didStream = true
+            case .videoFrame(let frame):
+                let decodeStart = ProcessInfo.processInfo.systemUptime
+                if let sample = try? rebuild(frame),
+                   let pixelBuffer = try? await decoder.decode(sample) {
+                    let decodeMs = (ProcessInfo.processInfo.systemUptime - decodeStart) * 1_000.0
+                    renderer.render(pixelBuffer)
+                    if let snapshot = qualityTracker.recordDecodedFrame(frame, decodeMs: decodeMs) {
+                        qualityDiagnostics = snapshot
                     }
-                case .cursorPosition(let cursor):
-                    cursorNormalized = CGPoint(x: cursor.normalizedX, y: cursor.normalizedY)
-                case .clipboardUpdate(let update):
-                    UIPasteboard.general.string = update.text
-                case .audioFrame(let audio):
-                    audioPlayer.play(sampleRate: Double(audio.sampleRate), channels: UInt32(audio.channels), planarData: audio.data)
-                case .viewport(let v):
-                    // Host confirmed the region its frames now represent — settle the residual zoom to it.
-                    frameViewport = CGRect(x: v.normalizedX, y: v.normalizedY, width: v.normalizedW, height: v.normalizedH)
-                case .qualityStats(let stats):
-                    qualityDiagnostics = qualityTracker.updateHostStats(stats)
-                case .error(let error):
-                    status = .failed("Host error: \(error.message)")
-                    return
-                default:
-                    break
+                }
+            case .cursorPosition(let cursor):
+                cursorNormalized = CGPoint(x: cursor.normalizedX, y: cursor.normalizedY)
+            case .clipboardUpdate(let update):
+                UIPasteboard.general.string = update.text
+            case .audioFrame(let audio):
+                audioPlayer.play(sampleRate: Double(audio.sampleRate), channels: UInt32(audio.channels), planarData: audio.data)
+            case .viewport(let v):
+                // Host confirmed the region its frames now represent — settle the residual zoom to it.
+                frameViewport = CGRect(x: v.normalizedX, y: v.normalizedY, width: v.normalizedW, height: v.normalizedH)
+            case .qualityStats(let stats):
+                qualityDiagnostics = qualityTracker.updateHostStats(stats)
+            case .bye:
+                // Host ended the session deliberately (e.g. its Disconnect button) — a clean,
+                // terminal close, NOT a drop, so don't attempt to re-bind.
+                status = .idle
+                return .evicted
+            case .error(let error):
+                status = .failed("Host error: \(error.message)")
+                return .hostError
+            default:
+                break
+            }
+        }
+        return didStream ? .streamed : .notStreamed
+    }
+
+    /// After a dropped session, keep re-binding the host (Bonjour-first) until it streams again or
+    /// the reconnect window elapses. Input is paused (the UI shows the degraded state) until a
+    /// candidate's pinned handshake succeeds and streaming resumes.
+    private func reconnectLoop(name: String, fallback: NWEndpoint, pin: Data) async {
+        var deadline = ProcessInfo.processInfo.systemUptime + Self.reconnectWindow
+        while !Task.isCancelled, ProcessInfo.processInfo.systemUptime < deadline {
+            status = .reconnecting
+            let discovered = await rediscover(name: name, timeout: Self.rediscoverTimeout)
+            if Task.isCancelled { return }
+            let candidates = Self.reconnectCandidates(name: name, fallback: fallback, discovered: discovered)
+
+            if let (connection, _) = try? await connectFirst(candidates, pin: pin) {
+                self.connection = connection
+                let end = (try? await streamSession(connection)) ?? .notStreamed
+                self.connection = nil
+                audioPlayer.stop()
+                if Task.isCancelled { return }
+                switch end {
+                case .hostError, .evicted:
+                    return // terminal; status already set (.failed / .idle)
+                case .streamed:
+                    // Reconnected and streamed; if it drops again allow a fresh window.
+                    deadline = ProcessInfo.processInfo.systemUptime + Self.reconnectWindow
+                    continue
+                case .notStreamed:
+                    break // link came up but didn't stream — keep trying within the window
                 }
             }
-            if status == .streaming { status = .idle } // connection closed
-            audioPlayer.stop()
-            self.connection = nil
-        } catch {
-            status = .failed("\(error)")
-            audioPlayer.stop()
-            self.connection = nil
+            try? await Task.sleep(for: .seconds(1))
+        }
+        if !Task.isCancelled, !hasFailed {
+            status = .failed("Lost connection to \(name).")
+        }
+    }
+
+    /// Reconnect candidates, ordered: a live Bonjour host matching by name (re-resolves the current
+    /// IP after a LAN change) first, then the endpoint we were connected to as the fallback. Pure +
+    /// `nonisolated` so it is unit-testable and callable off the main actor.
+    nonisolated static func reconnectCandidates(
+        name: String, fallback: NWEndpoint, discovered: [DiscoveredHost]
+    ) -> [NWEndpoint] {
+        var endpoints: [NWEndpoint] = []
+        if let match = discovered.first(where: { $0.name == name }) {
+            endpoints.append(match.endpoint)
+        }
+        if !endpoints.contains(fallback) {
+            endpoints.append(fallback)
+        }
+        return endpoints
+    }
+
+    /// Browse Bonjour for up to `timeout`, returning as soon as a host named `name` appears (or the
+    /// timeout elapses). Used to re-resolve a moved host's current address mid-session.
+    private func rediscover(name: String, timeout: Duration) async -> [DiscoveredHost] {
+        let browser = PortviewBrowser()
+        browser.start()
+        return await withTaskGroup(of: [DiscoveredHost]?.self) { group in
+            group.addTask {
+                for await hosts in browser.hosts where hosts.contains(where: { $0.name == name }) {
+                    return hosts
+                }
+                return [] // stream finished without a match
+            }
+            group.addTask {
+                try? await Task.sleep(for: timeout)
+                return nil // timeout sentinel
+            }
+            let first = await group.next() ?? nil
+            browser.stop() // finish the stream so the browse task's `for await` ends
+            group.cancelAll()
+            for await _ in group {} // drain the now-finishing tasks
+            return first ?? []
         }
     }
 

@@ -9,7 +9,8 @@ struct PortviewHostApp: App {
             ContentView(model: model)
                 .onDisappear { model.stop() }
         }
-        .defaultSize(width: 640, height: 560)
+        .defaultSize(width: 820, height: 640)
         .windowResizability(.contentMinSize)
+        .windowStyle(.hiddenTitleBar)
     }
 }

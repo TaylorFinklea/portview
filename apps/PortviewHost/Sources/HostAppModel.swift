@@ -27,8 +27,13 @@ final class HostAppModel {
     var state: State = .idle
     var accessibilityWarning: String?
     var messages: [String] = []
+    /// Live connected-device session state (count, primary device name, latest telemetry).
+    private(set) var sessions = HostSessions()
+    /// When the current client session began (for the "connected mm:ss" readout); nil when none.
+    private(set) var connectedSince: Date?
 
     @ObservationIgnored private var task: Task<Void, Never>?
+    @ObservationIgnored private let control = HostControl()
 
     var isRunning: Bool { task != nil }
     var screenRecordingHelp: String { HostRunner.screenRecordingHelp(for: .app(displayName: Self.displayName)) }
@@ -38,9 +43,11 @@ final class HostAppModel {
         state = .starting
         accessibilityWarning = nil
         messages = []
+        sessions = HostSessions()
+        connectedSince = nil
 
-        task = Task { [weak self] in
-            let events = HostRunner().events(identity: .app(displayName: Self.displayName))
+        task = Task { [weak self, control] in
+            let events = HostRunner().events(identity: .app(displayName: Self.displayName), control: control)
             for await event in events {
                 self?.handle(event)
             }
@@ -56,6 +63,13 @@ final class HostAppModel {
         task?.cancel()
         task = nil
         state = .idle
+        sessions = HostSessions()
+        connectedSince = nil
+    }
+
+    /// Close the connected client session(s) without stopping hosting (keeps advertising).
+    func disconnectClients() {
+        control.disconnectAll()
     }
 
     func copyPairingURL() {
@@ -83,6 +97,14 @@ final class HostAppModel {
         case .failed(let message):
             state = .failed(message)
             messages.append(message)
+        case .deviceConnected, .deviceDisconnected, .sessionStats:
+            let wasConnected = sessions.count > 0
+            sessions.apply(event)
+            let nowConnected = sessions.count > 0
+            if nowConnected, !wasConnected { connectedSince = Date() }
+            if !nowConnected { connectedSince = nil }
+            if case .deviceConnected(_, let name) = event { messages.append("device connected · \(name)") }
+            if case .deviceDisconnected = event { messages.append("device disconnected") }
         }
     }
 

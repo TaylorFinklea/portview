@@ -6,7 +6,16 @@
 
 `main`
 
-## Latest Session (2026-06-14 — IP-stable saved-Mac reconnect: DONE, build-green)
+## Latest Session (2026-06-15 — Glass HUD redesign, both apps: DONE, build-green)
+
+- Implemented the locked **Glass HUD** design (claude.ai/design handoff, fetched via the share URL → gzip bundle in /tmp/portview_glass) in SwiftUI. All 6 iOS screens + 3 macOS host states. Decision: decisions.md (2026-06-15); roadmap Now `[x]`.
+- New files — iOS: `GlassTheme/TelemetryReadout/QualityPanel/ConnectingView/DeckHomeView/PairView/LiveHUDView` (+ `ContentView`/`SessionViewModel`/`SavedHostsStore` rewrites); macOS: `GlassTheme/QRCodeView` (+ `ContentView`/`HostAppModel`/`PortviewHostApp`); core: `HostSessions` (+ `HostRunner` events/`HostControl`). Fonts = System SF + SF Mono; Material glass (not Liquid Glass); real CoreImage QR.
+- Built the 2 states needing real new surface: iOS `.reconnecting` + bounded mid-session Bonjour re-bind; macOS live device/stats (HostRunner emit → HostSessions reducer → HostAppModel) + real Disconnect (`HostControl`, sends `.bye`). No fabricated data (latency omitted, not faked; log filters CLI artifacts).
+- TDD: `GlassMappingTests` (8, iOS) + `HostSessionsTests` (10, core). 4-dim adversarial review = 9/9 confirmed → 5 fixed (host-`.bye` eviction, atomic click, toolbar order, `TimelineView` mm:ss, per-connection-UUID identity), 2 deferred (roadmap Next: resolved-endpoint infra), 2 no-action.
+- Verify: `swift test` **104/33**, iOS `xcodebuild test` **17/17**, macOS `xcodebuild` **BUILD SUCCEEDED**, CLI builds. NOT pushed (per convention).
+- NEXT (human device verify): the Glass look on-device; live IP-change reconnect (degraded→reconnecting→live); host state C with a real connected iPhone (name, ticking mm:ss, stats, Disconnect). Plus the still-pending earlier device tests (restart pin/port, HUD/QUIC).
+
+## Previous Session (2026-06-14 — IP-stable saved-Mac reconnect: DONE, build-green)
 
 - Client-only follow-up to the 2026-06-13 work: a saved Mac now reconnects after a LAN IP change (DHCP). Commit `4fe9d79`. Decision in decisions.md (2026-06-14).
 - `SavedHost.reconnectEndpoints(among:)` → ordered candidates: name-matched live Bonjour endpoint first (re-resolves current IP), saved `host:port` fallback. `SessionViewModel.run(endpoints:)` tries until the pinned handshake succeeds (initial connect only). `ContentView` saved-Mac tap passes `discovery.hosts`. Pin unchanged → cert pinning still gates (Bonjour name = routing hint only).
