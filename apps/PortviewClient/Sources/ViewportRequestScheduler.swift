@@ -53,10 +53,14 @@ final class ViewportRequestScheduler {
     }
 
     private func flush() {
-        lastFire = clock.now
         guard let rect = pending else { return }
         pending = nil
         guard !rect.isClose(to: lastSent) else { return }
+        // Only an ACTUAL send resets the rate-limit window. If we reset it on a near-duplicate
+        // (sub-epsilon cursor jitter), the next real move would find `elapsed < interval` and get
+        // deferred into a trailing fire — adding up to `interval` of latency right when you start
+        // moving for real.
+        lastFire = clock.now
         lastSent = rect
         send(rect)
     }

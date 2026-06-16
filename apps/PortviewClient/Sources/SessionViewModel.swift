@@ -151,9 +151,9 @@ final class SessionViewModel: ObservableObject {
         send(.switchDisplay(SwitchDisplay(displayID: displayID)))
     }
 
-    /// Ask the host to crop its capture to `rect` (normalized) — the magnifier. Debounced until
-    /// cursor/zoom movement settles so ScreenCaptureKit stream reconfiguration doesn't stutter the
-    /// interactive path.
+    /// Ask the host to crop its capture to `rect` (normalized) — the magnifier. Rate-limited by a
+    /// leading+trailing throttle so the host crop tracks the cursor DURING a pan (the first move
+    /// re-crops immediately, then at most once per interval) instead of only after movement stops.
     func requestViewport(_ rect: CGRect) {
         viewportRequests.request(rect)
     }

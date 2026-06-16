@@ -47,6 +47,23 @@ final class ViewportRequestSchedulerTests: XCTestCase {
         XCTAssertEqual(sent, [a])
     }
 
+    func testMicroJitterDoesNotDelayNextRealMove() async throws {
+        // A near-duplicate (sub-epsilon jitter) must NOT reset the rate window, or the next real
+        // move would be deferred a full interval (the latency bug). After the window has elapsed, a
+        // jitter request followed by a real change must fire that change immediately (leading edge).
+        let a = CGRect(x: 0.10, y: 0.10, width: 0.50, height: 0.50)
+        let b = CGRect(x: 0.30, y: 0.30, width: 0.50, height: 0.50)
+        var sent: [CGRect] = []
+        let scheduler = ViewportRequestScheduler(interval: .milliseconds(20)) { sent.append($0) }
+
+        scheduler.request(a)                                              // leading → sends a
+        try await Task.sleep(for: .milliseconds(40))                      // window elapses
+        scheduler.request(CGRect(x: 0.1003, y: 0.1003, width: 0.50, height: 0.50))  // jitter ~ a (no send)
+        scheduler.request(b)                                              // real move
+
+        XCTAssertEqual(sent, [a, b])  // b fired immediately, not deferred to a trailing tick
+    }
+
     func testDoesNotResendNearDuplicate() async throws {
         let crop = CGRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6)
         var sent: [CGRect] = []
