@@ -1,42 +1,61 @@
 import CoreGraphics
 import Foundation
 
+/// Rate-limits host crop (viewport) requests as the magnifier follows the cursor. A **leading +
+/// trailing throttle** (not an idle debounce): the first request after a quiet period fires
+/// immediately, then at most once per `interval` while requests keep arriving, with a trailing fire
+/// for the final resting position. This lets the host crop TRACK the cursor during a continuous pan
+/// (so new regions stream in as you move) instead of only re-cropping after you stop — the old idle
+/// debounce meant "nothing repaints until I stop, then it takes a beat".
 @MainActor
 final class ViewportRequestScheduler {
     private static let fullViewport = CGRect(x: 0, y: 0, width: 1, height: 1)
 
-    private let delay: Duration
+    private let interval: Duration
     private let send: (CGRect) -> Void
-    private var pending = ViewportRequestScheduler.fullViewport
+    private let clock = ContinuousClock()
+    private var pending: CGRect?
     private var lastSent = ViewportRequestScheduler.fullViewport
+    private var lastFire: ContinuousClock.Instant?
     private var task: Task<Void, Never>?
 
-    init(delay: Duration = .milliseconds(250), send: @escaping (CGRect) -> Void) {
-        self.delay = delay
+    init(interval: Duration = .milliseconds(150), send: @escaping (CGRect) -> Void) {
+        self.interval = interval
         self.send = send
     }
 
     func request(_ rect: CGRect) {
         pending = rect
-        task?.cancel()
-        task = Task { [weak self, delay] in
-            do {
-                try await Task.sleep(for: delay)
-            } catch {
-                return
-            }
-            self?.flushPending()
+        guard task == nil else { return }  // a trailing fire is already scheduled; it picks up `pending`
+        let elapsed = lastFire.map { clock.now - $0 } ?? interval
+        if elapsed >= interval {
+            flush()  // leading edge — fire now so re-cropping tracks motion immediately
+        } else {
+            schedule(after: interval - elapsed)
         }
     }
 
     func reset() {
         task?.cancel()
-        pending = Self.fullViewport
+        task = nil
+        pending = nil
+        lastFire = nil
         lastSent = Self.fullViewport
     }
 
-    private func flushPending() {
-        let rect = pending
+    private func schedule(after delay: Duration) {
+        task = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self, !Task.isCancelled else { return }
+            self.task = nil
+            self.flush()
+        }
+    }
+
+    private func flush() {
+        lastFire = clock.now
+        guard let rect = pending else { return }
+        pending = nil
         guard !rect.isClose(to: lastSent) else { return }
         lastSent = rect
         send(rect)

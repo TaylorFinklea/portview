@@ -57,8 +57,13 @@ struct ZoomGeometry {
         // where the old square crop (max of w/h) stayed full-display and defeated the magnifier.
         let visX0 = max(0, window.minX), visY0 = max(0, window.minY)
         let visX1 = min(1, window.maxX), visY1 = min(1, window.maxY)
-        let padX = (visX1 - visX0) * 0.08
-        let padY = (visY1 - visY0) * 0.08
+        // Generous pan headroom: the host crop extends well beyond the visible window so the cursor-
+        // follow can pan locally (instant, using already-received pixels) between host re-crops. Too
+        // small and you run past the captured region before the host re-crops → "nothing repaints
+        // until I stop". Trades a little high-zoom crispness (a bigger region at the same output rung)
+        // for smooth tracking; tunable.
+        let padX = (visX1 - visX0) * 0.25
+        let padY = (visY1 - visY0) * 0.25
         let cropX0 = max(0, visX0 - padX), cropY0 = max(0, visY0 - padY)
         let cropX1 = min(1, visX1 + padX), cropY1 = min(1, visY1 + padY)
         cropRequest = CGRect(x: cropX0, y: cropY0, width: cropX1 - cropX0, height: cropY1 - cropY0)

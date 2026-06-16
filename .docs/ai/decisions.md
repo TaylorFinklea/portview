@@ -2,6 +2,16 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-16] Magnifier: throttle viewport re-crops (track the pan, don't wait for it to stop)
+
+**Context**: Device test — at high zoom, panning didn't repaint until the cursor STOPPED, then took ~1s to settle. The magnifier follows the host cursor, and the crop re-request went through `ViewportRequestScheduler` as an IDLE DEBOUNCE (fired 250ms after the cursor stops). So during continuous motion the host never re-cropped: you panned within the tiny 8% crop padding, ran out of captured pixels, and only saw the new region after stopping + debounce + a keyframe round-trip.
+
+**Decision**: (1) Rewrite `ViewportRequestScheduler` as a LEADING + TRAILING THROTTLE — fire the first request immediately, then at most once per `interval` (150ms) while requests keep arriving, with a trailing fire for the resting position — so the host crop TRACKS the cursor during a pan. Safe to do now (the debounce was added 2026-06-10 to stop `updateConfiguration` stutter) because the discrete-ladder change made pan re-crops cheap: a pan is origin-only → `sourceRect`-only `updateConfiguration`, no encoder rebuild. (2) Widen `ZoomGeometry` crop padding 0.08→0.25 for more local-pan headroom between re-crops. Both knobs tunable.
+
+**Risk to watch (device)**: re-cropping ~6×/s during a pan means ~6 keyframes/s (each applied crop forces one). If that reintroduces stutter, raise the interval or stop forcing a keyframe on pure-pan (origin-only) re-crops — deferred until the device says.
+
+**Verify**: iOS throttle tests (leading-edge synchronous, burst→leading+latest-trailing, reset cancels trailing, near-dup suppressed) green; iOS TEST SUCCEEDED. Reviewed by qwen (tool-enabled). Device-verify: high-zoom pan repaints AS you move, not after you stop.
+
 ## [2026-06-16] Magnifier: the viewport travels in the VideoFrame (kill the echo/frame race)
 
 **Context**: After the crash-hardening landed, qwen's adversarial review flagged a MEDIUM: the host told the client which region a frame showed via a SEPARATE `.viewport` echo (sent from the inbound-loop task) while frames were sent from the concurrent `pumpVideo` task — so at a crop change a new-region frame could arrive ~1 frame before its echo → ~16ms misalignment at zoom-rung crossings.
