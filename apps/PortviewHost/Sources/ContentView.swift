@@ -7,7 +7,7 @@ import PortviewHostCore
 struct ContentView: View {
     let model: HostAppModel
 
-    private enum PermissionStatus { case granted, needsPermission, pending }
+    private enum PermissionStatus { case granted, needsPermission }
 
     private var isReady: Bool { if case .ready = model.state { return true } else { return false } }
     private var isFailed: Bool { if case .failed = model.state { return true } else { return false } }
@@ -16,13 +16,12 @@ struct ContentView: View {
     }
     private var isConnected: Bool { model.sessions.count > 0 }
 
+    // Real, polled status (HostAppModel.refreshPermissions) — no longer inferred from run state.
     private var screenRecordingStatus: PermissionStatus {
-        if isReady || model.isRunning { return .granted }
-        return isFailed ? .needsPermission : .pending
+        model.screenRecordingGranted ? .granted : .needsPermission
     }
     private var accessibilityStatus: PermissionStatus {
-        guard model.isRunning else { return .pending }
-        return model.accessibilityWarning == nil ? .granted : .needsPermission
+        model.accessibilityGranted ? .granted : .needsPermission
     }
 
     var body: some View {
@@ -39,6 +38,7 @@ struct ContentView: View {
                     }
                 } else {
                     permissionsCard
+                    onboardingBanner
                     statusLine
                 }
                 if !displayedLog.isEmpty { activityLog }
@@ -48,7 +48,10 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .frame(minWidth: 720, minHeight: 560)
-        .task { model.start() }
+        .task {
+            model.start()
+            model.startPermissionMonitoring() // app-lifetime monitor (idempotent; not stopped on window close)
+        }
     }
 
     // MARK: - Header
@@ -120,9 +123,9 @@ struct ContentView: View {
                 Image(systemName: "checkmark")
                     .font(.system(size: 11, weight: .heavy)).foregroundStyle(Glass.signalInk)
                     .frame(width: 24, height: 24).background(Glass.signal, in: Circle())
-            case .needsPermission, .pending:
+            case .needsPermission:
                 Button("Open Settings", action: openSettings)
-                    .buttonStyle(OutlineButtonStyle(tint: status == .needsPermission ? Glass.degraded : Glass.text2))
+                    .buttonStyle(OutlineButtonStyle(tint: Glass.degraded))
             }
         }
     }
@@ -132,7 +135,34 @@ struct ContentView: View {
         switch status {
         case .granted: PillBadge(text: "GRANTED", style: .accent)
         case .needsPermission: PillBadge(text: "NEEDS PERMISSION", style: .amber)
-        case .pending: PillBadge(text: "REQUIRED", style: .neutral)
+        }
+    }
+
+    /// Guided next-step banner shown until both permissions are granted.
+    @ViewBuilder private var onboardingBanner: some View {
+        let onboarding = model.onboarding
+        if !onboarding.allGranted {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(onboarding.title).font(.grotesk(15, .semibold)).foregroundStyle(Glass.text1)
+                Text(onboarding.body).font(.system(size: 12.5)).foregroundStyle(Glass.text2)
+                HStack(spacing: 10) {
+                    Button("Open Settings") {
+                        switch onboarding.primaryPane {
+                        case .screenRecording: model.openScreenRecordingSettings()
+                        case .accessibility: model.openAccessibilitySettings()
+                        case .none: break
+                        }
+                    }
+                    .buttonStyle(OutlineButtonStyle(tint: Glass.degraded))
+                    Button("Re-check") { model.refreshPermissions() }
+                        .buttonStyle(NeutralButtonStyle())
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .glassCard()
+            .overlay(RoundedRectangle(cornerRadius: Glass.card, style: .continuous)
+                .strokeBorder(Glass.degraded.opacity(0.3), lineWidth: 1))
         }
     }
 

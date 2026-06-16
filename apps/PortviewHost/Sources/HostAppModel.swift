@@ -1,4 +1,6 @@
 import AppKit
+import ApplicationServices
+import CoreGraphics
 import Foundation
 import Observation
 import PortviewHostCore
@@ -31,15 +33,33 @@ final class HostAppModel {
     private(set) var sessions = HostSessions()
     /// When the current client session began (for the "connected mm:ss" readout); nil when none.
     private(set) var connectedSince: Date?
+    /// Real, polled permission status (not inferred from run state) — drives guided onboarding.
+    private(set) var screenRecordingGranted = false
+    private(set) var accessibilityGranted = false
+
+    /// Guided onboarding derived from the live permission bools.
+    var onboarding: PermissionsOnboarding {
+        PermissionsOnboarding(screenRecordingGranted: screenRecordingGranted, accessibilityGranted: accessibilityGranted)
+    }
 
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private let control = HostControl()
+    @ObservationIgnored private var permissionsTask: Task<Void, Never>?
 
-    var isRunning: Bool { task != nil }
+    /// Observed (not derived from the @ObservationIgnored task) so the menu-bar glyph + Start/Stop
+    /// re-render on EVERY transition — including when the serve loop ends on its own while ready.
+    private(set) var isRunning = false
     var screenRecordingHelp: String { HostRunner.screenRecordingHelp(for: .app(displayName: Self.displayName)) }
+
+    /// Menu-bar glyph reflecting state at a glance (reads observed state + sessions → auto-updates).
+    var menuBarSymbol: String {
+        let failed: Bool = if case .failed = state { true } else { false }
+        return HostMenuBar.symbol(isFailed: failed, isRunning: isRunning, connectedCount: sessions.count)
+    }
 
     func start() {
         guard task == nil else { return }
+        isRunning = true
         state = .starting
         accessibilityWarning = nil
         messages = []
@@ -53,6 +73,7 @@ final class HostAppModel {
             }
             guard let self else { return }
             self.task = nil
+            self.isRunning = false
             if self.state == .starting {
                 self.state = .idle
             }
@@ -62,6 +83,7 @@ final class HostAppModel {
     func stop() {
         task?.cancel()
         task = nil
+        isRunning = false
         state = .idle
         sessions = HostSessions()
         connectedSince = nil
@@ -100,6 +122,29 @@ final class HostAppModel {
 
     func openAccessibilitySettings() {
         openPrivacyPane(anchor: "Privacy_Accessibility")
+    }
+
+    /// Read the CURRENT permission status without prompting (the prompt is owned once by HostRunner).
+    func refreshPermissions() {
+        let screenRecording = CGPreflightScreenCaptureAccess()
+        let accessibility = AXIsProcessTrusted()
+        if screenRecording != screenRecordingGranted { screenRecordingGranted = screenRecording }
+        if accessibility != accessibilityGranted { accessibilityGranted = accessibility }
+    }
+
+    /// Poll permission status every 2s (idempotent; runs for the app's lifetime once started, NOT
+    /// tied to the window — hosting and the menu bar outlive the window, so monitoring must too).
+    /// Accessibility flips live; Screen Recording shows granted only after relaunch (onboarding copy
+    /// says so). An immediate refresh on each call keeps a freshly-shown surface accurate.
+    func startPermissionMonitoring() {
+        refreshPermissions()
+        guard permissionsTask == nil else { return }
+        permissionsTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(2))
+                self?.refreshPermissions()
+            }
+        }
     }
 
     private func handle(_ event: HostRunnerEvent) {

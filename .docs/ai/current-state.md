@@ -6,7 +6,18 @@
 
 `main`
 
-## Latest Session (2026-06-15 #4 — magnifier region-streaming rework)
+## Latest Session (2026-06-16 — M7: host presence & frictionless connect)
+
+- Big milestone, ultracode multi-phase (design workflow → implement → adversarial-review workflow → fix). Build-green; device-verify pending. Decision: decisions.md (2026-06-16 top); roadmap Now `[x]`.
+- **P1 menu-bar host**: `MenuBarExtra(.window)` beside the WindowGroup (id "main"), shared `@State HostAppModel`; `MenuBarHostView` (status/QR/copy/count/Start-Stop/Open-window); pure tested `HostMenuBar.symbol`. Hosting now outlives window-close (removed WindowGroup `onDisappear{stop}`).
+- **P2 live permissions onboarding**: real `CGPreflightScreenCaptureAccess` + `AXIsProcessTrusted` bools on `HostAppModel`, 2s **app-lifetime** poll (not window-scoped); pure tested `PermissionsOnboarding` + guided banner (Open Settings/Re-check + Screen-Recording-relaunch caveat); replaced inferred `PermissionStatus`.
+- **P3 input serialization**: `OutboundInputPump` ordered FIFO lane per connection (queue+wake) with **pointer-move coalescing** (summed deltas) — discrete events ordered/lossless; bound/unbound at every connection site. Helps the choppy-drag report.
+- **P4 SAS pairing**: design spec only (`docs/superpowers/specs/2026-06-15-sas-pairing-design.md`) — **awaiting human security review**, not implemented.
+- Review 5/5 fixed: pointer-move coalescing (the lurch); `isRunning` → observed stored bool (menu glyph/Start-Stop went stale when serve loop ended while ready); permission monitor moved off window lifecycle → app-lifetime (3 LOWs).
+- New tests: HostMenuBar(5), PermissionsOnboarding(4), OutboundInputPump(2). Verify: `swift test` **122/36**, iOS **38**, macOS **BUILD SUCCEEDED**. NOT pushed.
+- NEXT (human device verify): menu-bar QR/connect; grant Accessibility → dot flips ≤2s (Screen Recording → relaunch); drag smoother + glyph/Start-Stop update on session end. Then the still-pending magnifier device-verify (crash landmine) + bitrate/persistence/file-transfer checks. SAS pairing needs security review before build.
+
+## Previous Session (2026-06-15 #4 — magnifier region-streaming rework)
 
 - Implemented THE high-zoom blocker fix (build-green; **DEVICE-VERIFY REQUIRED**, crash landmine). Decision + spec: decisions.md (2026-06-15 top) + docs/superpowers/specs/2026-06-15-magnifier-region-streaming.md. Roadmap Now `[x]`.
 - Root cause: square crop (`max(visW,visH)`) + display-sized output ⇒ host never cropped for an ultrawide-on-portrait ⇒ digital-zoom blur. Fix: client `cropRequest` = visible window's own aspect (not square); host `setViewport` sets `sourceRect` AND `config.width/height` = crop pixels (`CaptureSizing.cropOutputSize`, mod-16/capped/floored, changes only on zoom not pan); client render uses FRAME aspect (`frameAspect = (f.w/f.h)*displayAspect`). Zoom-1 path mathematically unchanged (no regression).

@@ -2,6 +2,22 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-16] M7 — Host presence & frictionless connect (menu-bar, live permissions, input order)
+
+**Context**: Device testing surfaced pairing/permission friction + choppy input. M7 makes the host pleasant to live with. Driven ultracode-style across phases: a design workflow (4 grounded specs) → implement P1–P3 → an adversarial-review workflow (5 findings, all fixed) → commit.
+
+**P1 Menu-bar host**: a `MenuBarExtra(.window)` scene beside the `WindowGroup` (now `id "main"`), sharing the single `@State HostAppModel`; `MenuBarHostView` = compact status + real QR + copy-URL + connected count + Start/Stop + "Open window" (`@Environment(\.openWindow)`). Dynamic glyph via a pure, tested `HostMenuBar.symbol(...)`. Hosting now **outlives window-close** (removed the `WindowGroup`'s `onDisappear { stop }`) so the menu bar keeps advertising.
+
+**P2 Live permissions onboarding**: `HostAppModel` publishes REAL `screenRecordingGranted` (`CGPreflightScreenCaptureAccess`, no prompt) + `accessibilityGranted` (`AXIsProcessTrusted`), polled every 2s for the **app lifetime** (not window-scoped). Pure tested `PermissionsOnboarding` derives the guided step/title/body/pane + the Screen-Recording-needs-relaunch caveat; `ContentView` shows real badges + a guided banner (Open Settings + Re-check), replacing the old inferred `PermissionStatus`.
+
+**P3 Input serialization**: `OutboundInputPump` — one ordered FIFO lane per connection (queue + wake-signal drain) that **coalesces consecutive pointer-moves** (summed deltas, latest-wins) while keeping discrete events ordered + lossless; bound/unbound at every connection set/clear (run/reconnect/disconnect). Fixes both the down/up ordering and the move-lurch-under-stall (relevant to the reported choppiness).
+
+**P4 SAS 6-digit pairing**: DESIGN ONLY — a cryptographically-sound cert-comparison (SAS) scheme in `docs/superpowers/specs/2026-06-15-sas-pairing-design.md`, **flagged for human security review** before implementation (client-side-only match check, modular bias, unpinned preamble — all enumerated).
+
+**Adversarial review (3-dim, 5/5 confirmed, all fixed)**: (medium) uncoalesced pointer-moves on an unbounded lane → folded into P3's coalescing; (medium) `isRunning` was derived from the `@ObservationIgnored` task, so the menu glyph + Start/Stop went stale when the serve loop ended while ready → made it an **observed stored bool** set in start/stop/self-clear; (3× low, one root) permission monitoring was window-scoped while hosting outlives the window → moved to **app-lifetime** (idempotent start, no window-close stop), fixing the window-close-stop, menu-bar staleness, and multi-window race.
+
+**Verify**: package `swift test` **122/36**; iOS `xcodebuild test` **38**; macOS **BUILD SUCCEEDED**. Device-verify pending: menu-bar QR/connect; live permission flow (grant Accessibility → dot flips ≤2s; Screen Recording → relaunch); smoother drag.
+
 ## [2026-06-15] Magnifier = true region streaming (output dims match the crop aspect)
 
 **Context**: High zoom (~5×, needed to read text on a phone) was blurry/distorted vs VNC. Root cause (3440×1440 ultrawide host + portrait iPhone): the host never cropped. `ZoomGeometry.cropRequest` built a normalized SQUARE (`max(visW, visH)`), which for a full-height window = the whole display; and `CaptureEngine.setViewport` only moved `sourceRect` while keeping output dims = full display, so any non-display-aspect crop would STRETCH (hence the square requirement). Net: the client digitally zoomed a full, low-bitrate frame.

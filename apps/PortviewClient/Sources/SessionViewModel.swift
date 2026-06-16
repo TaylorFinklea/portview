@@ -50,6 +50,8 @@ final class SessionViewModel: ObservableObject {
     private let audioPlayer = AudioPlayer()
     private var task: Task<Void, Never>?
     private var connection: PortviewConnection?
+    /// Ordered outbound input lane bound to `connection` (created/torn down with it via bind/unbind).
+    private var outboundPump: OutboundInputPump?
     /// Mac display size in points (from ServerHello); used to predict the cursor locally and to
     /// letterbox-correct the client's zoom/pan math.
     @Published private(set) var displaySize = CGSize(width: 1, height: 1)
@@ -120,8 +122,8 @@ final class SessionViewModel: ObservableObject {
     }
 
     func disconnect() {
-        connection?.close()
-        connection = nil
+        connection?.close() // close first so the inbound stream finishes, then drop the outbound lane
+        unbindConnection()
         task?.cancel()
         task = nil
         status = .idle
@@ -181,13 +183,9 @@ final class SessionViewModel: ObservableObject {
     }
 
     func sendClick() {
-        // Down + up must stay ordered, so send both within a single Task (two independent Tasks
-        // could invert and leave a stuck click / corrupted drag state on the host).
-        guard let connection else { return }
-        Task {
-            try? await connection.send(.pointerButton(PointerButton(button: .left, isDown: true)))
-            try? await connection.send(.pointerButton(PointerButton(button: .left, isDown: false)))
-        }
+        // Down then up on the ordered lane — FIFO guarantees they can't invert into a stuck click.
+        send(.pointerButton(PointerButton(button: .left, isDown: true)))
+        send(.pointerButton(PointerButton(button: .left, isDown: false)))
     }
 
     func sendScroll(dx: CGFloat, dy: CGFloat) {
@@ -239,9 +237,22 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
+    /// Bind the ordered outbound input lane to a freshly-connected connection.
+    private func bindConnection(_ connection: PortviewConnection) {
+        self.connection = connection
+        outboundPump = OutboundInputPump(connection: connection)
+    }
+
+    /// Tear down the current connection's outbound lane (so it never leaks across reconnects).
+    private func unbindConnection() {
+        outboundPump?.finish()
+        outboundPump = nil
+        connection = nil
+    }
+
     private func send(_ message: AnyMessage) {
-        guard let connection else { return }
-        Task { try? await connection.send(message) }
+        // One ordered FIFO lane per connection → move/click/scroll/key keep their order on the wire.
+        outboundPump?.enqueue(message)
     }
 
     // MARK: - Connect / stream / reconnect
@@ -253,9 +264,9 @@ final class SessionViewModel: ObservableObject {
         do {
             let (connection, endpoint) = try await connectFirst(endpoints, pin: pin)
             connectedEndpoint = endpoint
-            self.connection = connection
+            bindConnection(connection)
             let end = try await streamSession(connection)
-            self.connection = nil
+            unbindConnection()
             audioPlayer.stop()
             switch end {
             case .hostError, .evicted:
@@ -267,7 +278,7 @@ final class SessionViewModel: ObservableObject {
                 break // stream closed after a successful session — try to re-bind below
             }
         } catch {
-            self.connection = nil
+            unbindConnection()
             audioPlayer.stop()
             if Task.isCancelled { return }
             status = .failed("\(error)")
@@ -395,9 +406,9 @@ final class SessionViewModel: ObservableObject {
             let candidates = Self.reconnectCandidates(name: name, fallback: fallback, discovered: discovered)
 
             if let (connection, _) = try? await connectFirst(candidates, pin: pin) {
-                self.connection = connection
+                bindConnection(connection)
                 let end = (try? await streamSession(connection)) ?? .notStreamed
-                self.connection = nil
+                unbindConnection()
                 audioPlayer.stop()
                 if Task.isCancelled { return }
                 switch end {
