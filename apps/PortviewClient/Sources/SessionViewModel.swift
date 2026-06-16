@@ -350,6 +350,13 @@ final class SessionViewModel: ObservableObject {
                 if let sample = try? rebuild(frame),
                    let pixelBuffer = try? await decoder.decode(sample) {
                     let decodeMs = (ProcessInfo.processInfo.systemUptime - decodeStart) * 1_000.0
+                    // The frame self-describes the region it shows; settle the residual zoom to it
+                    // (atomic with the pixels — no separate echo to race). Guard the assignment so an
+                    // unchanged region (steady state — the quantized value is bit-identical) doesn't
+                    // fire `objectWillChange` ~60×/s.
+                    let region = CGRect(x: frame.normalizedViewportX, y: frame.normalizedViewportY,
+                                        width: frame.normalizedViewportW, height: frame.normalizedViewportH)
+                    if region != frameViewport { frameViewport = region }
                     renderer.render(pixelBuffer)
                     if let snapshot = qualityTracker.recordDecodedFrame(frame, decodeMs: decodeMs) {
                         qualityDiagnostics = snapshot
@@ -362,8 +369,10 @@ final class SessionViewModel: ObservableObject {
             case .audioFrame(let audio):
                 audioPlayer.play(sampleRate: Double(audio.sampleRate), channels: UInt32(audio.channels), planarData: audio.data)
             case .viewport(let v):
-                // Host confirmed the region its frames now represent — settle the residual zoom to it.
-                frameViewport = CGRect(x: v.normalizedX, y: v.normalizedY, width: v.normalizedW, height: v.normalizedH)
+                // Defensive fallback: the host now embeds the region in every VideoFrame (see above),
+                // so it no longer sends standalone `.viewport` echoes — but honor one if it arrives.
+                let region = CGRect(x: v.normalizedX, y: v.normalizedY, width: v.normalizedW, height: v.normalizedH)
+                if region != frameViewport { frameViewport = region }
             case .qualityStats(let stats):
                 qualityDiagnostics = qualityTracker.updateHostStats(stats)
             case .fileOffer(let offer):

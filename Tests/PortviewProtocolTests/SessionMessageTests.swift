@@ -33,6 +33,22 @@ private func roundTrip<M: WireMessage>(_ message: M) throws -> M {
         #expect(try roundTrip(m) == m)
     }
 
+    @Test func videoFrameWithViewportRoundTrips() throws {
+        let m = VideoFrame(
+            sequence: 7, ptsMicros: 500_000, isKeyframe: false,
+            displayID: 1, width: 1280, height: 720, data: [0xAB, 0xCD],
+            viewportNormalizedX: 0.1, viewportNormalizedY: 0.0,
+            viewportNormalizedW: 0.2, viewportNormalizedH: 1.0
+        )
+        let decoded = try roundTrip(m)
+        #expect(decoded == m)
+        let epsilon = 1.0 / 65535.0
+        #expect(abs(decoded.normalizedViewportX - 0.1) <= epsilon)
+        #expect(abs(decoded.normalizedViewportY - 0.0) <= epsilon)
+        #expect(abs(decoded.normalizedViewportW - 0.2) <= epsilon)
+        #expect(abs(decoded.normalizedViewportH - 1.0) <= epsilon)
+    }
+
     @Test func byeRoundTrips() throws {
         let m = Bye(reason: "user disconnected")
         #expect(try roundTrip(m) == m)

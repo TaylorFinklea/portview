@@ -402,22 +402,11 @@ public struct HostRunner: Sendable {
             case .switchDisplay(let switchMessage):
                 startVideo(on: display(forID: switchMessage.displayID))
             case .viewport(let viewport):
-                // Magnifier: re-crop the live capture, then — only if the crop actually applied —
-                // confirm the active region back to the client so it can settle its residual zoom.
-                // Awaiting here (inside the inbound loop) keeps confirmations ordered with requests
-                // and tied to the session's lifetime (no orphaned/racing Tasks).
-                let applied = await currentCapture?.setViewport(
+                // Magnifier: re-crop the live capture. The viewport now travels in every VideoFrame,
+                // so no separate echo is needed — just apply the crop.
+                _ = await currentCapture?.setViewport(
                     normalizedX: viewport.normalizedX, normalizedY: viewport.normalizedY,
-                    normalizedW: viewport.normalizedW, normalizedH: viewport.normalizedH) ?? false
-                if applied, let region = await currentCapture?.currentViewport() {
-                    // Echo the region ACTUALLY captured (snapped to the discrete ladder), not the raw
-                    // request — the client sets its frameViewport from this, so its zoom/pan transform
-                    // must align with the real crop or the magnified image would be misplaced/stretched.
-                    try? await connection.send(.viewport(Viewport(
-                        displayID: viewport.displayID,
-                        normalizedX: region.minX, normalizedY: region.minY,
-                        normalizedW: region.width, normalizedH: region.height)))
-                }
+                    normalizedW: viewport.normalizedW, normalizedH: viewport.normalizedH)
             case .pointerMove, .pointerButton, .scroll, .typeText, .keyEvent:
                 injector.handle(message)
             case .clipboardUpdate(let update):
@@ -507,13 +496,16 @@ public struct HostRunner: Sendable {
                 sequence += 1
                 needsKeyframe = false
                 stats.recordFrame(byteCount: payload.count, isKeyframe: sample.isKeyframe, encodeMs: encodeMs)
+                let viewport = await capture.currentViewport()
                 try await connection.send(.videoFrame(VideoFrame(
                     sequence: sequence,
                     ptsMicros: UInt64(max(0, CMTimeGetSeconds(frame.pts)) * 1_000_000),
                     isKeyframe: sample.isKeyframe,
                     displayID: UInt32(display.displayID),
                     width: UInt32(bufferWidth), height: UInt32(bufferHeight),
-                    data: payload
+                    data: payload,
+                    viewportNormalizedX: viewport.minX, viewportNormalizedY: viewport.minY,
+                    viewportNormalizedW: viewport.width, viewportNormalizedH: viewport.height
                 )))
                 if let quality = stats.snapshotIfDue(
                     displayID: UInt32(display.displayID),

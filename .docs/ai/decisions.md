@@ -2,6 +2,18 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-16] Magnifier: the viewport travels in the VideoFrame (kill the echo/frame race)
+
+**Context**: After the crash-hardening landed, qwen's adversarial review flagged a MEDIUM: the host told the client which region a frame showed via a SEPARATE `.viewport` echo (sent from the inbound-loop task) while frames were sent from the concurrent `pumpVideo` task — so at a crop change a new-region frame could arrive ~1 frame before its echo → ~16ms misalignment at zoom-rung crossings.
+
+**Decision**: Embed the active region in EVERY `VideoFrame` — 4 normalized `UInt16` fields mirroring `Viewport`'s convention (full-display defaults so old call sites mean "whole display"). `pumpVideo` tags each frame with `capture.currentViewport()`; the client sets `frameViewport` from the frame it is rendering, so region + pixels update atomically (no cross-message ordering race). The standalone `.viewport` echo is removed from the host (the client keeps a harmless, documented fallback handler). The client assignment is change-guarded so a static region doesn't fire `objectWillChange` ~60×/s.
+
+**Residual (honest)**: a 1–2 frame transient at crop changes still exists because SCStream doesn't tell us which delivered buffer corresponds to which `updateConfiguration` — the frame is tagged with the crop active at ENCODE time, which can lead an in-flight (`.bufferingNewest(2)`) buffer by ≤2 frames. This is inherent to SCStream and was present before (plus the now-removed ordering race). If device-test shows a visible blip at rung crossings, tag the buffer at CAPTURE time (a lock-protected rect read in the SCStream callback) — deferred.
+
+**Process**: spec'd by Opus → implemented by a Sonnet subagent (3 gates green) → adversarial review by qwen (tool-enabled) + Opus. qwen's 2 findings (60Hz churn, dead echo case) both applied; its 4 false-positives confirmed the wire encode/decode symmetry, the clamp, the echo removal, and Equatable correct. See `~/.claude/model-scorecard.md` (2026-06-16).
+
+**Verify**: `swift test` 126/36; iOS 38; macOS BUILD SUCCEEDED. Device-verify pending (with the ladder).
+
 ## [2026-06-16] Magnifier crash-hardening — discrete capture-size ladder (rapid-zoom de-risk)
 
 **Context**: The 2026-06-15 region-streaming fix landed build-green but unverified, with a known crash landmine: it snapped `config.width/height` to mult-of-16 (~215 distinct sizes on a 3440px display), so a continuous pinch reconfigured the live SCStream + tore down/rebuilt the VideoToolbox encoder on nearly every step — the historical rapid-zoom crash shape. Hunted ultracode-style: a 5-model adversarial audit (haiku, sonnet, minimax-m3, qwen3.7-max, kimi-k2.7-code) → fix → tool-enabled adversarial review of the diff.
