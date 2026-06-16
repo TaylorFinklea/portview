@@ -409,8 +409,14 @@ public struct HostRunner: Sendable {
                 let applied = await currentCapture?.setViewport(
                     normalizedX: viewport.normalizedX, normalizedY: viewport.normalizedY,
                     normalizedW: viewport.normalizedW, normalizedH: viewport.normalizedH) ?? false
-                if applied {
-                    try? await connection.send(.viewport(viewport))
+                if applied, let region = await currentCapture?.currentViewport() {
+                    // Echo the region ACTUALLY captured (snapped to the discrete ladder), not the raw
+                    // request — the client sets its frameViewport from this, so its zoom/pan transform
+                    // must align with the real crop or the magnified image would be misplaced/stretched.
+                    try? await connection.send(.viewport(Viewport(
+                        displayID: viewport.displayID,
+                        normalizedX: region.minX, normalizedY: region.minY,
+                        normalizedW: region.width, normalizedH: region.height)))
                 }
             case .pointerMove, .pointerButton, .scroll, .typeText, .keyEvent:
                 injector.handle(message)
@@ -525,8 +531,11 @@ public struct HostRunner: Sendable {
                         displayHeight: display.height)))
                 }
             } catch {
+                // Drop the wedged encoder so the next frame rebuilds a fresh VideoToolbox session
+                // (the startup path); keeping it would re-enter the same broken session every frame.
+                encoder = nil
                 needsKeyframe = true
-                if sequence == 0 { print("frame skipped (will retry as keyframe): \(error)") }
+                if sequence == 0 { print("frame skipped (will rebuild encoder): \(error)") }
             }
         }
         capture.stop()

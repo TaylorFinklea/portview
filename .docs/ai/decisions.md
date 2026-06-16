@@ -2,6 +2,22 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-16] Magnifier crash-hardening — discrete capture-size ladder (rapid-zoom de-risk)
+
+**Context**: The 2026-06-15 region-streaming fix landed build-green but unverified, with a known crash landmine: it snapped `config.width/height` to mult-of-16 (~215 distinct sizes on a 3440px display), so a continuous pinch reconfigured the live SCStream + tore down/rebuilt the VideoToolbox encoder on nearly every step — the historical rapid-zoom crash shape. Hunted ultracode-style: a 5-model adversarial audit (haiku, sonnet, minimax-m3, qwen3.7-max, kimi-k2.7-code) → fix → tool-enabled adversarial review of the diff.
+
+**Decision**: Snap the **captured region's size** to a coarse geometric ladder (`CaptureSizing.snapCropFraction`, ratio 0.8 ⇒ ~13 rungs across the zoom range), snapped UP so the captured region still ⊇ the requested window. `setViewport` captures that snapped region (recentered on the request, clamped) and the encoder output is sized from the SAME snapped fractions, so the buffer aspect equals the captured-region aspect exactly (no stretch). The host now ECHOES the snapped region (not the raw request); the client sets `frameViewport` from it so its zoom transform stays aligned. SCStream/encoder reconfigure only at rung crossings (~13 vs ~215) → the rebuild churn that caused the crash is gone, at the cost of crispness stepping in discrete rungs (≤~20% below native; densify the ladder if device-test shows softness).
+
+**Why snap the captured region, not just the output buffer**: the Metal client aspect-fits the *buffer* dims while `ZoomGeometry` computes its transform from the *crop* aspect (`frameViewport`) — so the buffer aspect MUST equal the captured-region aspect or the magnified image misplaces/stretches. Snapping only the output (independent per-axis) would break that; snapping the captured region keeps sourceRect, output buffer, and echo all derived from one snapped fraction.
+
+**Also fixed** (audit findings, verified real): config save/restore on `updateConfiguration` failure (it was mutated before the throwable call → desynced the unchanged-check baseline → could wedge the crop); `encoder = nil` on encode failure (was re-entering a wedged VT session every frame); stale `ZoomGeometry` doc-comment. **Verified-not-bugs** (audit false positives): the "config reference-type *race*" (each connection owns its `CaptureEngine`; the inbound loop *awaits* `setViewport` → no concurrent writer; qwen refuted the related encoder use-after-free) and `.zero` sourceRect (Apple's documented full-display sentinel).
+
+**Adversarial review** (sonnet, tool-enabled, 19 tool uses): PROVED the snap+clamp safety invariant (captured region always ⊇ requested window), idempotency, echo-doesn't-misplace, inbound-loop atomicity; one real LOW (near-full snap seam) fixed by deciding `cropping` off the snapped fractions. Deferred (physically unreachable at ≤~6× max zoom): anisotropic floor stretch when both axes hit the 64px floor.
+
+**Model head-to-head note**: the cheap pi models (qwen3.7-max, minimax-m3) out-accurated the native subagents here — both natives led with the unreachable config-race "critical"; qwen explicitly refuted it. See `~/.claude/model-scorecard.md` (2026-06-16 entries).
+
+**Verify**: package `swift test` 125/36; iOS 38; macOS BUILD SUCCEEDED. **DEVICE-VERIFY still required** — confirm rapid zoom in/out no longer crashes (the whole point), text stays crisp, and zoom feels continuous despite discrete rungs. Spec addendum: `docs/superpowers/specs/2026-06-15-magnifier-region-streaming.md`.
+
 ## [2026-06-16] M7 — Host presence & frictionless connect (menu-bar, live permissions, input order)
 
 **Context**: Device testing surfaced pairing/permission friction + choppy input. M7 makes the host pleasant to live with. Driven ultracode-style across phases: a design workflow (4 grounded specs) → implement P1–P3 → an adversarial-review workflow (5 findings, all fixed) → commit.

@@ -1,5 +1,7 @@
+import Foundation
+
 struct CaptureSizing {
-    struct Size: Equatable {
+    struct Size: Equatable, Hashable {
         var width: Int
         var height: Int
     }
@@ -8,21 +10,36 @@ struct CaptureSizing {
         Size(width: max(1, width), height: max(1, height))
     }
 
-    /// Encoder output size for a magnifier crop: the crop's native pixels, capped to the display
-    /// (no upscale), floored to a minimum, and quantized to a multiple of `quantum` (keeps the
-    /// dimensions even for the codec AND stable under small pan deltas so the stream isn't
-    /// reconfigured on sub-step jitter). Matching the output aspect to the crop avoids stretching.
-    static func cropOutputSize(displayWidth: Int, displayHeight: Int, normalizedW: Double, normalizedH: Double) -> Size {
-        Size(width: quantizedDimension(Double(displayWidth) * normalizedW, cap: displayWidth),
-             height: quantizedDimension(Double(displayHeight) * normalizedH, cap: displayHeight))
+    /// Snap a normalized crop fraction (0…1) UP onto a coarse geometric ladder (`ratio` rungs). The
+    /// magnifier captures `setViewport`'s crop at this snapped size, so the captured region only takes
+    /// a handful of discrete sizes across the whole zoom range instead of changing continuously.
+    /// Snapping UP keeps the captured region ⊇ the requested one (never crops away the visible edge).
+    /// Idempotent (a value already on a rung maps to itself), so the host's sourceRect and encoder
+    /// output — both derived from this — stay in exact agreement (no stretch).
+    static func snapCropFraction(_ fraction: Double) -> Double {
+        let f = min(1, max(0, fraction))
+        guard f > 0 else { return 0 }
+        // Largest k with ratio^k ≥ f  ⇒  k = floor(log(f)/log(ratio)); the tiny epsilon keeps a value
+        // sitting exactly on a rung from drifting to the next one through float error (idempotency).
+        let k = max(0, Int((log(f) / log(ladderRatio) + 1e-9).rounded(.down)))
+        return min(1, pow(ladderRatio, Double(k)))
     }
 
-    private static let quantum = 16
-    private static let minimumDimension = 64
+    /// Encoder output size for a magnifier crop: the crop's pixels at the SNAPPED fraction (see
+    /// `snapCropFraction`), capped to the display (no upscale past native), floored to a minimum, and
+    /// even for the codec. Because the snap is discrete, a continuous pinch changes the output size —
+    /// and therefore reconfigures SCStream / rebuilds the VideoToolbox encoder — only a handful of
+    /// times rather than on nearly every step (the old per-pixel snap was the rapid-zoom crash).
+    static func cropOutputSize(displayWidth: Int, displayHeight: Int, normalizedW: Double, normalizedH: Double) -> Size {
+        Size(width: clampDimension(Double(displayWidth) * snapCropFraction(normalizedW), cap: displayWidth),
+             height: clampDimension(Double(displayHeight) * snapCropFraction(normalizedH), cap: displayHeight))
+    }
 
-    private static func quantizedDimension(_ raw: Double, cap: Int) -> Int {
-        let clamped = min(Double(cap), max(0, raw))
-        let snapped = Int((clamped / Double(quantum)).rounded()) * quantum
-        return min(cap, max(minimumDimension, snapped))
+    private static let minimumDimension = 64
+    private static let ladderRatio = 0.8  // ~25% resolution deadband between adjacent rungs
+
+    private static func clampDimension(_ raw: Double, cap: Int) -> Int {
+        let even = Int((raw / 2).rounded()) * 2
+        return min(cap - (cap % 2), max(minimumDimension, even))
     }
 }

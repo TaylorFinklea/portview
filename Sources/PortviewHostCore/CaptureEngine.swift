@@ -108,18 +108,31 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     func setViewport(normalizedX nx: Double, normalizedY ny: Double,
                      normalizedW nw: Double, normalizedH nh: Double) async -> Bool {
         guard let stream, let config else { return false }
-        // Near-full (within 1%) → no crop; `.zero` captures the whole display at native dims.
-        let cropping = !(nw >= 0.99 && nh >= 0.99)
-        let normalizedRect: CGRect = cropping
-            ? CGRect(x: nx, y: ny, width: nw, height: nh)
-            : CGRect(x: 0, y: 0, width: 1, height: 1)
-        let newRect: CGRect = cropping
-            ? CGRect(x: nx * Double(width), y: ny * Double(height),
-                     width: nw * Double(width), height: nh * Double(height))
-            : .zero
-        let outputSize = cropping
-            ? CaptureSizing.cropOutputSize(displayWidth: width, displayHeight: height, normalizedW: nw, normalizedH: nh)
-            : CaptureSizing.Size(width: width, height: height)
+        // Snap the captured region's SIZE to the discrete ladder (snapped up so it still covers the
+        // requested window), keeping the requested center; the encoder output is sized from the SAME
+        // snapped fractions, so the buffer's aspect matches the captured region exactly (no stretch)
+        // while both change only at rung crossings (minimal SCStream/encoder churn). Deciding `cropping`
+        // off the SNAPPED fractions (not the raw request) avoids a seam near full where a request that
+        // snaps to 1.0 would otherwise take the crop path and force a redundant reconfigure.
+        let snw = CaptureSizing.snapCropFraction(nw)
+        let snh = CaptureSizing.snapCropFraction(nh)
+        let cropping = snw < 1.0 || snh < 1.0
+        let normalizedRect: CGRect
+        let newRect: CGRect
+        let outputSize: CaptureSizing.Size
+        if cropping {
+            // `.zero` (the else branch) captures the whole display at native dims.
+            let ox = min(max(0, nx + nw / 2 - snw / 2), 1 - snw)
+            let oy = min(max(0, ny + nh / 2 - snh / 2), 1 - snh)
+            normalizedRect = CGRect(x: ox, y: oy, width: snw, height: snh)
+            newRect = CGRect(x: ox * Double(width), y: oy * Double(height),
+                             width: snw * Double(width), height: snh * Double(height))
+            outputSize = CaptureSizing.cropOutputSize(displayWidth: width, displayHeight: height, normalizedW: snw, normalizedH: snh)
+        } else {
+            normalizedRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+            newRect = .zero
+            outputSize = CaptureSizing.Size(width: width, height: height)
+        }
 
         let current = config.sourceRect
         let unchangedRect = abs(newRect.minX - current.minX) < 1 && abs(newRect.minY - current.minY) < 1
@@ -129,6 +142,12 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             await viewportState.set(normalizedRect, requestKeyframe: false)
             return true
         }
+        // Snapshot the last-applied state so we can roll back if the update throws — `config` is a
+        // reference type whose fields double as the unchanged-check baseline, so a failed update that
+        // left them mutated would desync the baseline from the live stream and could wedge the crop.
+        let priorRect = config.sourceRect
+        let priorWidth = config.width
+        let priorHeight = config.height
         config.sourceRect = newRect
         config.width = outputSize.width
         config.height = outputSize.height
@@ -137,6 +156,9 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             await viewportState.set(normalizedRect, requestKeyframe: true)
             return true
         } catch {
+            config.sourceRect = priorRect
+            config.width = priorWidth
+            config.height = priorHeight
             print("viewport update failed: \(error)")
             return false
         }

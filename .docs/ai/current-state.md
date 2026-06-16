@@ -6,7 +6,18 @@
 
 `main`
 
-## Latest Session (2026-06-16 — M7: host presence & frictionless connect)
+## Latest Session (2026-06-16 #2 — magnifier crash-hardening, discrete capture-size ladder)
+
+- Ultracode multi-model: 5-model adversarial AUDIT (haiku, sonnet, minimax-m3, qwen3.7-max, kimi-k2.7-code) of the magnifier path → fix → tool-enabled adversarial REVIEW. De-risks the rapid-zoom CRASH landmine. Build-green; **device-verify pending**. Decision: decisions.md (2026-06-16 top); roadmap Now `[x]`.
+- **Root cause**: mult-of-16 output snap = ~215 distinct sizes on a 3440px display → continuous pinch tore down/rebuilt the VideoToolbox encoder + reconfigured SCStream on nearly every step (the historical crash shape).
+- **Fix**: `CaptureSizing.snapCropFraction` — snap the captured region SIZE onto a coarse geometric ladder (ratio 0.8, ~13 rungs), snapped UP so it still ⊇ the requested window. `setViewport` captures the snapped region (recentered, clamped) + sizes the encoder output from the SAME fraction (buffer aspect == captured-region aspect, no stretch). Host ECHOES the snapped region → client `frameViewport` stays aligned. Reconfigure only at rung crossings (~13 vs ~215).
+- **Also**: config save/restore on `updateConfiguration` failure (desync→wedge); `encoder = nil` on encode failure (wedged-VT spin); stale `ZoomGeometry` doc-comment.
+- **Audit false positives I rejected** (verified against the per-connection serialized inbound loop): the "config reference-type race" (Sonnet+Haiku both over-flagged critical; qwen correctly refuted) and `.zero` sourceRect (Apple full-display sentinel). Sonnet's tool-enabled review PROVED the snap/clamp safety invariant + found one real near-full seam (fixed).
+- **Scorecard signal**: cheap pi models (qwen3.7-max, minimax-m3) out-accurated the native subagents on this concurrency audit; qwen3.7-max added to the roster. Harness reliability lessons: kimi needs `-p @file` (not huge inline `-p`); qwen needs tools (not `--no-tools`). See `~/.claude/model-scorecard.md`.
+- New tests: `CaptureSizingTests` (ladder discreteness/idempotency/monotonic/aspect/stability). Verify: `swift test` **125/36**, iOS **38**, macOS **BUILD SUCCEEDED**. NOT pushed.
+- NEXT (human device verify): **rapid pinch zoom in/out repeatedly → must NOT crash** (the whole point); ~5× text crisp; zoom continuous despite discrete crispness rungs; pan smooth. If notchy → densify ladder; if soft → raise cropped bitrate. Then the still-pending M7 device-verify + SAS pairing security review.
+
+## Previous Session (2026-06-16 — M7: host presence & frictionless connect)
 
 - Big milestone, ultracode multi-phase (design workflow → implement → adversarial-review workflow → fix). Build-green; device-verify pending. Decision: decisions.md (2026-06-16 top); roadmap Now `[x]`.
 - **P1 menu-bar host**: `MenuBarExtra(.window)` beside the WindowGroup (id "main"), shared `@State HostAppModel`; `MenuBarHostView` (status/QR/copy/count/Start-Stop/Open-window); pure tested `HostMenuBar.symbol`. Hosting now outlives window-close (removed WindowGroup `onDisappear{stop}`).

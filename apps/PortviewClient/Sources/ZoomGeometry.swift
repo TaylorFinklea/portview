@@ -14,10 +14,10 @@ import CoreGraphics
 /// region regardless of `frameViewport`, the host re-cropping (the magnifier) changes crispness
 /// without moving the picture — so it doesn't introduce visual jerk.
 ///
-/// `cropRequest` is a padded, display-aspect (square-normalized) box around the visible window. It
-/// MUST be display-aspect: the host's output buffer is display-aspect, so a non-square crop would be
-/// stretched. The padding gives room to pan before the host must re-crop, and at high zoom the small
-/// crop is encoded at full resolution → crisper.
+/// `cropRequest` is a padded box around the visible window in the window's OWN aspect (deliberately
+/// NOT square): the host encodes exactly this region, sizing its output buffer to the crop's aspect
+/// (`CaptureSizing.cropOutputSize`) so there's no stretch. The padding gives room to pan before the
+/// host must re-crop, and at high zoom the small region is encoded at high resolution → crisper.
 struct ZoomGeometry {
     let renderScale: CGFloat
     let pan: CGPoint
