@@ -6,7 +6,16 @@
 
 `main`
 
-## Latest Session (2026-06-15 #2 — three device-testable features: DONE, build-green)
+## Latest Session (2026-06-15 #3 — device test feedback + bitrate-default fix)
+
+- User device-tested the new build (3440×1440 ultrawide host + portrait iPhone). Findings → roadmap Now/Next.
+- **Fixed now**: bitrate default regression — quality-controls defaulted to 25 Mbps (below the host's prior ~80 Mbps heuristic). Now client default = **Auto** (`bitrateMbps=0` → `targetBitrate=0` → host heuristic); slider 0(Auto)–80 overrides. iOS tests 23, green. (Tell user: in Settings leave Auto or crank to 80 + reconnect.)
+- **Mouse not moving** = Accessibility not granted (user fixed it). Not a bug.
+- **THE blocker (roadmap Now)**: high-zoom blur/distortion — diagnosed: `ZoomGeometry.cropRequest` square `max(visW,visH)` ⇒ for an ultrawide on a portrait phone the window stays full-height ⇒ host never crops ⇒ digital zoom into a full low-bitrate frame. Real fix = region streaming (crop sourceRect to the visible window + resize encoder OUTPUT to the crop aspect; landmine: prior tight-crop attempt crashed/stretched, decisions 2026-06-04). `complexity: L`.
+- Roadmap Now also: **motion choppiness** on pan/move. Roadmap Next: **6-digit OTP pairing** for Bonjour-discovered Macs (user request; QR still preferred).
+- NEXT: take on the magnifier region-streaming rework (device-verify each step with the user) — it's what makes high-zoom usable.
+
+## Previous Session (2026-06-15 #2 — three device-testable features: DONE, build-green)
 
 - "Burn through real features" → shipped 3 (build-green; device-verify pending). Decision: decisions.md (2026-06-15, top entry); roadmap Now `[x]` + Next items marked done.
 - **Quality controls**: host now HONORS client bitrate/fps (was hardcoded 60fps + heuristic — ignored the request). New `StreamParameters` (clamps) in HostCore; `HostRunner` threads requested fps/bitrate into capture + encoder. Client `ClientSettings` (persisted) + Glass **Settings** sheet (gear on Deck Home: bitrate 4–80 Mbps, fps 30/60, Forget-all, version), read at handshake. ⭐ the real crispness knob.

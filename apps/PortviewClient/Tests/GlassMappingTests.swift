@@ -101,15 +101,16 @@ final class GlassMappingTests: XCTestCase {
 
     // MARK: - Client quality settings → handshake params
 
-    func testDefaultClientSettings() {
+    func testDefaultClientSettingsIsAuto() {
         let settings = ClientSettings()
-        XCTAssertEqual(settings.bitrateMbps, 25)
+        XCTAssertEqual(settings.bitrateMbps, 0) // Auto
         XCTAssertEqual(settings.fps, 60)
-        XCTAssertEqual(settings.targetBitrate, 25_000_000)
+        XCTAssertEqual(settings.targetBitrate, 0) // 0 → host picks its own heuristic
         XCTAssertEqual(settings.maxFPS, 60)
     }
 
     func testClientSettingsClampsBitrate() {
+        XCTAssertEqual(ClientSettings(bitrateMbps: 0, fps: 60).targetBitrate, 0) // Auto
         XCTAssertEqual(ClientSettings(bitrateMbps: 200, fps: 60).targetBitrate, 80_000_000)
         XCTAssertEqual(ClientSettings(bitrateMbps: 1, fps: 60).targetBitrate, 4_000_000)
         XCTAssertEqual(ClientSettings(bitrateMbps: 40, fps: 60).targetBitrate, 40_000_000)

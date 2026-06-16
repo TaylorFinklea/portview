@@ -4,15 +4,18 @@ import Foundation
 /// honors these (capture fps + encoder bitrate, see `StreamParameters` host-side), so changing them
 /// and reconnecting actually changes the stream.
 struct ClientSettings: Codable, Equatable {
-    var bitrateMbps: Int = 25
+    /// 0 = Auto: let the host pick its own (high) bitrate heuristic. Otherwise a Mbps ceiling within
+    /// `bitrateRange`. Default Auto, so we never request *less* than the host would choose itself.
+    var bitrateMbps: Int = 0
     var fps: Int = 60
 
     static let bitrateRange = 4...80
     static let fpsOptions = [30, 60]
 
-    /// Encoder bitrate (bits/s) for the handshake, clamped to the offered range.
+    /// Encoder bitrate (bits/s) for the handshake; 0 ("Auto") → the host uses its own heuristic.
     var targetBitrate: UInt32 {
-        UInt32(min(Self.bitrateRange.upperBound, max(Self.bitrateRange.lowerBound, bitrateMbps))) * 1_000_000
+        guard bitrateMbps > 0 else { return 0 }
+        return UInt32(min(Self.bitrateRange.upperBound, max(Self.bitrateRange.lowerBound, bitrateMbps))) * 1_000_000
     }
 
     /// Capture frame rate for the handshake (one of the offered options; defaults to 60).

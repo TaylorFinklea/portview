@@ -57,16 +57,17 @@ struct SettingsView: View {
                 HStack {
                     Text("Bitrate").font(.grotesk(14, .medium)).foregroundStyle(Glass.text1)
                     Spacer()
-                    Text("\(settings.settings.bitrateMbps) Mbps").font(.mono(13, .semibold)).foregroundStyle(Glass.signal)
+                    Text(settings.settings.bitrateMbps == 0 ? "Auto" : "\(settings.settings.bitrateMbps) Mbps")
+                        .font(.mono(13, .semibold)).foregroundStyle(Glass.signal)
                 }
                 Slider(
                     value: Binding(
                         get: { Double(settings.settings.bitrateMbps) },
                         set: { settings.settings.bitrateMbps = Int($0.rounded()) }),
-                    in: Double(ClientSettings.bitrateRange.lowerBound)...Double(ClientSettings.bitrateRange.upperBound),
+                    in: 0...Double(ClientSettings.bitrateRange.upperBound),
                     step: 1)
                     .tint(Glass.signal)
-                Text("Higher = crisper text, more bandwidth. Applies on the next connection.")
+                Text("Auto lets the Mac pick a high bitrate. Higher = crisper text, more bandwidth. Applies on the next connection.")
                     .font(.mono(10)).foregroundStyle(Glass.text3)
             }
 
