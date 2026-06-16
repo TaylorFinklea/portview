@@ -6,7 +6,15 @@
 
 `main`
 
-## Latest Session (2026-06-15 #3 — device test feedback + bitrate-default fix)
+## Latest Session (2026-06-15 #4 — magnifier region-streaming rework)
+
+- Implemented THE high-zoom blocker fix (build-green; **DEVICE-VERIFY REQUIRED**, crash landmine). Decision + spec: decisions.md (2026-06-15 top) + docs/superpowers/specs/2026-06-15-magnifier-region-streaming.md. Roadmap Now `[x]`.
+- Root cause: square crop (`max(visW,visH)`) + display-sized output ⇒ host never cropped for an ultrawide-on-portrait ⇒ digital-zoom blur. Fix: client `cropRequest` = visible window's own aspect (not square); host `setViewport` sets `sourceRect` AND `config.width/height` = crop pixels (`CaptureSizing.cropOutputSize`, mod-16/capped/floored, changes only on zoom not pan); client render uses FRAME aspect (`frameAspect = (f.w/f.h)*displayAspect`). Zoom-1 path mathematically unchanged (no regression).
+- New tests: `ZoomGeometryTests` (5), `CaptureSizing.cropOutputSize` (3). Verify: `swift test` **113/34**, iOS **36**, macOS **BUILD SUCCEEDED**. Host rebuilt + relaunched for the user.
+- Also roadmapped (user ideas this session): **menu-bar host** (`MenuBarExtra` — open for QR / OTP button) + the **6-digit OTP** pairing (both Next).
+- NEXT: USER device-test the magnifier (~5× → crisp, pan smooth, zoom-1 unchanged, **watch for crash** on rapid zoom). If it stutters on zoom steps → the "discrete output sizes" follow-up (roadmap Now).
+
+## Previous Session (2026-06-15 #3 — device test feedback + bitrate-default fix)
 
 - User device-tested the new build (3440×1440 ultrawide host + portrait iPhone). Findings → roadmap Now/Next.
 - **Fixed now**: bitrate default regression — quality-controls defaulted to 25 Mbps (below the host's prior ~80 Mbps heuristic). Now client default = **Auto** (`bitrateMbps=0` → `targetBitrate=0` → host heuristic); slider 0(Auto)–80 overrides. iOS tests 23, green. (Tell user: in Settings leave Auto or crank to 80 + reconnect.)

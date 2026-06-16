@@ -2,6 +2,14 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-15] Magnifier = true region streaming (output dims match the crop aspect)
+
+**Context**: High zoom (~5×, needed to read text on a phone) was blurry/distorted vs VNC. Root cause (3440×1440 ultrawide host + portrait iPhone): the host never cropped. `ZoomGeometry.cropRequest` built a normalized SQUARE (`max(visW, visH)`), which for a full-height window = the whole display; and `CaptureEngine.setViewport` only moved `sourceRect` while keeping output dims = full display, so any non-display-aspect crop would STRETCH (hence the square requirement). Net: the client digitally zoomed a full, low-bitrate frame.
+**Decision**: Stream the actual region. (1) Client `cropRequest` = the visible window's OWN aspect (not square), padded for pan. (2) Host sets BOTH `sourceRect` AND `config.width/height` to the crop's pixel size (`CaptureSizing.cropOutputSize`: mod-16/even, capped to display-native, min floor) → the region is encoded 1:1, no stretch, full res. (3) Client render computes its aspect-fit from the FRAME's aspect (`frameAspect = (f.width/f.height)·displayAspect`), not the display's.
+**Invariant (no regression)**: at zoom 1 the crop is the full display (display-aspect) → `frameAspect == displayAspect` → the math is identical to the prior overview. Only zoom > 1 (the broken path) changes.
+**Churn / crash control** — landmine: the 2026-06-04 tight-crop/native-res attempt CRASHED + stretched. Output dims change only when the crop SIZE changes (i.e. zoom), not on pan (panning moves `sourceRect` only → no encoder rebuild); dims are quantized (mod-16) + capped + floored so jitter near a zoom level doesn't thrash `updateConfiguration`/the encoder; the 250 ms viewport debounce + "near-full = no crop" short-circuit stay.
+**Tests**: `ZoomGeometryTests` (zoom-1 unchanged + scale 1; high-zoom on ultrawide crops a real region that follows the cursor; settled render finite/zoomed) + `CaptureSizing.cropOutputSize` (even/cap/floor). Build-green: 113 pkg / 36 iOS / macOS builds. **DEVICE-VERIFY REQUIRED** — changing `config.width/height` + `updateConfiguration` on a live SCStream is the historical crash point. Spec: `docs/superpowers/specs/2026-06-15-magnifier-region-streaming.md`.
+
 ## [2026-06-15] Three device-testable features: quality controls, endpoint-based persistence, Mac→iPhone files
 
 **Context**: User asked to "burn through real features" they can test on-device. Picked three high-observability ones (ultracode; build-green, device-verify pending).

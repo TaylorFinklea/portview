@@ -59,8 +59,9 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     private var audioConverter: AVAudioConverter?
     private var audioOutputFormat: AVAudioFormat?
 
-    // Retained so `setViewport` can re-crop the live stream (the "magnifier"). Output dimensions
-    // stay constant, so the encoder is unaffected; only the captured region changes.
+    // Retained so `setViewport` can re-crop the live stream (the "magnifier"): it updates both the
+    // captured region (`sourceRect`) AND the output dimensions to the crop's aspect, so the region
+    // is encoded 1:1 — full resolution, no stretch — which is what makes high zoom crisp.
     private var config: SCStreamConfiguration?
 
     func currentViewport() async -> CGRect { await viewportState.get() }
@@ -97,31 +98,40 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         }
     }
 
-    /// Re-crop the live capture to a normalized region of the display (the magnifier). The region
-    /// is captured at native density and scaled to the unchanged output size, so it's encoded at
-    /// full resolution. Returns `true` only once the new configuration is actually in effect, so the
-    /// caller can confirm the crop to the client only when frames really reflect it. A no-op change
-    /// (within a point of the current crop) returns `true` without reconfiguring — this avoids
-    /// thrashing the live stream on sub-point jitter near a settled zoom.
+    /// Re-crop the live capture to a normalized region of the display (the magnifier). Sets both the
+    /// captured region (`sourceRect`) AND the output dimensions to the crop's aspect (`cropOutputSize`),
+    /// so the region is encoded 1:1 at full resolution without stretching — VNC-style region streaming.
+    /// Output dims change only when the crop *size* changes (i.e. on zoom), so panning at a fixed zoom
+    /// only moves `sourceRect` (cheap, no encoder rebuild). Returns `true` once the new configuration is
+    /// in effect, so the caller confirms the crop to the client only when frames really reflect it. A
+    /// no-op change (same rect and output dims) returns `true` without reconfiguring.
     func setViewport(normalizedX nx: Double, normalizedY ny: Double,
                      normalizedW nw: Double, normalizedH nh: Double) async -> Bool {
         guard let stream, let config else { return false }
-        // Near-full (within 1%) → no crop; `.zero` captures the whole display.
-        let normalizedRect: CGRect = (nw >= 0.99 && nh >= 0.99)
-            ? CGRect(x: 0, y: 0, width: 1, height: 1)
-            : CGRect(x: nx, y: ny, width: nw, height: nh)
-        let newRect: CGRect = (nw >= 0.99 && nh >= 0.99)
-            ? .zero
-            : CGRect(x: nx * Double(width), y: ny * Double(height),
+        // Near-full (within 1%) → no crop; `.zero` captures the whole display at native dims.
+        let cropping = !(nw >= 0.99 && nh >= 0.99)
+        let normalizedRect: CGRect = cropping
+            ? CGRect(x: nx, y: ny, width: nw, height: nh)
+            : CGRect(x: 0, y: 0, width: 1, height: 1)
+        let newRect: CGRect = cropping
+            ? CGRect(x: nx * Double(width), y: ny * Double(height),
                      width: nw * Double(width), height: nh * Double(height))
+            : .zero
+        let outputSize = cropping
+            ? CaptureSizing.cropOutputSize(displayWidth: width, displayHeight: height, normalizedW: nw, normalizedH: nh)
+            : CaptureSizing.Size(width: width, height: height)
+
         let current = config.sourceRect
-        let unchanged = abs(newRect.minX - current.minX) < 1 && abs(newRect.minY - current.minY) < 1
+        let unchangedRect = abs(newRect.minX - current.minX) < 1 && abs(newRect.minY - current.minY) < 1
             && abs(newRect.width - current.width) < 1 && abs(newRect.height - current.height) < 1
-        if unchanged {
+        let unchangedSize = config.width == outputSize.width && config.height == outputSize.height
+        if unchangedRect && unchangedSize {
             await viewportState.set(normalizedRect, requestKeyframe: false)
             return true
         }
         config.sourceRect = newRect
+        config.width = outputSize.width
+        config.height = outputSize.height
         do {
             try await stream.updateConfiguration(config)
             await viewportState.set(normalizedRect, requestKeyframe: true)

@@ -27,10 +27,15 @@ struct ZoomGeometry {
         let viewAspect = view.width / max(1, view.height)
         let displayAspect = displaySize.width / max(1, displaySize.height)
 
-        // Aspect-fit rect of the (display-aspect) host frame inside the view.
-        let videoSize: CGSize = displayAspect > viewAspect
-            ? CGSize(width: view.width, height: view.width / displayAspect)
-            : CGSize(width: view.height * displayAspect, height: view.height)
+        // The received frame shows `frameViewport` (`f`) of the display; its on-screen aspect-fit
+        // uses the FRAME's aspect, not the whole display's. At zoom 1 / no crop, f is the full
+        // display so frameAspect == displayAspect — the original overview behavior, unchanged.
+        let f = (frameViewport.width > 0 && frameViewport.height > 0)
+            ? frameViewport : CGRect(x: 0, y: 0, width: 1, height: 1)
+        let frameAspect = (f.width / max(0.0001, f.height)) * displayAspect
+        let videoSize: CGSize = frameAspect > viewAspect
+            ? CGSize(width: view.width, height: view.width / frameAspect)
+            : CGSize(width: view.height * frameAspect, height: view.height)
         let videoOrigin = CGPoint(x: (view.width - videoSize.width) / 2,
                                   y: (view.height - videoSize.height) / 2)
 
@@ -46,21 +51,20 @@ struct ZoomGeometry {
         let cy = windowH < 1 ? min(max(cursor.y, windowH / 2), 1 - windowH / 2) : 0.5
         let window = CGRect(x: cx - windowW / 2, y: cy - windowH / 2, width: windowW, height: windowH)
 
-        // Padded, display-aspect (square-normalized) crop bounding the visible part of the window.
+        // Crop request = the visible part of the window (its OWN aspect), padded for pan headroom.
+        // Deliberately NOT square: the host encodes exactly this region at its aspect (see
+        // CaptureSizing.cropOutputSize), so it shrinks for an ultrawide display on a portrait phone
+        // where the old square crop (max of w/h) stayed full-display and defeated the magnifier.
         let visX0 = max(0, window.minX), visY0 = max(0, window.minY)
         let visX1 = min(1, window.maxX), visY1 = min(1, window.maxY)
-        // Keep some pan headroom at low zoom, but do not let padding defeat the magnifier at
-        // high zoom. On portrait phones a 1.4x padded display-aspect crop can stay full-screen
-        // even at 4x, leaving the client to do pure digital zoom.
-        let padding = max(1.0, min(1.4, 1.4 - max(0, z - 1) * 0.15))
-        let side = min(1, max(visX1 - visX0, visY1 - visY0) * padding)
-        let ccx = min(max((visX0 + visX1) / 2, side / 2), 1 - side / 2)
-        let ccy = min(max((visY0 + visY1) / 2, side / 2), 1 - side / 2)
-        cropRequest = CGRect(x: ccx - side / 2, y: ccy - side / 2, width: side, height: side)
+        let padX = (visX1 - visX0) * 0.08
+        let padY = (visY1 - visY0) * 0.08
+        let cropX0 = max(0, visX0 - padX), cropY0 = max(0, visY0 - padY)
+        let cropX1 = min(1, visX1 + padX), cropY1 = min(1, visY1 + padY)
+        cropRequest = CGRect(x: cropX0, y: cropY0, width: cropX1 - cropX0, height: cropY1 - cropY0)
 
-        // Render the window aspect-fit, mapped through the host's current crop.
-        let f = (frameViewport.width > 0 && frameViewport.height > 0)
-            ? frameViewport : CGRect(x: 0, y: 0, width: 1, height: 1)
+        // Map the window through the frame's region (`f`) onto its on-screen rect, then scale so the
+        // window fills the view.
         let wvx0 = videoOrigin.x + (window.minX - f.minX) / f.width * videoSize.width
         let wvy0 = videoOrigin.y + (window.minY - f.minY) / f.height * videoSize.height
         let wvw = window.width / f.width * videoSize.width
