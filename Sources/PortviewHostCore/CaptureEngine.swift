@@ -153,7 +153,12 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         config.height = outputSize.height
         do {
             try await stream.updateConfiguration(config)
-            await viewportState.set(normalizedRect, requestKeyframe: true)
+            // Only a size change (a zoom-rung crossing) needs a forced keyframe; a pure pan moves the
+            // sourceRect at the same output size, so the P-frame stream stays valid — forcing a keyframe
+            // on every pan step put ~6.6 large keyframes/sec on the wire and produced a periodic hitch.
+            let requestKeyframe = CaptureSizing.cropRequiresKeyframe(
+                from: CaptureSizing.Size(width: priorWidth, height: priorHeight), to: outputSize)
+            await viewportState.set(normalizedRect, requestKeyframe: requestKeyframe)
             return true
         } catch {
             config.sourceRect = priorRect

@@ -35,6 +35,15 @@ struct CaptureSizing {
              height: clampDimension(Double(displayHeight) * snapCropFraction(normalizedH), cap: displayHeight))
     }
 
+    /// Whether re-cropping the live capture needs a forced HEVC keyframe. A pure PAN moves only the
+    /// `sourceRect` while the encoder output size stays put (`from == to`): the existing P-frame stream
+    /// stays valid across it, so no IDR is needed. Only a size change — a zoom-rung crossing — actually
+    /// changes the decoder dimensions and requires a keyframe. Forcing one on every pan step (the old
+    /// behavior) put ~6.6 large keyframes/sec on the wire during a sustained pan → a periodic hitch.
+    static func cropRequiresKeyframe(from: Size, to: Size) -> Bool {
+        from != to
+    }
+
     private static let minimumDimension = 64
     private static let ladderRatio = 0.8  // ~25% resolution deadband between adjacent rungs
 

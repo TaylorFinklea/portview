@@ -6,7 +6,19 @@
 
 `main`
 
-## Latest Session (2026-06-16 #2 — magnifier crash-hardening, discrete capture-size ladder)
+## Latest Session (2026-06-19 — motion choppiness on pan/move: three coordinated cuts)
+
+- Roadmap "Motion choppiness on pan/move" (senior/M) DONE, build-green, **device-verify pending**. Ultracode: Opus 4-slice motion-path diagnosis workflow (gesture→render / cursor-follow / viewport re-crop / input send) → ranked synthesis → TDD impl → glm-5.2 tool-enabled adversarial review (SHIP). Decision: decisions.md (2026-06-19 top).
+- **#1 keyframe decoupling (headline)**: `CaptureEngine.setViewport` forced an HEVC keyframe on EVERY re-crop → ~6.6/s during a pan → `.bufferingNewest(2)` drops the frame behind each → periodic hitch. New pure `CaptureSizing.cropRequiresKeyframe(from:to:)` → keyframe only on an output-SIZE change (zoom rung), not a pure pan. Double-guarded: a real dim change rebuilds the encoder (`HostRunner:478-483`) which sets `needsKeyframe` independently, so no path drops a needed IDR. Zoom-1 + crash landmine untouched.
+- **#2 ordered cursor return-lane**: `CursorReportPump` (PortviewHostCore) — single serial drain + last-wins coalescing — replaces the detached `Task`-per-report (`HostRunner.makeInjector`) that could reorder under load and back-step the client cursor. Per-connection, `finish()`ed in serve `defer`, persists across display switch. Return-path analogue of `OutboundInputPump`.
+- **#3 client spring guard**: `.cursorPosition` overwrote `cursorNormalized` unconditionally (unlike the `frameViewport` guard above it) → re-targeted the `Glass.cursorFollow` spring per report. Added `CGPoint.isClose`; skip a confirm within ε of the local prediction (error bounded ≈2.5px, self-correcting).
+- **Refuted suspect**: host does NOT throttle cursor reports by time (3px gate, no time window) — "raise the rate" was the wrong lever; ordering (#2) was.
+- **Deferred → roadmap**: suspect #4 — `ZoomGeometry.renderScale` computed through `frameViewport` steps the scale at each re-crop (spring animates a "pop"). HIGH-RISK (zoom math) → land a pure bit-stability test first, only after device confirms the pop. Roadmap Now `[ ]`.
+- **glm-5.2 first dispatch** (provisional T2 → now evidence-backed): strong tool-enabled review, matched Opus's read exactly (double-guard, drain trace, ε bound). 1 useful nit applied (explicit `.unbounded` AsyncStream buffering); 2 rejected (dead-code claim WRONG — definite-init for `[weak self]`; "test not CLI-visible" — runs under xcodebuild). Scorecard updated (2026-06-19).
+- Verify: `swift test` **129/37**, iOS `xcodebuild test` **43**, macOS **BUILD SUCCEEDED**. NOT pushed.
+- NEXT (human device verify): high-zoom pan smooth, no periodic hitch; cursor tracks 1:1 without rubber-banding/back-stepping. Watch for a render-scale "pop" at re-crops (→ deferred #4). Then the still-pending device-verifies (M7, magnifier crash landmine, SAS pairing security review).
+
+## Previous Session (2026-06-16 #2 — magnifier crash-hardening, discrete capture-size ladder)
 
 - Ultracode multi-model: 5-model adversarial AUDIT (haiku, sonnet, minimax-m3, qwen3.7-max, kimi-k2.7-code) of the magnifier path → fix → tool-enabled adversarial REVIEW. De-risks the rapid-zoom CRASH landmine. Build-green; **device-verify pending**. Decision: decisions.md (2026-06-16 top); roadmap Now `[x]`.
 - **Root cause**: mult-of-16 output snap = ~215 distinct sizes on a 3440px display → continuous pinch tore down/rebuilt the VideoToolbox encoder + reconfigured SCStream on nearly every step (the historical crash shape).

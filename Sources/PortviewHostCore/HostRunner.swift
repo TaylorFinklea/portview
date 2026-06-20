@@ -347,7 +347,10 @@ public struct HostRunner: Sendable {
         // Injector, capture engine, and video pump are (re)bound to the active display; switching
         // re-targets all three. `currentCapture` lets viewport (magnifier) requests re-crop the
         // live stream. All of these are touched only from this inbound loop's task.
-        var injector = makeInjector(for: firstDisplay, connection: connection)
+        // One ordered, coalescing lane for cursor reports across this whole connection (survives display
+        // switches), so confirmations can't reorder/back-step the client's cursor-follow.
+        let cursorPump = CursorReportPump(connection: connection)
+        var injector = makeInjector(for: firstDisplay, cursorPump: cursorPump)
         var currentCapture: CaptureEngine?
         var videoTask: Task<Void, Never>?
         defer {
@@ -355,6 +358,7 @@ public struct HostRunner: Sendable {
             fileReceiver.cancelAll()
             videoTask?.cancel()
             currentCapture?.stop()
+            cursorPump.finish()
             connection.close()
             if let connectedDeviceID {
                 control?.deregister(connectedDeviceID)
@@ -367,7 +371,7 @@ public struct HostRunner: Sendable {
         }
         func startVideo(on display: SCDisplay) {
             videoTask?.cancel()
-            injector = makeInjector(for: display, connection: connection)
+            injector = makeInjector(for: display, cursorPump: cursorPump)
             let capture = CaptureEngine(width: display.width, height: display.height)
             currentCapture = capture
             let fps = requestedFPS
@@ -423,12 +427,12 @@ public struct HostRunner: Sendable {
         }
     }
 
-    /// Build an `InputInjector` whose cursor clamping + reporting are bound to `display`.
-    private static func makeInjector(for display: SCDisplay, connection: PortviewConnection) -> InputInjector {
+    /// Build an `InputInjector` whose cursor clamping + reporting are bound to `display`. Cursor reports
+    /// go through the connection's ordered `cursorPump` (not a detached Task per report) so they reach
+    /// the client monotonically.
+    private static func makeInjector(for display: SCDisplay, cursorPump: CursorReportPump) -> InputInjector {
         let injector = InputInjector(displayBounds: CGDisplayBounds(display.displayID))
-        injector.onCursorMoved = { nx, ny in
-            Task { try? await connection.send(.cursorPosition(CursorPosition(normalizedX: nx, normalizedY: ny))) }
-        }
+        injector.onCursorMoved = { nx, ny in cursorPump.report(nx, ny) }
         return injector
     }
 

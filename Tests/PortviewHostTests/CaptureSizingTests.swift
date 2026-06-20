@@ -57,6 +57,19 @@ import Testing
         #expect(a == b)
     }
 
+    // MARK: - Keyframe decoupling (pan vs. zoom-rung)
+
+    @Test func panReCropNeedsNoKeyframeButAZoomRungDoes() {
+        // A pure pan keeps the encoder output size; only the sourceRect moves, so the P-frame stream
+        // stays valid → no forced keyframe (the ~6.6/s pan-hitch fix). A size change (zoom-rung
+        // crossing) changes decoder dims → it DOES need an IDR.
+        let size = CaptureSizing.Size(width: 1920, height: 1080)
+        let bigger = CaptureSizing.Size(width: 2400, height: 1080)
+        #expect(CaptureSizing.cropRequiresKeyframe(from: size, to: size) == false)   // pan
+        #expect(CaptureSizing.cropRequiresKeyframe(from: size, to: bigger) == true)  // zoom rung
+        #expect(CaptureSizing.cropRequiresKeyframe(from: bigger, to: size) == true)
+    }
+
     @Test func cropOutputIsDiscreteAndMonotonicAcrossAZoomSweep() {
         // Sweep a full-height slice from wide to narrow (zoom in). The output width must be
         // non-increasing (monotonic) and take only a handful of DISTINCT values across the sweep —

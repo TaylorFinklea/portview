@@ -363,7 +363,11 @@ final class SessionViewModel: ObservableObject {
                     }
                 }
             case .cursorPosition(let cursor):
-                cursorNormalized = CGPoint(x: cursor.normalizedX, y: cursor.normalizedY)
+                // Guard like `frameViewport` above: a confirmation that matches the local prediction
+                // (the common case during a drag) must not re-write `cursorNormalized`, or it re-targets
+                // the cursor-follow spring every report for no visible motion → micro-stutter.
+                let p = CGPoint(x: cursor.normalizedX, y: cursor.normalizedY)
+                if !p.isClose(to: cursorNormalized) { cursorNormalized = p }
             case .clipboardUpdate(let update):
                 UIPasteboard.general.string = update.text
             case .audioFrame(let audio):
@@ -500,4 +504,13 @@ final class SessionViewModel: ObservableObject {
 
 private enum PortviewClientError: Error {
     case noReachableEndpoint
+}
+
+extension CGPoint {
+    /// Two normalized cursor positions are "the same" within sub-pixel epsilon. Used to skip a host
+    /// cursor confirmation that already matches the local prediction: applying it would re-target the
+    /// cursor-follow spring for no visible movement, so we drop it (the prediction already moved us).
+    func isClose(to other: CGPoint, epsilon: CGFloat = 0.001) -> Bool {
+        abs(x - other.x) < epsilon && abs(y - other.y) < epsilon
+    }
 }
