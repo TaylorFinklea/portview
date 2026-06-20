@@ -2,6 +2,18 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-19] SAS pairing v2 — commit-then-reveal redesign (design cleared SOUND, ready to implement)
+
+**Context**: The 2026-06-19 security review returned v1 for redesign (active-MITM offline nonce grind). This is the v2 design that fixes it: `docs/superpowers/specs/2026-06-19-sas-pairing-v2-commit-reveal.md` (supersedes the v1 construction).
+
+**Decision**: Adopt a **two-sided ZRTP-style commit-then-reveal** SAS. Both sides send `commit = SHA256("Portview SAS commit v2" ‖ role ‖ H_cert ‖ nonce)` BEFORE either reveals its 16-byte CSPRNG nonce; reveals are gated on both commits (per leg) and verified against the commit. This forces an active MITM to commit BOTH substituted nonces *blind on both legs* (the honest nonce on each leg is hidden behind the MITM's own commit), killing the offline grind — residual collapses to the intended ~1/10⁶ per human-attended attempt. The **cert hash bound INTO the commit** (not just the final code's HKDF salt) is the load-bearing keystone: it makes a forwarded commit fail the other leg's verification, forcing the MITM to mint its own commit (which the per-leg gate then blinds). Code = `HKDF<SHA256>(ikm: n_c‖n_h, salt: H_cert, info:"Portview SAS v2", L:8) % 1_000_000` (L=8 fixes v1's 2× modular bias). Plus the two isolation guardrails from the review: `SASPreamblePinning` as a SEPARATE type (TOFU unreachable from the pinned path; + a negative pin test) and a dedicated `serveSASPreamble` (constructs none of the clipboard/injector/capture/file scaffolding `serveSession` builds; first-message role-lock). Plus: user-initiated pairing window, **mandatory window-scoped attempt cap** (simple counter, K mismatches → close window — both reviewers upgraded this from optional), CSPRNG fresh-per-attempt nonces, frozen known-answer test, secret hygiene, clean pinned re-dial. 6 digits kept (the v1 bug was ordering, not length). HMAC-authenticated host confirmation is OPTIONAL phase-2. QR full-pin path unaffected + preferred.
+
+**Adversarial verification**: authored by Opus, then attacked from two independent angles — a native deep reviewer (verdict v2 SOUND) and a glm-5.2 tool-enabled steelman (v2 SOUND). Both re-ran the MITM timeline under leg reordering/pipelining and confirmed blind-on-both-legs holds; both verified commitment hiding (2¹²⁸)/binding (2²⁵⁶)/no-reflection; both independently identified cert-in-commit as the keystone; both tested a decoupling/flicker variant and showed it stays at 1/10⁶ (human typing is the rate limiter). Convergent upgrade applied: window-scoped attempt cap → MANDATORY.
+
+**Status**: design CLEARED for implementation (lead-tier). Implementation is a separate phase (new messages 20–23, `SASCode`/`SASPreamblePinning`/`serveSASPreamble`, client SAS sheet, host pairing window) — see the spec's Files + Tests + re-review checklist. Not yet built. See `~/.claude/model-scorecard.md` (2026-06-19).
+
+**Verify**: N/A (design). Implementation verify = the spec's TDD plan (KAT, commit/reveal verification, negative pin test, limiter, round-trips).
+
 ## [2026-06-19] SAS pairing security review — DO NOT IMPLEMENT as specified (active-MITM grind); requires commit/reveal
 
 **Context**: The 6-digit SAS pairing design (`docs/superpowers/specs/2026-06-15-sas-pairing-design.md`) was "design complete, awaiting human security review before implementation". Ran the review as a 4-lens adversarial pass (crypto soundness / active-MITM / replay-downgrade-DoS / impl-vs-real-code) + a glm-5.2 steelman that tried and failed to refute the crux.
