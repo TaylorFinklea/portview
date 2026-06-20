@@ -19,4 +19,8 @@ public enum MessageType: UInt8, Sendable {
     case audioFrame = 17
     case viewport = 18
     case qualityStats = 19
+    case sasClientCommit = 20
+    case sasHostCommit = 21
+    case sasClientReveal = 22
+    case sasHostReveal = 23
 }

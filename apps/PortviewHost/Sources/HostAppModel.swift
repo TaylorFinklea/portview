@@ -44,7 +44,16 @@ final class HostAppModel {
 
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private let control = HostControl()
+    @ObservationIgnored private let sasControl = SASPairingControl()
     @ObservationIgnored private var permissionsTask: Task<Void, Never>?
+    @ObservationIgnored private var pairingTimeoutTask: Task<Void, Never>?
+
+    /// True while a user-opened SAS pairing window is live (gates the preamble + the displayed code).
+    private(set) var isPairing = false
+    /// The 6-digit SAS code to show the user (never logged); nil unless a preamble derived one.
+    private(set) var displayedSASCode: String?
+    /// How long a pairing window stays open before auto-closing.
+    private static let pairingWindowSeconds: TimeInterval = 120
 
     /// Observed (not derived from the @ObservationIgnored task) so the menu-bar glyph + Start/Stop
     /// re-render on EVERY transition — including when the serve loop ends on its own while ready.
@@ -66,8 +75,8 @@ final class HostAppModel {
         sessions = HostSessions()
         connectedSince = nil
 
-        task = Task { [weak self, control] in
-            let events = HostRunner().events(identity: .app(displayName: Self.displayName), control: control)
+        task = Task { [weak self, control, sasControl] in
+            let events = HostRunner().events(identity: .app(displayName: Self.displayName), control: control, sasControl: sasControl)
             for await event in events {
                 self?.handle(event)
             }
@@ -87,6 +96,31 @@ final class HostAppModel {
         state = .idle
         sessions = HostSessions()
         connectedSince = nil
+        endPairing()
+    }
+
+    /// User opened a pairing window: clients may now run the SAS preamble and the host will display a
+    /// code. Auto-closes after `pairingWindowSeconds` so an idle code can't linger.
+    func beginPairing() {
+        guard isRunning else { return }
+        sasControl.openWindow()
+        isPairing = true
+        displayedSASCode = nil
+        pairingTimeoutTask?.cancel()
+        pairingTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(Self.pairingWindowSeconds))
+            guard let self, !Task.isCancelled else { return }
+            self.endPairing()
+        }
+    }
+
+    /// Close the pairing window and clear the displayed code (manual cancel / timeout / connect / stop).
+    func endPairing() {
+        pairingTimeoutTask?.cancel()
+        pairingTimeoutTask = nil
+        sasControl.closeWindow()
+        isPairing = false
+        displayedSASCode = nil
     }
 
     /// Close the connected client session(s) without stopping hosting (keeps advertising).
@@ -158,13 +192,20 @@ final class HostAppModel {
         case .failed(let message):
             state = .failed(message)
             messages.append(message)
+        case .sasCode(let code):
+            // Only show it if the window is still open (the emit hops to the main actor; the window
+            // could have just timed out/closed in that gap — don't resurrect a cleared code).
+            if isPairing { displayedSASCode = code }  // shown on the HUD; never logged
         case .deviceConnected, .deviceDisconnected, .sessionStats:
             let wasConnected = sessions.count > 0
             sessions.apply(event)
             let nowConnected = sessions.count > 0
             if nowConnected, !wasConnected { connectedSince = Date() }
             if !nowConnected { connectedSince = nil }
-            if case .deviceConnected(_, let name) = event { messages.append("device connected · \(name)") }
+            if case .deviceConnected(_, let name) = event {
+                messages.append("device connected · \(name)")
+                endPairing()  // a client paired → close the window + clear the code
+            }
             if case .deviceDisconnected = event { messages.append("device disconnected") }
         }
     }

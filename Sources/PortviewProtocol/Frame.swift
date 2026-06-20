@@ -35,6 +35,10 @@ public enum Frame {
         case .audioFrame(let m): encode(m)
         case .viewport(let m): encode(m)
         case .qualityStats(let m): encode(m)
+        case .sasClientCommit(let m): encode(m)
+        case .sasHostCommit(let m): encode(m)
+        case .sasClientReveal(let m): encode(m)
+        case .sasHostReveal(let m): encode(m)
         }
     }
 
@@ -73,6 +77,10 @@ public enum Frame {
         case .audioFrame: return .audioFrame(try AudioFrame(from: &r))
         case .viewport: return .viewport(try Viewport(from: &r))
         case .qualityStats: return .qualityStats(try QualityStats(from: &r))
+        case .sasClientCommit: return .sasClientCommit(try SASClientCommit(from: &r))
+        case .sasHostCommit: return .sasHostCommit(try SASHostCommit(from: &r))
+        case .sasClientReveal: return .sasClientReveal(try SASClientReveal(from: &r))
+        case .sasHostReveal: return .sasHostReveal(try SASHostReveal(from: &r))
         }
     }
 }

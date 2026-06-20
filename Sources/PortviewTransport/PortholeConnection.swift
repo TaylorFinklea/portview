@@ -45,6 +45,20 @@ public final class PortviewConnection: @unchecked Sendable {
         try await connect(to: endpoint, parameters: TLSParameters.client(pinnedCertificateSHA256: pinnedCertificateSHA256))
     }
 
+    /// Connect the SAS pairing PREAMBLE over QUIC with an UNPINNED, cert-capturing handshake (TOFU),
+    /// returning the connection and the leaf-cert SHA-256 actually presented. This connection carries
+    /// ONLY the SAS commit/reveal messages and is torn down before the pinned streaming re-dial; trust
+    /// is established by the SAS code, not the handshake. See `SASPreamblePinning`.
+    public static func connectCapturingCert(to endpoint: NWEndpoint) async throws -> (PortviewConnection, Data) {
+        let (parameters, capture) = QUICParameters.clientCapturingCert()
+        let connection = try await connect(to: endpoint, parameters: parameters)
+        guard let leafSHA256 = capture.leafSHA256 else {
+            connection.close()
+            throw SASPreambleError.certNotCaptured
+        }
+        return (connection, leafSHA256)
+    }
+
     private static func connect(to endpoint: NWEndpoint, parameters: NWParameters) async throws -> PortviewConnection {
         let queue = DispatchQueue(label: "portview.connection")
         let nw = NWConnection(to: endpoint, using: parameters)

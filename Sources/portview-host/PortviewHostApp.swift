@@ -13,6 +13,8 @@ struct PortviewHostApp {
                 print("device disconnected")
             case .ready, .sessionStats:
                 break
+            case .sasCode:
+                break  // never log the SAS code (secret hygiene); the CLI has no pairing-window UI
             }
         }
     }

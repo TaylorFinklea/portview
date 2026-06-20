@@ -71,6 +71,28 @@ struct MenuBarHostView: View {
                     Label("Copy pairing URL", systemImage: "doc.on.clipboard")
                 }
                 .buttonStyle(AccentButtonStyle())
+
+                Divider().overlay(Glass.text3.opacity(0.2))
+                if model.isPairing {
+                    if let code = model.displayedSASCode {
+                        Text("Enter this code on the iPhone")
+                            .font(.mono(10)).foregroundStyle(Glass.text2)
+                        Text(code)
+                            .font(.system(size: 28, weight: .bold, design: .monospaced))
+                            .foregroundStyle(Glass.signal)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                    } else {
+                        Text("Pairing window open — tap the Mac on your iPhone, then enter the code shown here.")
+                            .font(.mono(10)).foregroundStyle(Glass.text2)
+                    }
+                    Button("Cancel pairing") { model.endPairing() }
+                        .buttonStyle(NeutralButtonStyle())
+                } else {
+                    Button { model.beginPairing() } label: {
+                        Label("Pair with a 6-digit code", systemImage: "number")
+                    }
+                    .buttonStyle(NeutralButtonStyle())
+                }
             }
         } else if readyDetails != nil {
             VStack(alignment: .leading, spacing: 4) {

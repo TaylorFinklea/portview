@@ -6,7 +6,16 @@
 
 `main`
 
-## Latest Session (2026-06-19 #3 — SAS pairing v2: commit/reveal redesign, cleared SOUND)
+## Latest Session (2026-06-20 — SAS pairing v2 IMPLEMENTED, build-green, device-verify pending)
+
+- Implemented the design-cleared SAS v2 commit-then-reveal pairing end-to-end, TDD, layer by layer. Reviewed SOUND (native SHIP + glm-5.2 IMPL SOUND). NOT pushed. Decision: decisions.md (2026-06-20 top). Roadmap item now `[x]`. Spec: `docs/superpowers/specs/2026-06-19-sas-pairing-v2-commit-reveal.md`.
+- **Layers**: (1) `PortviewProtocol` — `SASCode` (commit/derive HKDF L=8/randomNonce) + 4 messages tags 20–23 + `MessageType`/`AnyMessage`/`Frame` wiring + **frozen KAT `470719`**. (2) `PortviewTransport` — `SASPreamblePinning` (SEPARATE TOFU type) + `clientCapturingCert` + `connectCapturingCert` + the missing **negative-pin test**. (3) `PortviewHostCore` — `serveSession` first-message role-lock → `serveSASPreamble` (NO clipboard/injector/capture/file; loop refactored to single-iterator while-let) + `SASAttemptLimiter`/`SASPairingControl` (window + window-scoped cap) + `HostRunnerEvent.sasCode` (never logged). (4) host app — pairing window + displayed code, cleared on connect/timeout/stop. (5) client — `beginSASPairing`/`submitSASCode` + `SASPairingSheet` (replaces 64-hex alert) + pinned re-dial with the captured hash.
+- **Security crux preserved** (both reviews verified against real code): host commits its nonce before the client reveals; client commits before the host commits; every reveal verified against its commit (right role+cert) before use → MITM must commit both substituted nonces blind → offline grind dead. TOFU type-isolated from the pinned path; preamble can't reach the streaming surface (no fall-through). 2 LOW polish fixes applied (stale-code-after-window guard; cancel-mid-handshake guard).
+- **glm-5.2**: 4-for-4 5/5 on tool-enabled review this session (design steelman ×2 + impl review). Scorecard updated (2026-06-20).
+- Verify: `swift test` **148**, iOS `xcodebuild test` **43**, macOS BUILD SUCCEEDED.
+- NEXT (human device verify): Mac menu-bar → "Pair with a 6-digit code" → iPhone taps discovered Mac → SAS sheet → type the shown code → connects (pinned); a wrong code refuses. Plus the still-pending device-verify queue (motion fix, M7, magnifier crash landmine). Optional next code phase: HMAC host-confirm (Guardrail E, phase-2).
+
+## Previous Session (2026-06-19 #3 — SAS pairing v2: commit/reveal redesign, cleared SOUND)
 
 - **Authored the SAS v2 redesign** after #2's review returned v1: `docs/superpowers/specs/2026-06-19-sas-pairing-v2-commit-reveal.md` (supersedes v1's construction). Design only — NOT implemented. Decision: decisions.md (2026-06-19, top ADR). Roadmap item now "DESIGN CLEARED, READY TO IMPLEMENT".
 - **The fix**: two-sided ZRTP-style **commit-then-reveal**. Both sides send `commit = SHA256("Portview SAS commit v2"‖role‖H_cert‖nonce)` BEFORE either reveals its 16B CSPRNG nonce; reveals gated on both commits + verified. Forces an active MITM to commit BOTH substituted nonces **blind on both legs** → offline grind dead, residual = intended ~1/10⁶ per human-attended attempt. **Keystone**: binding the cert hash INTO the commit (not just the HKDF salt) makes a forwarded commit fail the other leg's check → forces the MITM to mint its own commit, which the per-leg gate blinds.

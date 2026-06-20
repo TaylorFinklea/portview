@@ -19,6 +19,10 @@ public enum AnyMessage: Equatable, Sendable {
     case audioFrame(AudioFrame)
     case viewport(Viewport)
     case qualityStats(QualityStats)
+    case sasClientCommit(SASClientCommit)
+    case sasHostCommit(SASHostCommit)
+    case sasClientReveal(SASClientReveal)
+    case sasHostReveal(SASHostReveal)
 
     public var messageType: MessageType {
         switch self {
@@ -41,6 +45,10 @@ public enum AnyMessage: Equatable, Sendable {
         case .audioFrame: .audioFrame
         case .viewport: .viewport
         case .qualityStats: .qualityStats
+        case .sasClientCommit: .sasClientCommit
+        case .sasHostCommit: .sasHostCommit
+        case .sasClientReveal: .sasClientReveal
+        case .sasHostReveal: .sasHostReveal
         }
     }
 }

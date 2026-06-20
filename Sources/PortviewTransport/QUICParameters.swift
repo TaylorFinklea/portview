@@ -27,4 +27,14 @@ public enum QUICParameters {
         CertificatePinning.install(on: q.securityProtocolOptions, pinnedCertificateSHA256: pinnedCertificateSHA256)
         return NWParameters(quic: q)
     }
+
+    /// SAS pairing preamble ONLY: accepts any cert and captures its leaf SHA-256 (TOFU). Never use
+    /// this for a streaming session — the captured hash gates trust via the SAS code, after which the
+    /// client re-dials with the pinned `client(pinnedCertificateSHA256:)`. See `SASPreamblePinning`.
+    static func clientCapturingCert() -> (NWParameters, CertificateCapture) {
+        let q = baseOptions()
+        let capture = CertificateCapture()
+        SASPreamblePinning.installCapturing(on: q.securityProtocolOptions, capture: capture)
+        return (NWParameters(quic: q), capture)
+    }
 }

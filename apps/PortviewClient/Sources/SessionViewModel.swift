@@ -15,7 +15,17 @@ final class SessionViewModel: ObservableObject {
         case idle, connecting, streaming, reconnecting, failed(String)
     }
 
+    /// Sub-flow for SAS (6-digit) pairing of a Bonjour-discovered Mac, before the pinned session.
+    enum SASPairingState: Equatable {
+        case connecting          // running the commit/reveal preamble
+        case awaitingCode        // preamble done; waiting for the user to type the code shown on the Mac
+        case mismatch            // typed code didn't match — possible interception
+        case failed(String)      // preamble error
+    }
+
     @Published var status: Status = .idle
+    /// Non-nil while pairing a discovered Mac via the 6-digit SAS code (drives the entry sheet).
+    @Published var sasPairing: SASPairingState?
     /// Latest cursor position reported by the host, normalized to the display (0…1).
     @Published var cursorNormalized = CGPoint(x: 0.5, y: 0.5)
     /// Displays the host offered (from ServerHello) and which one is currently streaming.
@@ -98,6 +108,100 @@ final class SessionViewModel: ObservableObject {
     func reconnect(saved: SavedHost, discovered: [DiscoveredHost]) {
         start(endpoints: saved.reconnectEndpoints(among: discovered),
               pinHex: saved.pinHex, reconnectName: saved.name)
+    }
+
+    // MARK: - SAS (6-digit) pairing
+
+    private var sasDerivedCode: String?
+    private var sasCapturedPinHex: String?
+    private var sasEndpoint: NWEndpoint?
+    private var sasName: String?
+
+    /// Begin SAS pairing for a Bonjour-discovered Mac (no pin typed). Runs the commit-then-reveal
+    /// preamble over an unpinned (TOFU) connection that captures the host's leaf cert, derives the
+    /// 6-digit code, and parks awaiting the user to type the code the Mac displays. On a match we
+    /// re-dial PINNED with the captured hash (so the streaming session is always pin-anchored).
+    func beginSASPairing(to host: DiscoveredHost) {
+        sasPairing = .connecting
+        sasDerivedCode = nil
+        sasCapturedPinHex = nil
+        sasEndpoint = host.endpoint
+        sasName = host.name
+        task?.cancel()
+        task = Task { [weak self] in await self?.runSASPreamble(endpoint: host.endpoint) }
+    }
+
+    private func runSASPreamble(endpoint: NWEndpoint) async {
+        do {
+            let (connection, capturedHash) = try await PortviewConnection.connectCapturingCert(to: endpoint)
+            defer { connection.close() }  // preamble is throwaway; we re-dial pinned after a match
+            let certBytes = [UInt8](capturedHash)
+
+            // Client commits its nonce first (bound to the captured cert + role), before any reveal.
+            let clientNonce = SASCode.randomNonce()
+            let clientCommit = SASCode.commit(nonce: clientNonce, role: .client, certSHA256: certBytes)
+            try await connection.send(.sasClientCommit(SASClientCommit(commit: clientCommit)))
+
+            var inbound = connection.inbound.makeAsyncIterator()
+            guard case .sasHostCommit(let hostCommit)? = await inbound.next() else {
+                failSAS("Pairing failed — no response from the Mac."); return
+            }
+            // Reveal only after the host has committed.
+            try await connection.send(.sasClientReveal(SASClientReveal(nonce: clientNonce)))
+            guard case .sasHostReveal(let hostReveal)? = await inbound.next() else {
+                failSAS("Pairing failed — the Mac didn't complete the exchange."); return
+            }
+            guard SASCode.verify(commitment: hostCommit.commit, nonce: hostReveal.nonce,
+                                 role: .host, certSHA256: certBytes) else {
+                failSAS("Pairing failed — the Mac's response didn't verify."); return
+            }
+
+            let code = SASCode.derive(clientNonce: clientNonce, hostNonce: hostReveal.nonce, certSHA256: certBytes)
+            if Task.isCancelled { return }
+            sasDerivedCode = code
+            sasCapturedPinHex = capturedHash.map { String(format: "%02x", $0) }.joined()
+            sasPairing = .awaitingCode
+        } catch {
+            failSAS("Couldn't reach the Mac to pair.")
+        }
+    }
+
+    /// Set an SAS failure state, but never after the user cancelled (which already cleared the flow —
+    /// a late write would flash the sheet back).
+    private func failSAS(_ message: String) {
+        guard !Task.isCancelled else { return }
+        sasPairing = .failed(message)
+    }
+
+    /// The user typed the code the Mac shows. Match → trust the captured cert → re-dial pinned.
+    /// Mismatch → the captured cert isn't the Mac's (possible interception) → refuse.
+    func submitSASCode(_ typed: String) {
+        let entered = typed.filter(\.isNumber)
+        guard let derived = sasDerivedCode, let pinHex = sasCapturedPinHex, let endpoint = sasEndpoint else {
+            sasPairing = .failed("Pairing expired — start again.")
+            return
+        }
+        guard entered == derived else {
+            sasPairing = .mismatch
+            return
+        }
+        let name = sasName
+        clearSASPairing()
+        start(endpoints: [endpoint], pinHex: pinHex, reconnectName: name)
+    }
+
+    func cancelSASPairing() {
+        task?.cancel()
+        task = nil
+        clearSASPairing()
+    }
+
+    private func clearSASPairing() {
+        sasPairing = nil
+        sasDerivedCode = nil
+        sasCapturedPinHex = nil
+        sasEndpoint = nil
+        sasName = nil
     }
 
     private func start(endpoints: [NWEndpoint], pinHex: String, reconnectName: String?) {

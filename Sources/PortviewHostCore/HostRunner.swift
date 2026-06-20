@@ -40,6 +40,9 @@ public enum HostRunnerEvent: Equatable, Sendable {
     case deviceDisconnected(id: String)
     /// Periodic live-session telemetry for the connected-device card.
     case sessionStats(HostSessionStats)
+    /// The 6-digit SAS pairing code to display on the host HUD (never logged). Cleared by the app on
+    /// connect/timeout/stop.
+    case sasCode(String)
 }
 
 /// A thread-safe registry of active client connections so the host UI can disconnect them without
@@ -113,10 +116,11 @@ public struct HostRunner: Sendable {
 
     public init() {}
 
-    public func events(identity: HostPermissionIdentity, control: HostControl? = nil) -> AsyncStream<HostRunnerEvent> {
+    public func events(identity: HostPermissionIdentity, control: HostControl? = nil,
+                       sasControl: SASPairingControl? = nil) -> AsyncStream<HostRunnerEvent> {
         AsyncStream { continuation in
             let task = Task {
-                await run(identity: identity, control: control) { event in
+                await run(identity: identity, control: control, sasControl: sasControl) { event in
                     continuation.yield(event)
                 }
                 continuation.finish()
@@ -128,6 +132,7 @@ public struct HostRunner: Sendable {
     public func run(
         identity: HostPermissionIdentity,
         control: HostControl? = nil,
+        sasControl: SASPairingControl? = nil,
         onEvent: @escaping @Sendable (HostRunnerEvent) -> Void
     ) async {
         guard CGRequestScreenCaptureAccess() else {
@@ -190,9 +195,11 @@ public struct HostRunner: Sendable {
             }
 
             let sendableDisplays = SendableDisplays(displays)
+            let hostCertBytes = (try? tlsIdentity.certificateSHA256()).map { [UInt8]($0) } ?? []
             await withTaskCancellationHandler {
                 await Self.serveConnections(listener.connections) { connection in
-                    await Self.serve(connection, displays: sendableDisplays, emit: onEvent, control: control)
+                    await Self.serve(connection, displays: sendableDisplays, hostCertSHA256: hostCertBytes,
+                                     emit: onEvent, control: control, sas: sasControl)
                 }
             } onCancel: {
                 listener.cancel()
@@ -309,11 +316,14 @@ public struct HostRunner: Sendable {
     private static func serve(
         _ connection: PortviewConnection,
         displays: SendableDisplays,
+        hostCertSHA256: [UInt8] = [],
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in },
-        control: HostControl? = nil
+        control: HostControl? = nil,
+        sas: SASPairingControl? = nil
     ) async {
         await withTaskCancellationHandler {
-            await serveSession(connection, displays: displays, emit: emit, control: control)
+            await serveSession(connection, displays: displays, hostCertSHA256: hostCertSHA256,
+                               emit: emit, control: control, sas: sas)
         } onCancel: {
             connection.close()
         }
@@ -322,11 +332,26 @@ public struct HostRunner: Sendable {
     private static func serveSession(
         _ connection: PortviewConnection,
         displays: SendableDisplays,
+        hostCertSHA256: [UInt8] = [],
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in },
-        control: HostControl? = nil
+        control: HostControl? = nil,
+        sas: SASPairingControl? = nil
     ) async {
         let displays = displays.values
-        guard let firstDisplay = displays.first else { return }
+        guard let firstDisplay = displays.first else { connection.close(); return }
+
+        // Peek the first message to LOCK this connection's role BEFORE building any session
+        // scaffolding. An SAS-preamble connection (first message = client commit) is UNPINNED (TOFU)
+        // and must never reach the clipboard / input-injector / capture / file path — trust is decided
+        // by the SAS code comparison, after which the client re-dials pinned. (v2 review CRITICAL-3.)
+        var inbound = connection.inbound.makeAsyncIterator()
+        guard let firstMessage = await inbound.next() else { connection.close(); return }
+        if case .sasClientCommit(let commit) = firstMessage {
+            await serveSASPreamble(connection, clientCommit: commit, inbound: &inbound,
+                                   hostCertSHA256: hostCertSHA256, sas: sas, emit: emit)
+            return
+        }
+
         let displayInfos = displays.map {
             DisplayInfo(id: UInt32($0.displayID), name: "Display \($0.displayID)",
                         width: UInt32($0.width), height: UInt32($0.height), scaleX100: 100)
@@ -380,7 +405,8 @@ public struct HostRunner: Sendable {
             print("Streaming display \(display.displayID) source \(display.width)x\(display.height).")
         }
 
-        for await message in connection.inbound {
+        var pendingMessage: AnyMessage? = firstMessage
+        while let message = pendingMessage {
             switch message {
             case .clientHello(let hello):
                 do {
@@ -424,7 +450,42 @@ public struct HostRunner: Sendable {
             default:
                 break
             }
+            pendingMessage = await inbound.next()
         }
+    }
+
+    /// Serve the SAS pairing PREAMBLE on an unpinned connection: two-sided commit-then-reveal, then
+    /// derive + emit the 6-digit code for the host HUD. Builds NONE of the streaming scaffolding
+    /// (no clipboard/injector/capture/file). Only engages while a user-opened pairing window is live;
+    /// each engagement counts against the window-scoped attempt cap. The connection carries only the
+    /// SAS messages and is torn down here; the client compares the code and re-dials pinned.
+    private static func serveSASPreamble(
+        _ connection: PortviewConnection,
+        clientCommit: SASClientCommit,
+        inbound: inout AsyncStream<AnyMessage>.AsyncIterator,
+        hostCertSHA256: [UInt8],
+        sas: SASPairingControl?,
+        emit: @escaping @Sendable (HostRunnerEvent) -> Void
+    ) async {
+        defer { connection.close() }
+        // Gate: only pair during a user-opened window, and cap attempts within it.
+        guard let sas, sas.isOpen() else { return }
+        guard sas.registerAttempt() else { sas.closeWindow(); return }
+
+        // Host: fresh nonce + commit, sent before any reveal.
+        let hostNonce = SASCode.randomNonce()
+        let hostCommit = SASCode.commit(nonce: hostNonce, role: .host, certSHA256: hostCertSHA256)
+        do { try await connection.send(.sasHostCommit(SASHostCommit(commit: hostCommit))) } catch { return }
+
+        // Client reveal must come next; verify it against the client commit before using the nonce.
+        guard let next = await inbound.next(), case .sasClientReveal(let reveal) = next else { return }
+        guard SASCode.verify(commitment: clientCommit.commit, nonce: reveal.nonce,
+                             role: .client, certSHA256: hostCertSHA256) else { return }
+
+        // Reveal the host nonce, then both sides derive the same code; display it for the user.
+        do { try await connection.send(.sasHostReveal(SASHostReveal(nonce: hostNonce))) } catch { return }
+        let code = SASCode.derive(clientNonce: reveal.nonce, hostNonce: hostNonce, certSHA256: hostCertSHA256)
+        emit(.sasCode(code))
     }
 
     /// Build an `InputInjector` whose cursor clamping + reporting are bound to `display`. Cursor reports

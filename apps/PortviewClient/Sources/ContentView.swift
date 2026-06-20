@@ -17,8 +17,6 @@ struct ContentView: View {
     @State private var showManual = false
     @State private var showSettings = false
     @State private var showFileImporter = false
-    @State private var pinPromptHost: DiscoveredHost?
-    @State private var discoveredPin = ""
 
     // Live HUD state (kept here so it survives view switches; passed to LiveHUDView).
     @State private var zoom: CGFloat = 1
@@ -46,16 +44,8 @@ struct ContentView: View {
             .sheet(item: Binding(get: { session.receivedFile }, set: { session.receivedFile = $0 })) { file in
                 ReceivedFileSheet(file: file) { session.receivedFile = nil }
             }
-            .alert("Pair with \(pinPromptHost?.name ?? "Mac")", isPresented: pinPromptPresented) {
-                TextField("Pin (64 hex chars)", text: $discoveredPin)
-                Button("Connect") {
-                    if let host = pinPromptHost { session.connect(to: host, pinHex: discoveredPin) }
-                    pinPromptHost = nil
-                    discoveredPin = ""
-                }
-                Button("Cancel", role: .cancel) { pinPromptHost = nil; discoveredPin = "" }
-            } message: {
-                Text("Enter the pin shown on \(pinPromptHost?.name ?? "the Mac").")
+            .sheet(isPresented: sasPairingPresented) {
+                SASPairingSheet(session: session)
             }
             .onChange(of: session.status) { _, status in
                 // Remember the host on first stream — for ALL paths — using the connection's resolved
@@ -90,8 +80,7 @@ struct ContentView: View {
                     session.reconnect(saved: saved, discovered: discovery.hosts)
                 },
                 onPickDiscovered: { host in
-                    discoveredPin = ""
-                    pinPromptHost = host
+                    session.beginSASPairing(to: host)
                 },
                 onScan: { showScanner = true },
                 onManual: { showManual = true },
@@ -101,8 +90,8 @@ struct ContentView: View {
         }
     }
 
-    private var pinPromptPresented: Binding<Bool> {
-        Binding(get: { pinPromptHost != nil }, set: { if !$0 { pinPromptHost = nil } })
+    private var sasPairingPresented: Binding<Bool> {
+        Binding(get: { session.sasPairing != nil }, set: { if !$0 { session.cancelSASPairing() } })
     }
 
     private var manualConnectSheet: some View {

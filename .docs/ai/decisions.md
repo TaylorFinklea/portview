@@ -2,6 +2,21 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-20] SAS pairing v2 — IMPLEMENTED (build-green, reviewed SOUND, device-verify pending)
+
+**Context**: Implemented the design-cleared SAS v2 commit-then-reveal pairing (spec: `docs/superpowers/specs/2026-06-19-sas-pairing-v2-commit-reveal.md`). TDD, layer by layer.
+
+**What landed**:
+- **Protocol/crypto** (`PortviewProtocol`): `SASCode` (`commit` = `SHA256(tag‖role‖cert‖nonce)`, `derive` = HKDF<SHA256> L=8 %1e6 → 6 digits, `randomNonce`), 4 wire messages tags 20–23 (`SASClientCommit`/`SASHostCommit` 32B, `SASClientReveal`/`SASHostReveal` 16B) wired through `MessageType`/`AnyMessage`/`Frame`. **Frozen KAT** = `470719` for fixed vectors (pins IKM order, raw-byte salt, info string, L=8, big-endian, %06d).
+- **Transport** (`PortviewTransport`): `SASPreamblePinning` — a SEPARATE type from `CertificatePinning` (TOFU capture, `complete(true)`), `QUICParameters.clientCapturingCert`, `PortviewConnection.connectCapturingCert -> (conn, Data)`. Added the previously-missing **negative pin test** (pinned client rejects a mismatched cert).
+- **Host core** (`PortviewHostCore`): `serveSession` peeks the FIRST message and role-locks — `.sasClientCommit` → `serveSASPreamble` (builds NONE of clipboard/injector/capture/file) BEFORE any scaffolding; the streaming loop refactored from `for await` to a single-iterator `while let` (no dropped/double-consumed messages). `SASAttemptLimiter` (pure, injected `now`) + `SASPairingControl` (lock-guarded holder) gate a user-opened window + window-scoped attempt cap. `HostRunnerEvent.sasCode` (never wrapped in `.message`; CLI never logs it).
+- **Host app**: `HostAppModel.beginPairing/endPairing` (window + 120s timeout) + `displayedSASCode`, cleared on connect/timeout/stop; menu-bar "Pair with a 6-digit code" + code display.
+- **Client app**: `SessionViewModel.beginSASPairing/submitSASCode` — runs the preamble over the capturing connection, derives the code, parks awaiting the user's typed code; on match re-dials PINNED with the captured hash (preamble connection torn down first); `SASPairingSheet` numeric entry replacing the 64-hex alert.
+
+**Adversarial review** (security-critical): native deep reviewer (verdict SHIP) + glm-5.2 tool-enabled steelman (verdict IMPL SOUND). Both verified — against the real code — the commit-before-reveal ordering + blind-commit on both legs, verify-before-use, TOFU type-isolation + pinned re-dial, the preamble fence (no fall-through either direction), window gating + window-scoped cap, role+cert binding, and secret hygiene. 2 LOW polish items applied (don't set `displayedSASCode` after the window closed; don't flash the SAS sheet back on a late failure after cancel). See `~/.claude/model-scorecard.md` (2026-06-20).
+
+**Verify**: `swift test` **148** (SASCode 11, SASPreamble 2, SASAttemptLimiter 6), iOS `xcodebuild test` **43**, macOS BUILD SUCCEEDED. NOT pushed. **Device-verify**: on the Mac open the menu-bar item → "Pair with a 6-digit code"; on the iPhone tap the discovered Mac → SAS sheet → type the code the Mac shows → it should connect (pinned). A wrong/mismatched code must refuse. Optional phase-2: HMAC-authenticated host confirmation (Guardrail E) — not implemented (the mandatory window-scoped cap is).
+
 ## [2026-06-19] SAS pairing v2 — commit-then-reveal redesign (design cleared SOUND, ready to implement)
 
 **Context**: The 2026-06-19 security review returned v1 for redesign (active-MITM offline nonce grind). This is the v2 design that fixes it: `docs/superpowers/specs/2026-06-19-sas-pairing-v2-commit-reveal.md` (supersedes the v1 construction).
