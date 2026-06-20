@@ -6,7 +6,16 @@
 
 `main`
 
-## Latest Session (2026-06-19 — motion choppiness on pan/move: three coordinated cuts)
+## Latest Session (2026-06-19 #2 — SAS pairing security review: design returned, broken vs active MITM)
+
+- **Security review of the 6-digit SAS pairing design** (was "awaiting human security review"). Outcome: ❌ **DO NOT IMPLEMENT as specified** — returned to author for redesign. No code changed (design review). Decision: decisions.md (2026-06-19 top); full findings + corrected construction in the spec's new "SECURITY REVIEW OUTCOME (2026-06-19)" section; roadmap Next item updated.
+- **CRITICAL crux (the scheme doesn't bind)**: SAS code = public `f(certHash, n_c‖n_h)`, revealed **client-nonce-first with NO commitment**. Active MITM (cert_M to client, cert_H captured) knows the host's displayed code before sending its last nonce to the client → **grinds ~2²⁰ nonces offline in ~ms** to force the codes equal (limiter never fires — no honest party involved); user transcribes the match; pin re-dial then pins the client TO THE ATTACKER. Spec open-Q#3 ("cert salt dominates") resolves ADVERSELY (active attacker knows both hashes).
+- **Required fix**: two-sided **ZRTP-style commit-then-reveal** (new `sasClientCommit`/`sasHostCommit`; both legs — one-sided lets the MITM pipeline). Then 6 digits = intended 1/1e6 (the bug is ordering, not length; more digits/lockout-alone don't fix it).
+- **+2 CRITICAL impl traps** the test suite wouldn't catch: (a) TOFU `installCapturing` must be type-level-isolated from the pinned path (separate type, not a `Bool` flag; + negative pin test); (b) a separate `serveSASPreamble` — `serveSession` builds clipboard/injector/capture/file scaffolding BEFORE its switch, so an unpinned peer would get the full live surface pre-match. Plus HIGH/MED: CSPRNG fresh nonces, user-initiated pairing window (scopes lockout, kills pre-emption), modular-bias fix, frozen known-answer test, secret hygiene, clean re-dial.
+- **Process**: 4 parallel native adversarial lenses (crypto/MITM/replay-DoS/impl-vs-code) → Opus synthesis → glm-5.2 tool-enabled steelman of the crux (tried to refute, confirmed ATTACK VALID, added the both-legs refinement). glm-5.2 now 2-for-2 5/5 on tool-enabled review (scorecard 2026-06-19). QR full-pin path unaffected + still preferred.
+- NEXT: if the user wants, do the SAS commit/reveal REDESIGN (lead-tier) — author the revised spec, re-review, then implement. Otherwise the still-pending device-verifies (motion fix below, M7, magnifier crash landmine) remain the human-gated queue.
+
+## Previous Session (2026-06-19 — motion choppiness on pan/move: three coordinated cuts)
 
 - Roadmap "Motion choppiness on pan/move" (senior/M) DONE, build-green, **device-verify pending**. Ultracode: Opus 4-slice motion-path diagnosis workflow (gesture→render / cursor-follow / viewport re-crop / input send) → ranked synthesis → TDD impl → glm-5.2 tool-enabled adversarial review (SHIP). Decision: decisions.md (2026-06-19 top).
 - **#1 keyframe decoupling (headline)**: `CaptureEngine.setViewport` forced an HEVC keyframe on EVERY re-crop → ~6.6/s during a pan → `.bufferingNewest(2)` drops the frame behind each → periodic hitch. New pure `CaptureSizing.cropRequiresKeyframe(from:to:)` → keyframe only on an output-SIZE change (zoom rung), not a pure pan. Double-guarded: a real dim change rebuilds the encoder (`HostRunner:478-483`) which sets `needsKeyframe` independently, so no path drops a needed IDR. Zoom-1 + crash landmine untouched.
