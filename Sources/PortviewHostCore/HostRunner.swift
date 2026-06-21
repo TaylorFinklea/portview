@@ -478,7 +478,8 @@ public struct HostRunner: Sendable {
     /// (no clipboard/injector/capture/file). Only engages while a user-opened pairing window is live;
     /// each engagement counts against the window-scoped attempt cap. The connection carries only the
     /// SAS messages and is torn down here; the client compares the code and re-dials pinned.
-    private static func serveSASPreamble(
+    /// `internal` (not `private`) so the loopback integration test can drive it directly.
+    static func serveSASPreamble(
         _ connection: PortviewConnection,
         clientCommit: SASClientCommit,
         inbound: inout AsyncStream<AnyMessage>.AsyncIterator,

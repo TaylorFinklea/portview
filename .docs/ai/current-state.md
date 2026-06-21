@@ -6,6 +6,12 @@
 
 `main`
 
+## Latest Session (2026-06-21 #2 — host-side SAS preamble integration test)
+
+- Closed the last SAS test-coverage gap: `SASPreambleIntegrationTests` drives a real client commit→reveal→confirm over a loopback QUIC connection against the real `serveSASPreamble` (visibility `private`→`internal` so the test can call it; mirrors the production peek→dispatch, tolerates QUIC double-delivery). 3 cases: happy path (`.sasCode(matching)` + `.sasConfirmed`, captured cert == host cert), forged confirm (code but NO `.sasConfirmed`), closed window (nothing served). Build-green; not pushed. Roadmap follow-up (a) `[x]`.
+- Verify: `swift test` **158** (+3). Only remaining SAS follow-up: per-source preamble rate-limit (deferred, gated on fuzzy QUIC endpoint).
+- NEXT: human device-verify queue (SAS core + E, motion fix, M7, magnifier crash landmine) — all build-green awaiting Roshar.
+
 ## Latest Session (2026-06-21 — SAS Guardrail C: bound the connection accept loop)
 
 - Hardened `HostRunner.serveConnections` from an UNBOUNDED `withTaskGroup` to a capped one (`maxConcurrentConnections = 16`, backpressure via `await group.next()` before adding). Bounds a connection flood / many ~25s-lingering SAS preamble tasks (the surface E made more pressing). Build-green; not pushed. Decision: decisions.md (2026-06-21 top). Roadmap SAS follow-up (b) `[x]`.
