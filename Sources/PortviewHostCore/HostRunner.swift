@@ -302,14 +302,29 @@ public struct HostRunner: Sendable {
         .accessibilityWarning(Self.accessibilityHelp(for: identity))
     }
 
+    /// Default ceiling on concurrently-served connections. A legit host serves one streaming client
+    /// plus a few transient SAS preambles; this caps a connection flood (Guardrail C). Each accepted
+    /// connection still spawns a task that reads its first message before doing anything, and a SAS
+    /// preamble now lingers ~25s awaiting its confirm — so an UNBOUNDED group let an attacker hold
+    /// arbitrarily many tasks. With the cap, excess connections apply backpressure (queue) instead.
+    static let maxConcurrentConnections = 16
+
     static func serveConnections<Connection: Sendable>(
         _ connections: AsyncStream<Connection>,
+        maxConcurrent: Int = maxConcurrentConnections,
         serve: @escaping @Sendable (Connection) async -> Void
     ) async {
         await withTaskGroup(of: Void.self) { group in
+            var running = 0
             for await connection in connections {
                 if Task.isCancelled { break }
+                // Hold at most `maxConcurrent` serve tasks in flight; wait for a slot before adding more.
+                if running >= maxConcurrent {
+                    await group.next()
+                    running -= 1
+                }
                 group.addTask { await serve(connection) }
+                running += 1
             }
             group.cancelAll()
         }

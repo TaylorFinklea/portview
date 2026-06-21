@@ -6,6 +6,14 @@
 
 `main`
 
+## Latest Session (2026-06-21 — SAS Guardrail C: bound the connection accept loop)
+
+- Hardened `HostRunner.serveConnections` from an UNBOUNDED `withTaskGroup` to a capped one (`maxConcurrentConnections = 16`, backpressure via `await group.next()` before adding). Bounds a connection flood / many ~25s-lingering SAS preamble tasks (the surface E made more pressing). Build-green; not pushed. Decision: decisions.md (2026-06-21 top). Roadmap SAS follow-up (b) `[x]`.
+- Reviewed SHIP (native): cap accounting correct (no off-by-one), liveness preserved (no drops), no deadlock/starvation, clean cancellation; tests aren't flaky.
+- Tests: `ServeConnectionsTests` (peak ≤ cap + all-served; strict-serial at cap 1). Verify: `swift test` **155**, macOS host BUILD SUCCEEDED.
+- Deferred (roadmap, non-blocking): host-side `serveSASPreamble` integration test; per-source preamble rate-limit.
+- NEXT: the standing human device-verify queue (SAS core + Guardrail E, motion fix, M7, magnifier crash landmine) — all build-green awaiting Roshar.
+
 ## Latest Session (2026-06-20 #2 — SAS Guardrail E (HMAC host-confirm) IMPLEMENTED, ultracode arc)
 
 - Built SAS Guardrail E (phase-2 defense-in-depth: authenticated host "✓ a client confirmed" signal). Build-green, device-verify pending. NOT pushed. Decision: decisions.md (2026-06-20 top). Roadmap SAS item sub-checkbox `[x]`. Spec: the "E (detailed design)" + "E — design-review RESOLUTIONS" sections of `docs/superpowers/specs/2026-06-19-sas-pairing-v2-commit-reveal.md`.

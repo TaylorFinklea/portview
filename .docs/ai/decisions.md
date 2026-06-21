@@ -2,6 +2,16 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-21] SAS Guardrail C — bound the connection accept loop (DoS hardening)
+
+**Context**: `HostRunner.serveConnections` served every accepted connection in an UNBOUNDED `withTaskGroup` (one child task per connection). Flagged by the SAS reviews: a connection flood — or many SAS preambles, which now linger ~25s awaiting their Guardrail-E confirm — could spawn arbitrarily many tasks, each holding up to QUIC idle (30s) on a silent connection. Pre-existing, made more pressing by E.
+
+**Decision**: Cap concurrently-served connections at `maxConcurrentConnections = 16` with backpressure — when `running >= maxConcurrent`, `await group.next()` reaps a finished task (freeing a slot) before adding the next, so in-flight tasks never exceed the cap and excess connections QUEUE rather than spawn unbounded tasks. Generic `serveConnections` kept testable; the production call site uses the default. 16 comfortably exceeds the legit working set (1 streaming client + transient preambles + QUIC's dead double-delivery connection) and a held slot self-frees in ≤25s (the confirm timeout) so the cap can't be permanently exhausted by slow holds. Per-source rate-limiting deferred (needs the QUIC/NAT-fuzzy resolved endpoint).
+
+**Review**: native adversarial review — SHIP. Verified cap accounting (no off-by-one), liveness (every connection served, no drops), no deadlock/starvation (`group.next()` returns as tasks terminate; SAS path bounded by the 25s timeout), clean cancellation, and that the tests assert peak≤cap + all-served (not flaky — monotonic actor counters).
+
+**Verify**: `swift test` **155** (new `ServeConnectionsTests`: cap-not-exceeded + strict-serialize-at-1); macOS host BUILD SUCCEEDED. NOT pushed.
+
 ## [2026-06-20] SAS Guardrail E — HMAC host-confirmation IMPLEMENTED (build-green, reviewed, device-verify pending)
 
 **Context**: Phase-2 defense-in-depth on SAS v2 (the user asked for it, ultracode-style). E gives the host a positive, authenticated "✓ a client confirmed" signal after the user-typed code matches — it must NOT weaken the verified v2 commitment and must stay purely additive.
