@@ -6,6 +6,17 @@
 
 `main`
 
+## Latest Session (2026-06-20 #2 — SAS Guardrail E (HMAC host-confirm) IMPLEMENTED, ultracode arc)
+
+- Built SAS Guardrail E (phase-2 defense-in-depth: authenticated host "✓ a client confirmed" signal). Build-green, device-verify pending. NOT pushed. Decision: decisions.md (2026-06-20 top). Roadmap SAS item sub-checkbox `[x]`. Spec: the "E (detailed design)" + "E — design-review RESOLUTIONS" sections of `docs/superpowers/specs/2026-06-19-sas-pairing-v2-commit-reveal.md`.
+- **Full ultracode arc**: Opus designed E → 4-lens design-review **workflow** (crypto/MITM/lockout-DoS/impl-fit) → verdict **SOUND-WITH-FIXES, weakensV2=false**, 6 must-fixes (all caught pre-implementation from the real code) → folded into the spec → TDD implement → dual impl review (native + glm-5.2, both **SHIP-WITH-FIXES**), 2 LOW test-fixes applied.
+- **The build**: `SASClientConfirm` msg (tag 24); `SASCode.confirmation` = HMAC over an HKDF-derived, domain-separated key + constant-time `verifyConfirmation` + frozen KAT (`4338ee3c…`); host `serveSASPreamble` reads EXACTLY ONE bounded confirm (25s timeout Task closes the conn so `inbound.next()` can't hang) → `.sasConfirmed` (positive signal only, NEVER closes the shared window — kills the relayed-confirm DoS); attempt counting stays at engagement start; client HOLDS the preamble connection through typing, sends the confirm on match via a detached task, with ONE `teardownSAS` chokepoint closing+zeroing on all 5 exits.
+- **Doesn't weaken v2** (both reviews verified vs real code): purely additive — confirm-less client still pairs via the pinned re-dial; host never gates the session on a confirm; CRITICAL-3 preamble fence intact; a forged confirm is inert + can't suppress the cap.
+- Deferred → roadmap: host-side `serveSASPreamble` integration test; Guardrail C concurrent-preamble cap (pre-existing unbounded `serveConnections`).
+- **glm-5.2**: 5-for-5 5/5 on tool-enabled review this session (now incl. the E design-review workflow lens contributions + the E impl cross-check). Scorecard updated (2026-06-20 #2).
+- Verify: `swift test` **153**, iOS `xcodebuild test` **43**, macOS BUILD SUCCEEDED.
+- NEXT (human device verify): pair via the 6-digit code → the Mac briefly shows "✓ a client confirmed" as the phone connects. Plus the standing device-verify queue (SAS core, motion fix, M7, magnifier crash landmine).
+
 ## Latest Session (2026-06-20 — SAS pairing v2 IMPLEMENTED, build-green, device-verify pending)
 
 - Implemented the design-cleared SAS v2 commit-then-reveal pairing end-to-end, TDD, layer by layer. Reviewed SOUND (native SHIP + glm-5.2 IMPL SOUND). NOT pushed. Decision: decisions.md (2026-06-20 top). Roadmap item now `[x]`. Spec: `docs/superpowers/specs/2026-06-19-sas-pairing-v2-commit-reveal.md`.

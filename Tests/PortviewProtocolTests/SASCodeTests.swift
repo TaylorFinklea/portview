@@ -82,6 +82,47 @@ import Testing
         #expect(a != b)  // overwhelmingly likely; guards a constant/empty-nonce regression
     }
 
+    // MARK: confirmation MAC (Guardrail E)
+
+    @Test func confirmationIsDeterministicAndVerifies() {
+        let mac = SASCode.confirmation(clientNonce: clientNonce, hostNonce: hostNonce, certSHA256: certA)
+        #expect(mac.count == 32)
+        #expect(SASCode.confirmation(clientNonce: clientNonce, hostNonce: hostNonce, certSHA256: certA) == mac)
+        #expect(SASCode.verifyConfirmation(mac, clientNonce: clientNonce, hostNonce: hostNonce, certSHA256: certA))
+    }
+
+    @Test func confirmationKnownAnswerVector() {
+        // Frozen contract for the confirm MAC (key IKM n_c‖n_h, raw-byte cert salt, info + message).
+        let mac = SASCode.confirmation(clientNonce: clientNonce, hostNonce: hostNonce, certSHA256: certA)
+        #expect(mac.map { String(format: "%02x", $0) }.joined() == "4338ee3cfcb3f4e2172e993e106d9a2ba7b06c92a526d3cefd77848ee19241a1")
+    }
+
+    @Test func confirmationBindsCertAndNonces() {
+        let base = SASCode.confirmation(clientNonce: clientNonce, hostNonce: hostNonce, certSHA256: certA)
+        #expect(base != SASCode.confirmation(clientNonce: clientNonce, hostNonce: hostNonce, certSHA256: certB))
+        var cn = clientNonce; cn[0] ^= 0x01
+        #expect(base != SASCode.confirmation(clientNonce: cn, hostNonce: hostNonce, certSHA256: certA))
+        var hn = hostNonce; hn[0] ^= 0x01
+        #expect(base != SASCode.confirmation(clientNonce: clientNonce, hostNonce: hn, certSHA256: certA))
+    }
+
+    @Test func verifyRejectsLastByteFlipAndCrossAttemptReplay() {
+        var mac = SASCode.confirmation(clientNonce: clientNonce, hostNonce: hostNonce, certSHA256: certA)
+        mac[mac.count - 1] ^= 0x01  // flip the last byte (catches a non-constant-time short-circuit)
+        #expect(!SASCode.verifyConfirmation(mac, clientNonce: clientNonce, hostNonce: hostNonce, certSHA256: certA))
+        // A MAC from attempt A must fail under attempt B's host nonce (fresh nonces are load-bearing).
+        let macA = SASCode.confirmation(clientNonce: clientNonce, hostNonce: hostNonce, certSHA256: certA)
+        let hostNonceB = Array<UInt8>(32..<48)
+        #expect(!SASCode.verifyConfirmation(macA, clientNonce: clientNonce, hostNonce: hostNonceB, certSHA256: certA))
+    }
+
+    @Test func confirmInfoStringDiffersFromCommitAndDerive() {
+        // Domain separation guard: all three SAS domain strings must differ (commit hash, code HKDF
+        // info, confirm-key HKDF info) so keys/tags can't collide across the sub-protocols.
+        let tags = Set([SASCode.commitTag, SASCode.deriveInfo, SASCode.confirmInfo])
+        #expect(tags.count == 3)
+    }
+
     // MARK: wire round-trips (tags 20–23)
 
     @Test func sasMessagesRoundTripThroughFrame() throws {
@@ -92,6 +133,7 @@ import Testing
             .sasHostCommit(SASHostCommit(commit: commit)),
             .sasClientReveal(SASClientReveal(nonce: nonce)),
             .sasHostReveal(SASHostReveal(nonce: nonce)),
+            .sasClientConfirm(SASClientConfirm(mac: commit)),
         ]
         for any in messages {
             #expect(try Frame.decode(Frame.encodeAny(any)) == any)
@@ -103,7 +145,9 @@ import Testing
         #expect(SASHostCommit.messageType == .sasHostCommit)
         #expect(SASClientReveal.messageType == .sasClientReveal)
         #expect(SASHostReveal.messageType == .sasHostReveal)
+        #expect(SASClientConfirm.messageType == .sasClientConfirm)
         #expect(MessageType.sasClientCommit.rawValue == 20)
         #expect(MessageType.sasHostReveal.rawValue == 23)
+        #expect(MessageType.sasClientConfirm.rawValue == 24)
     }
 }

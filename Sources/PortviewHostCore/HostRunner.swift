@@ -43,6 +43,10 @@ public enum HostRunnerEvent: Equatable, Sendable {
     /// The 6-digit SAS pairing code to display on the host HUD (never logged). Cleared by the app on
     /// connect/timeout/stop.
     case sasCode(String)
+    /// A client sent a valid authenticated pairing confirmation (Guardrail E). A positive "✓ a client
+    /// confirmed" signal only — it must NOT close the (single, shared) pairing window; the window
+    /// closes via the pinned re-dial's `.deviceConnected`, the app timeout, the cap, or stop.
+    case sasConfirmed
 }
 
 /// A thread-safe registry of active client connections so the host UI can disconnect them without
@@ -486,6 +490,21 @@ public struct HostRunner: Sendable {
         do { try await connection.send(.sasHostReveal(SASHostReveal(nonce: hostNonce))) } catch { return }
         let code = SASCode.derive(clientNonce: reveal.nonce, hostNonce: hostNonce, certSHA256: hostCertSHA256)
         emit(.sasCode(code))
+
+        // Guardrail E (optional, best-effort): read EXACTLY ONE more message — the client's
+        // authenticated confirmation that the user matched. Bounded by a timeout task that closes the
+        // connection (so `inbound.next()` can't hang on a silent-but-connected peer); the timeout is
+        // under the QUIC idle (30s) so the held connection is realistically still alive. A valid
+        // confirm emits `.sasConfirmed` (a positive signal only — it does NOT close the window); any
+        // other outcome (timeout / wrong mac / disconnect / other message) emits nothing. The attempt
+        // was already counted at engagement start, so a forged confirm can't affect the cap/lockout.
+        let confirmTimeout = Task { try? await Task.sleep(for: .seconds(25)); connection.close() }
+        defer { confirmTimeout.cancel() }
+        guard case .sasClientConfirm(let confirm)? = await inbound.next() else { return }
+        if SASCode.verifyConfirmation(confirm.mac, clientNonce: reveal.nonce, hostNonce: hostNonce,
+                                      certSHA256: hostCertSHA256) {
+            emit(.sasConfirmed)
+        }
     }
 
     /// Build an `InputInjector` whose cursor clamping + reporting are bound to `display`. Cursor reports

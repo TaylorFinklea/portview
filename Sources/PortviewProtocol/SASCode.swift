@@ -13,6 +13,9 @@ public enum SASCode {
     static let commitTag = "Portview SAS commit v2"
     /// HKDF `info` / version tag for the final code derivation (bump to roll the construction).
     static let deriveInfo = "Portview SAS v2"
+    /// HKDF `info` for the Guardrail-E confirmation key — DISTINCT from `deriveInfo`/`commitTag` so the
+    /// confirm key is domain-separated from the code derivation (no cross-protocol key reuse).
+    static let confirmInfo = "Portview SAS confirm v2"
     /// Nonce length in bytes (128-bit; hides under a 2^128 commitment preimage).
     public static let nonceLength = 16
 
@@ -53,6 +56,29 @@ public enum SASCode {
         var value: UInt64 = 0
         for b in bytes { value = (value << 8) | UInt64(b) }  // big-endian
         return String(format: "%06d", Int(value % 1_000_000))
+    }
+
+    /// Optional (Guardrail E) authenticated confirmation the client sends the host AFTER the user-typed
+    /// code matched, so the host gets a positive "✓ a client confirmed" signal. The key is HKDF-derived
+    /// with a DISTINCT info from `derive` (structural domain separation — no cross-protocol key reuse),
+    /// then HMACs a fixed message. Both sides compute it from values they already hold; the host must
+    /// verify it constant-time (`verifyConfirmation`), never with `==`.
+    public static func confirmation(clientNonce: [UInt8], hostNonce: [UInt8], certSHA256: [UInt8]) -> [UInt8] {
+        Array(HMAC<SHA256>.authenticationCode(for: Data("confirm".utf8), using: confirmKey(clientNonce, hostNonce, certSHA256)))
+    }
+
+    /// Constant-time check that `mac` is a valid confirmation for these nonces + cert.
+    public static func verifyConfirmation(_ mac: [UInt8], clientNonce: [UInt8], hostNonce: [UInt8], certSHA256: [UInt8]) -> Bool {
+        HMAC<SHA256>.isValidAuthenticationCode(Data(mac), authenticating: Data("confirm".utf8),
+                                               using: confirmKey(clientNonce, hostNonce, certSHA256))
+    }
+
+    private static func confirmKey(_ clientNonce: [UInt8], _ hostNonce: [UInt8], _ certSHA256: [UInt8]) -> SymmetricKey {
+        HKDF<SHA256>.deriveKey(
+            inputKeyMaterial: SymmetricKey(data: clientNonce + hostNonce),
+            salt: Data(certSHA256),
+            info: Data(confirmInfo.utf8),
+            outputByteCount: 32)
     }
 
     /// A fresh CSPRNG nonce (`SystemRandomNumberGenerator` is CSPRNG-backed on Apple platforms).

@@ -116,15 +116,19 @@ final class SessionViewModel: ObservableObject {
     private var sasCapturedPinHex: String?
     private var sasEndpoint: NWEndpoint?
     private var sasName: String?
+    /// The preamble connection is HELD open across the user-typing phase so the client can send an
+    /// authenticated `SASClientConfirm` (Guardrail E) on the same peer. Torn down via `teardownSAS`.
+    private var sasConnection: PortviewConnection?
+    /// The secret needed to compute the confirm MAC (zeroed by `teardownSAS`).
+    private var sasSecret: (clientNonce: [UInt8], hostNonce: [UInt8], cert: [UInt8])?
 
     /// Begin SAS pairing for a Bonjour-discovered Mac (no pin typed). Runs the commit-then-reveal
     /// preamble over an unpinned (TOFU) connection that captures the host's leaf cert, derives the
     /// 6-digit code, and parks awaiting the user to type the code the Mac displays. On a match we
     /// re-dial PINNED with the captured hash (so the streaming session is always pin-anchored).
     func beginSASPairing(to host: DiscoveredHost) {
+        teardownSAS()
         sasPairing = .connecting
-        sasDerivedCode = nil
-        sasCapturedPinHex = nil
         sasEndpoint = host.endpoint
         sasName = host.name
         task?.cancel()
@@ -132,11 +136,16 @@ final class SessionViewModel: ObservableObject {
     }
 
     private func runSASPreamble(endpoint: NWEndpoint) async {
+        let connection: PortviewConnection
+        let capturedHash: Data
         do {
-            let (connection, capturedHash) = try await PortviewConnection.connectCapturingCert(to: endpoint)
-            defer { connection.close() }  // preamble is throwaway; we re-dial pinned after a match
+            (connection, capturedHash) = try await PortviewConnection.connectCapturingCert(to: endpoint)
+        } catch {
+            failSAS("Couldn't reach the Mac to pair."); return
+        }
+        sasConnection = connection  // stored now so teardownSAS owns its close on every exit
+        do {
             let certBytes = [UInt8](capturedHash)
-
             // Client commits its nonce first (bound to the captured cert + role), before any reveal.
             let clientNonce = SASCode.randomNonce()
             let clientCommit = SASCode.commit(nonce: clientNonce, role: .client, certSHA256: certBytes)
@@ -157,47 +166,67 @@ final class SessionViewModel: ObservableObject {
             }
 
             let code = SASCode.derive(clientNonce: clientNonce, hostNonce: hostReveal.nonce, certSHA256: certBytes)
-            if Task.isCancelled { return }
+            if Task.isCancelled { return }  // cancelSASPairing already tore the connection down
             sasDerivedCode = code
             sasCapturedPinHex = capturedHash.map { String(format: "%02x", $0) }.joined()
-            sasPairing = .awaitingCode
+            sasSecret = (clientNonce, hostReveal.nonce, certBytes)
+            sasPairing = .awaitingCode  // connection stays open for the confirm
         } catch {
             failSAS("Couldn't reach the Mac to pair.")
         }
     }
 
-    /// Set an SAS failure state, but never after the user cancelled (which already cleared the flow —
-    /// a late write would flash the sheet back).
+    /// Set an SAS failure state, but never after the user cancelled (which already tore the flow down —
+    /// a late write would flash the sheet back). Also releases the held connection.
     private func failSAS(_ message: String) {
         guard !Task.isCancelled else { return }
+        teardownSAS()
         sasPairing = .failed(message)
     }
 
-    /// The user typed the code the Mac shows. Match → trust the captured cert → re-dial pinned.
-    /// Mismatch → the captured cert isn't the Mac's (possible interception) → refuse.
+    /// The user typed the code the Mac shows. Match → trust the captured cert → send the confirm on the
+    /// held preamble connection, then re-dial PINNED. Mismatch → the captured cert isn't the Mac's
+    /// (possible interception) → refuse.
     func submitSASCode(_ typed: String) {
         let entered = typed.filter(\.isNumber)
         guard let derived = sasDerivedCode, let pinHex = sasCapturedPinHex, let endpoint = sasEndpoint else {
-            sasPairing = .failed("Pairing expired — start again.")
+            failSAS("Pairing expired — start again.")
             return
         }
         guard entered == derived else {
+            teardownSAS()
             sasPairing = .mismatch
             return
         }
+        // Match. Capture what we need locally, clear stored state WITHOUT closing (we hold `conn`), then
+        // best-effort send the confirm + close on a detached task, then re-dial pinned. Doing the send
+        // off the VM's `task` means `start()`'s `task?.cancel()` can't race the in-flight confirm.
         let name = sasName
-        clearSASPairing()
+        let conn = sasConnection
+        let secret = sasSecret
+        teardownSAS(closeConnection: false)
+        sasPairing = nil
+        if let conn, let secret {
+            let mac = SASCode.confirmation(clientNonce: secret.clientNonce, hostNonce: secret.hostNonce, certSHA256: secret.cert)
+            Task { try? await conn.send(.sasClientConfirm(SASClientConfirm(mac: mac))); conn.close() }
+        }
         start(endpoints: [endpoint], pinHex: pinHex, reconnectName: name)
     }
 
     func cancelSASPairing() {
         task?.cancel()
         task = nil
-        clearSASPairing()
+        teardownSAS()
+        sasPairing = nil
     }
 
-    private func clearSASPairing() {
-        sasPairing = nil
+    /// The single teardown chokepoint for SAS state: close (unless we hand the connection off) + nil the
+    /// held connection, zero the secret, and clear the derived code / pin / endpoint / name. Does NOT
+    /// touch `sasPairing` — callers set the terminal UI state (.mismatch/.failed/nil) themselves.
+    private func teardownSAS(closeConnection: Bool = true) {
+        if closeConnection { sasConnection?.close() }
+        sasConnection = nil
+        sasSecret = nil
         sasDerivedCode = nil
         sasCapturedPinHex = nil
         sasEndpoint = nil

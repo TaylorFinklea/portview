@@ -2,6 +2,20 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-20] SAS Guardrail E — HMAC host-confirmation IMPLEMENTED (build-green, reviewed, device-verify pending)
+
+**Context**: Phase-2 defense-in-depth on SAS v2 (the user asked for it, ultracode-style). E gives the host a positive, authenticated "✓ a client confirmed" signal after the user-typed code matches — it must NOT weaken the verified v2 commitment and must stay purely additive.
+
+**Process (full ultracode arc)**: Opus authored a concrete E design → a 4-lens design-review **workflow** (crypto / MITM-interaction / lockout-DoS / impl-fit) returned **SOUND-WITH-FIXES, weakensV2=false** with 6 must-fixes → folded all 6 into the spec's "E — design-review RESOLUTIONS" section → implemented TDD → dual impl review (native **SHIP-WITH-FIXES** + glm-5.2 **SHIP-WITH-FIXES**), both fixes applied.
+
+**The 6 design-review fixes that shaped the build** (each caught from the real code, pre-implementation): (1) `.sasConfirmed` must NOT close the SINGLE shared pairing window (the "per-user window" premise was false → a relayed confirm would be a remote window-close DoS); it sets a transient `clientConfirmed` flag only, window still closes via `.deviceConnected`/timeout/cap/stop. (2) confirm-await timeout **25 s < 30 s** QUIC idle (the held connection is realistically alive). (3) read EXACTLY ONE post-reveal message, bounded by a timeout `Task` that `connection.close()`s (→ `inbound.next()` returns nil, can't hang) — a sound substitute for the spec's task-group race; `defer`-close on all branches; no retry loop against the live secret. (4) attempt counting stays at engagement start, so a forged confirm can't suppress the cap (the v1 "suppresses lockout" wording was wrong). (5) exact MAC: `confirmKey = HKDF<SHA256>(ikm: n_c‖n_h, salt: cert, info: "Portview SAS confirm v2", 32)`, `confirmation = HMAC<SHA256>(key: confirmKey, "confirm")`; verify via `HMAC.isValidAuthenticationCode` (constant-time, never `==`); structural domain separation; frozen KAT. (6) ONE client teardown chokepoint (`teardownSAS`) closing+zeroing on all five exits; `submitSASCode` match = capture conn+secret locally → teardown without closing → best-effort confirm send + close on a DETACHED task → `start()` (so `start()`'s `task?.cancel()` can't race the in-flight confirm).
+
+**Why E doesn't weaken v2** (both reviews verified against real code): purely additive — a confirm-less client still pairs via the pinned re-dial; the host never gates the session on a confirm (`.sasConfirmed` is a flag only); the held preamble connection still builds no clipboard/injector/capture/file (CRITICAL-3 fence intact); a MITM forging a confirm to the host yields only an inert "✓ confirmed" with no device session and can't suppress the cap (counted at engagement start). The MITM defense remains the commitment, which E doesn't touch.
+
+**Deferred (roadmap follow-ups, both pre-existing / non-blocking)**: a host-side integration test driving `serveSASPreamble`'s confirm round-trip + bounded-await (needs a seam into the private/permission-gated host loop); Guardrail C's concurrent-preamble cap (`serveConnections` is unbounded — E lengthens each preamble task's life, mildly amplifying it).
+
+**Verify**: `swift test` **153** (SASCode 16: +confirmation KAT/binding/last-byte/cross-replay/domain-sep), iOS **43**, macOS BUILD SUCCEEDED. NOT pushed. **Device-verify**: pair via the 6-digit code → the Mac should briefly show "✓ a client confirmed" as the phone connects. New wire message `SASClientConfirm` tag 24.
+
 ## [2026-06-20] SAS pairing v2 — IMPLEMENTED (build-green, reviewed SOUND, device-verify pending)
 
 **Context**: Implemented the design-cleared SAS v2 commit-then-reveal pairing (spec: `docs/superpowers/specs/2026-06-19-sas-pairing-v2-commit-reveal.md`). TDD, layer by layer.

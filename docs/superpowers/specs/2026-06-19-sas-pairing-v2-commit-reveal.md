@@ -138,6 +138,112 @@ visible "codes didn't match — possible interception" failures**. That is the s
 (the human is the rate-limiter) and is acceptable for attended pairing. Promote E to REQUIRED before
 any *unattended/auto-display* pairing mode, which removes the human limiter.
 
+### E (detailed design, 2026-06-20) — what gets built
+
+**Goal**: give the host a POSITIVE, authenticated "the user matched on the client" signal, so it can
+show "✓ paired" and close the pairing window cleanly, and so an attended success is distinguishable
+from an abandoned/failed attempt. It is defense-in-depth layered on the commitment (the real fix) and
+the mandatory window cap (the hard ceiling) — it must not become the security story and must not
+weaken v2.
+
+**Wire addition**: one message, `SASClientConfirm { mac: 32B }` (tag 24), sent client→host on the
+preamble connection AFTER the user-typed code matches the client's derived code, BEFORE the pinned
+re-dial.
+
+**MAC**: `confirmation = HMAC-SHA256(key: SymmetricKey(data: clientNonce ‖ hostNonce ‖ certSHA256),
+message: Data("Portview SAS confirm v2".utf8))` → 32 bytes. Pure, in `SASCode.confirmation(...)`;
+both sides compute it from values they already hold. Host compares **constant-time**
+(`HMAC.isValidAuthenticationCode` or a constant-time byte compare) — never `==`.
+
+**Host flow** (`serveSASPreamble`, after sending `hostReveal` + `emit(.sasCode)`): await ONE more
+message with a bounded timeout (`confirmTimeout`, ≤ the pairing window, e.g. 60 s).
+- `.sasClientConfirm(mac)` AND constant-time-equal to the expected → `emit(.sasConfirmed)`; the host
+  marks success and closes the window. (The pinned session arrives separately as today.)
+- timeout / wrong mac / other message / disconnect → no confirmation; just return (the attempt was
+  already counted by `registerAttempt` at engagement start — the cap is unchanged). The window stays
+  open for further attempts until the cap closes it.
+
+**Client lifecycle change (the wrinkle to review)**: today `runSASPreamble` closes the preamble
+connection (`defer`) right after deriving, then parks awaiting user input. To send an authenticated
+confirm on the SAME peer, the client must instead KEEP the preamble connection open across the
+user-typing phase: store it + the (clientNonce, hostNonce, certSHA256) needed for the confirm; on
+`submitSASCode` match, send `SASClientConfirm`, THEN close the preamble connection, THEN re-dial
+pinned. `cancelSASPairing` / `failSAS` / a derive failure all close the stored connection. If QUIC's
+30 s idle timeout drops the held connection before the user types, the confirm send simply fails
+(caught) and the pinned re-dial still proceeds — the confirm is best-effort.
+
+**Security notes to verify (DESIGN-REVIEW THESE)**:
+- The confirm proves "the preamble peer reports a user match" (authenticated to that peer via the
+  shared secret); it does NOT, by itself, prove a human approved — the client only SENDS it on match,
+  so it is the client's attestation. Confirm this adds no new trust the streaming pin doesn't already
+  carry.
+- **MITM interaction**: an active MITM that relayed the H-leg knows (n_c', n_h, cert_H) and can forge
+  a valid confirm to H, making H believe it paired (suppressing H's lockout) even though the client
+  aborted on the code mismatch. Verify this is benign: H "paired" with no client session is inert (no
+  device connects), and E's lockout is defense-in-depth that the commitment doesn't depend on — so
+  suppressing it does NOT yield a MITM. Confirm there is no worse consequence (e.g. H closing the
+  window could DoS a concurrent legit user — but the window is per-user/attended, so assess).
+- **No downgrade**: E is additive; a client that never sends a confirm (core-only peer) still pairs
+  via the pinned re-dial exactly as today. The host must NOT require a confirm to allow the pinned
+  session (that would break interop + add a DoS).
+- **Secret hygiene**: the confirm MAC and the HMAC key (nonces+cert) are never logged; `.sasConfirmed`
+  is its own event, never wrapped in `.message`.
+
+**Tests (TDD)**: `SASCode.confirmation` determinism + cert/nonce binding (different cert/nonce →
+different MAC) + a frozen known-answer vector; round-trip for tag 24; a host-side constant-time verify
+accept/reject; client lifecycle (connection held until submit, closed on match/cancel/fail).
+
+### E — design-review RESOLUTIONS (2026-06-20, gating implementation; verdict SOUND-WITH-FIXES, weakensV2=false)
+
+1. **No window-close on confirm (removes the relayed-confirm DoS).** There is ONE global
+   `SASPairingControl` + one `displayedSASCode`; the earlier "per-user/attended window" premise was
+   false. So `.sasConfirmed` must NOT call `endPairing()`. The host's `serveSASPreamble` emits
+   `.sasConfirmed` on a valid confirm; `HostAppModel` surfaces a TRANSIENT "✓ a client confirmed"
+   (e.g. a timestamp/flag) and leaves the window to close via the existing paths only
+   (`.deviceConnected` from the pinned re-dial, the app timeout, the cap, or stop). A confirm from any
+   peer therefore cannot close the shared window.
+2. **`confirmTimeout` < QUIC idle.** `baseOptions().idleTimeout` is 30 s (shared, no keepalive), so a
+   held preamble connection dies ~30 s after the last traffic. Set the host confirm-await timeout to
+   **25 s** and document that a slow typer simply never confirms (the pinned re-dial still pairs).
+   E is best-effort defense-in-depth; do NOT add keepalive in phase-2.
+3. **Concrete host bounded-await.** After `emit(.sasCode)`, read EXACTLY ONE more message via a
+   `withThrowingTaskGroup` race of `inbound.next()` against `Task.sleep(for: 25s)` (a small PRIVATE
+   `PortviewHostCore` helper — do NOT promote the test-only `withTimeout`). `inbound.next()` returns
+   nil only on disconnect, never on silence, so the race is required to avoid hanging the serve task.
+   The existing `defer { connection.close() }` must fire on ALL branches (valid / wrong-mac / timeout /
+   disconnect / other-message). Read ONE message then return (no retry loop against the live secret).
+4. **Lockout wording fix + invariant.** `registerAttempt` is consumed at engagement START
+   (before reveal/confirm), so a forged confirm CANNOT suppress or recover the cap-based lockout. The
+   confirm only trips the success/`.sasConfirmed` path. INVARIANT (+ test): attempt counting stays at
+   engagement start, never moves to confirm receipt.
+5. **Exact MAC construction (do NOT "mirror derive").** Structurally key-separated:
+   `confirmKey = HKDF<SHA256>.deriveKey(inputKeyMaterial: SymmetricKey(data: clientNonce+hostNonce),
+   salt: Data(certSHA256), info: Data("Portview SAS confirm v2".utf8), outputByteCount: 32)`, then
+   `confirmation = Data(HMAC<SHA256>.authenticationCode(for: Data("confirm".utf8), using: confirmKey))`
+   (32 bytes). Host verifies with `HMAC<SHA256>.isValidAuthenticationCode(_, authenticating:
+   Data("confirm".utf8), using: confirmKey)` — NEVER `==`/`Array==`/`Data==`. Freeze a KAT: key IKM
+   order n_c(16)‖n_h(16), salt = raw 32-byte cert (not hex), HKDF info + HMAC message exact UTF-8,
+   full 32-byte tag; plus cross-binding (change cert or either nonce ⇒ different MAC) and a
+   last-byte-differs reject + a cross-attempt-replay reject (attempt-A MAC fails under attempt-B nonces).
+6. **Client teardown is ONE chokepoint.** Removing `runSASPreamble`'s `defer { close() }` and storing
+   the connection + (clientNonce, hostNonce, certBytes) opens five leak paths (match / mismatch /
+   cancel / fail / derive-failure-or-cancel early return). `clearSASPairing()` must close+nil the
+   stored connection AND zero the secret tuple; route ALL exits through it (the cancel path is the
+   easy miss — today `cancelSASPairing` only cancels the Task and the `defer` did the close).
+   `submitSASCode` sequence: capture connection+secret locally → clear stored state WITHOUT closing →
+   best-effort `try?` send the confirm → close → THEN `start()` the pinned re-dial (so `start()`'s
+   `task?.cancel()` can't race the in-flight confirm, and a dropped/idle connection never blocks the
+   re-dial).
+7. **Failure branch emits NOTHING.** timeout/wrong-mac/disconnect/other → no `.sasConfirmed`; the
+   window stays open for retries until the cap/app-timeout. The success-path UI lives in
+   `HostAppModel`'s `.sasConfirmed` handler, never in `serveSASPreamble`'s failure branch.
+
+Adopted nice-to-haves: structural key separation (resolution 5 already does this); a one-direction
+note (tag 24 is client→host only; a future host→client confirm would need a role/direction byte to
+stay reflection-safe). Deferred (pre-existing, not an E defect): Guardrail C's concurrent-preamble
+cap (`serveConnections` is unbounded) — E lengthens each preamble task's life so it mildly amplifies
+that surface; track separately.
+
 ---
 
 ## Cryptographic fixes folded in (v1 review)

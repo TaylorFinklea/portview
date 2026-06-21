@@ -74,6 +74,10 @@ struct MenuBarHostView: View {
 
                 Divider().overlay(Glass.text3.opacity(0.2))
                 if model.isPairing {
+                    if model.clientConfirmed {
+                        Label("a client confirmed", systemImage: "checkmark.seal.fill")
+                            .font(.mono(11)).foregroundStyle(Glass.signal)
+                    }
                     if let code = model.displayedSASCode {
                         Text("Enter this code on the iPhone")
                             .font(.mono(10)).foregroundStyle(Glass.text2)

@@ -52,6 +52,9 @@ final class HostAppModel {
     private(set) var isPairing = false
     /// The 6-digit SAS code to show the user (never logged); nil unless a preamble derived one.
     private(set) var displayedSASCode: String?
+    /// Transient "✓ a client confirmed" signal (Guardrail E). Does NOT close the window — the window
+    /// closes only via the pinned re-dial's `.deviceConnected`, the timeout, the cap, or stop.
+    private(set) var clientConfirmed = false
     /// How long a pairing window stays open before auto-closing.
     private static let pairingWindowSeconds: TimeInterval = 120
 
@@ -106,6 +109,7 @@ final class HostAppModel {
         sasControl.openWindow()
         isPairing = true
         displayedSASCode = nil
+        clientConfirmed = false
         pairingTimeoutTask?.cancel()
         pairingTimeoutTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(Self.pairingWindowSeconds))
@@ -121,6 +125,7 @@ final class HostAppModel {
         sasControl.closeWindow()
         isPairing = false
         displayedSASCode = nil
+        clientConfirmed = false
     }
 
     /// Close the connected client session(s) without stopping hosting (keeps advertising).
@@ -196,6 +201,10 @@ final class HostAppModel {
             // Only show it if the window is still open (the emit hops to the main actor; the window
             // could have just timed out/closed in that gap — don't resurrect a cleared code).
             if isPairing { displayedSASCode = code }  // shown on the HUD; never logged
+        case .sasConfirmed:
+            // Positive signal only — do NOT close the shared window (a relayed confirm from any peer
+            // must not be able to close it). The window closes via .deviceConnected/timeout/cap/stop.
+            if isPairing { clientConfirmed = true }
         case .deviceConnected, .deviceDisconnected, .sessionStats:
             let wasConnected = sessions.count > 0
             sessions.apply(event)

@@ -23,6 +23,7 @@ public enum AnyMessage: Equatable, Sendable {
     case sasHostCommit(SASHostCommit)
     case sasClientReveal(SASClientReveal)
     case sasHostReveal(SASHostReveal)
+    case sasClientConfirm(SASClientConfirm)
 
     public var messageType: MessageType {
         switch self {
@@ -49,6 +50,7 @@ public enum AnyMessage: Equatable, Sendable {
         case .sasHostCommit: .sasHostCommit
         case .sasClientReveal: .sasClientReveal
         case .sasHostReveal: .sasHostReveal
+        case .sasClientConfirm: .sasClientConfirm
         }
     }
 }

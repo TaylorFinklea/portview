@@ -53,8 +53,8 @@ public struct HostSessions: Equatable, Sendable {
             if devices.isEmpty { latestStats = nil } // no session → no live telemetry
         case .sessionStats(let stats):
             latestStats = stats
-        case .message, .ready, .accessibilityWarning, .failed, .sasCode:
-            break  // .sasCode is HUD-display state handled by the app, not session state
+        case .message, .ready, .accessibilityWarning, .failed, .sasCode, .sasConfirmed:
+            break  // SAS HUD-display state is handled by the app, not session state
         }
     }
 }
