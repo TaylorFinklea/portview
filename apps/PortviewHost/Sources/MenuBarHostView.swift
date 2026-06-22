@@ -122,18 +122,26 @@ struct MenuBarHostView: View {
     }
 
     private var footer: some View {
-        HStack {
-            if model.isRunning {
-                Button("Stop") { model.stop() }.buttonStyle(NeutralButtonStyle())
-            } else {
-                Button("Start Hosting") { model.start() }.buttonStyle(AccentButtonStyle())
+        VStack(spacing: 8) {
+            HStack {
+                // "Stop" stops hosting but keeps the app resident in the menu bar; "Quit" below exits.
+                if model.isRunning {
+                    Button("Stop") { model.stop() }.buttonStyle(NeutralButtonStyle())
+                } else {
+                    Button("Start Hosting") { model.start() }.buttonStyle(AccentButtonStyle())
+                }
+                Spacer()
+                Button("Open window") {
+                    openWindow(id: PortviewHostApp.mainWindowID)
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                .buttonStyle(NeutralButtonStyle())
             }
-            Spacer()
-            Button("Open window") {
-                openWindow(id: PortviewHostApp.mainWindowID)
-                NSApp.activate(ignoringOtherApps: true)
-            }
-            .buttonStyle(NeutralButtonStyle())
+            Button("Quit Portview Host") { NSApp.terminate(nil) }
+                .buttonStyle(.plain)
+                .font(.mono(11))
+                .foregroundStyle(Glass.dangerText)
+                .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 }
