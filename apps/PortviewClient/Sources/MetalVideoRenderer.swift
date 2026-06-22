@@ -37,6 +37,13 @@ final class MetalVideoRenderer {
         layer.device = device
         layer.pixelFormat = .bgra8Unorm
         layer.framebufferOnly = true
+        // Present the drawable IN the CATransaction so new pixels land in the same compositor commit
+        // as the SwiftUI zoom transform (scaleEffect/offset) on this layer. Without this the drawable
+        // swaps on the render server's own clock while CA composites the magnified transform → a
+        // visible seam/tear when zoomed (invisible at zoom 1, where the transform is identity). The
+        // 3-deep drawable pool keeps the pipeline from starving once present blocks on the transaction.
+        layer.presentsWithTransaction = true
+        layer.maximumDrawableCount = 3
         self.layer = layer
     }
 
@@ -72,8 +79,11 @@ final class MetalVideoRenderer {
         encoder.setFragmentSamplerState(sampler, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
-        commandBuffer.present(drawable)
+        // With presentsWithTransaction we present manually AFTER the buffer is scheduled, on the main
+        // actor, so the present enrolls in the current CATransaction (atomic with the zoom transform).
         commandBuffer.commit()
+        commandBuffer.waitUntilScheduled()
+        drawable.present()
     }
 
     /// Quad scale (≤1 on the letterboxed axis) that fits `content` inside `drawable`.

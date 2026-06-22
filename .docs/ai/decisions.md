@@ -2,6 +2,23 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-22] Zoom tearing + repaint glitches — Phase A (present-sync) landed; Phase C (in-shader zoom) queued
+
+**Context**: First on-device test of the magnifier stack. Result: **no crash** (the rapid-zoom landmine is cleared on hardware ✅), crispness "usable", look/persistence good. New report: **screen tearing + repaint glitches when zoomed in**. Diagnosed via an ultracode workflow (3 code lenses + a web-research lens → synthesis).
+
+**Root causes (ranked)**: (1, high) the CAMetalLayer presents drawables asynchronously (`commandBuffer.present(drawable); commit()`, `presentsWithTransaction=false`) while the zoom is a SwiftUI `.scaleEffect/.offset` Core-Animation transform on that same layer — new pixels composite under the previous transform for a compositor cycle → a seam/**tear** (invisible at zoom 1 where the transform is identity, amplified when zoomed). (2, high) `renderScale`/`pan` are computed THROUGH `frameViewport`, so each host re-crop (~6.6/s while panning) hard-**steps** the on-screen geometry → repaint jumps (the deferred #4; the ZoomGeometry doc comment claiming f-invariance is algebraically false — `renderScale = f.width/window.width`). (3, high) magnification is a Core-Animation **upscale of a 1×-resolution drawable** (the shader only aspect-fits the full frame), which is the accepted softness and amplifies the seam. (4/5) spring-vs-stepping + the ≤2-frame capture-vs-encode tag skew — minor, fall out of the above / deferred.
+
+**Correction to the synthesis (verified by deriving the math)**: its "Phase B" (make `renderScale` f-invariant as a ZoomGeometry-only change) is NOT achievable in Core Animation — the CA transform scales the *whole* frame texture (which shows only region `f`), so `renderScale` must track `f` to keep the window placed. Making the on-screen scale truly f-invariant requires the **shader** to do the windowing (sample the window's UV sub-rect) = Phase C. So B and C are one fix, not two. Real decomposition: **A kills tearing; C kills the repaint-jumps + nets crispness; there is no cheap middle.**
+
+**Decision**: 
+- **Phase A — DONE (build-green; device-verify pending)**: `MetalVideoRenderer.attach` sets `presentsWithTransaction = true` + `maximumDrawableCount = 3`; `render()` now `commit(); waitUntilScheduled(); drawable.present()` (manual present on the @MainActor render path) so the present enrolls in the same CATransaction as the zoom transform → no async-vs-CA seam. Client-render-only; cannot touch the host capture-size ladder (the crash fix). Zoom-1 unchanged (identity transform, just synchronized).
+- **Phase C — QUEUED (structural, the repaint-jump + crispness fix)**: move zoom+pan INTO the Metal shader — pass the window's UV sub-rect (from ZoomGeometry/frameViewport) + residual zoom as uniforms, sample into a drawable sized to on-screen pixels, and DROP `.scaleEffect/.offset/.animation` from LiveHUDView. One synchronized full-res present per frame; on-screen scale becomes invariant to re-crops. **Deliberately not blind-shipped**: it's an L-effort visual rewrite (aspect/letterbox math, easy to get subtly wrong) that genuinely needs device iteration — and Roshar is currently disconnected. Do it as the next step (TDD ZoomGeometry's UV-rect output + preserve the zoom-1 invariant test) once A is device-confirmed.
+- Deferred: #5 capture-time frame tagging (separate latency item; the one host-side change, but it touches CaptureEngine/HostRunner not the size ladder).
+
+**Also this round**: menu-bar **Quit Portview Host** added (`21a791e`, device feedback — Stop only stopped hosting).
+
+**Verify**: iOS `xcodebuild test` 43, BUILD SUCCEEDED (Phase A is render-loop config — no unit seam; build-green is the bar). NOT pushed. Device-verify: zoomed pan should no longer tear; if repaint-jumps remain, that's Phase C.
+
 ## [2026-06-21] SAS Guardrail C — bound the connection accept loop (DoS hardening)
 
 **Context**: `HostRunner.serveConnections` served every accepted connection in an UNBOUNDED `withTaskGroup` (one child task per connection). Flagged by the SAS reviews: a connection flood — or many SAS preambles, which now linger ~25s awaiting their Guardrail-E confirm — could spawn arbitrarily many tasks, each holding up to QUIC idle (30s) on a silent connection. Pre-existing, made more pressing by E.

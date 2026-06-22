@@ -6,6 +6,15 @@
 
 `main`
 
+## Latest Session (2026-06-22 — first device test of the magnifier; zoom-tearing Phase A + menu-bar Quit)
+
+- **FIRST ON-DEVICE MAGNIFIER TEST** (user, Roshar): **NO CRASH** — the rapid-zoom landmine is cleared on hardware ✅ (the whole point of the discrete capture-size ladder). Crispness "usable for now", Glass look great, persistence good. Two issues reported: (a) **screen tearing + repaint glitches when zoomed**; (b) menu-bar couldn't kill the host.
+- **(b) FIXED**: menu-bar **Quit Portview Host** (`NSApp.terminate`), `21a791e`. "Stop" still only stops hosting.
+- **(a) diagnosed via ultracode workflow** (3 code lenses + web-research → synthesis). Root causes: async CAMetalLayer present under a SwiftUI `.scaleEffect` CA transform (tear); `renderScale` steps per host re-crop (repaint jumps, the deferred #4); CA-upscale of a 1× drawable (softness). **Correction I verified by deriving the math**: the synthesis's "Phase B" (f-invariant renderScale as a CA-only change) is NOT achievable — it needs C's shader windowing. Real split: **A kills tearing; C kills repaint-jumps + crispness; no cheap middle.**
+- **Phase A DONE** (build-green; device-verify pending): `MetalVideoRenderer` — `presentsWithTransaction = true` + `maximumDrawableCount = 3`; `render()` → `commit(); waitUntilScheduled(); drawable.present()` (manual present on the @MainActor path, enrolls in the zoom transform's CATransaction). Client-render-only; can't touch the host crash ladder. Decision: decisions.md (2026-06-22 top). Verify: iOS 43, BUILD SUCCEEDED.
+- **Phase C QUEUED** (roadmap Now `[~]`): move zoom+pan into the Metal shader (UV sub-rect uniform; drop `.scaleEffect/.offset/.animation`), on-screen scale invariant to re-crops, full-res sampling. L visual rewrite — deliberately NOT blind-shipped (needs device iteration; Roshar currently down). TDD ZoomGeometry's UV-rect output + preserve the zoom-1 invariant when done.
+- NEXT: device-verify Phase A (zoomed pan should no longer tear). If repaint-jumps remain → implement Phase C. Plus the standing device-verify queue (SAS core + E + C-cap, motion fix, M7).
+
 ## Latest Session (2026-06-21 #2 — host-side SAS preamble integration test)
 
 - Closed the last SAS test-coverage gap: `SASPreambleIntegrationTests` drives a real client commit→reveal→confirm over a loopback QUIC connection against the real `serveSASPreamble` (visibility `private`→`internal` so the test can call it; mirrors the production peek→dispatch, tolerates QUIC double-delivery). 3 cases: happy path (`.sasCode(matching)` + `.sasConfirmed`, captured cert == host cert), forged confirm (code but NO `.sasConfirmed`), closed window (nothing served). Build-green; not pushed. Roadmap follow-up (a) `[x]`.
