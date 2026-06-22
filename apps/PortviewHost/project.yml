@@ -29,6 +29,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: dev.finklea.portview.host
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: K7CBQW6MPG
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 schemes:
   PortviewHost:
     build:
