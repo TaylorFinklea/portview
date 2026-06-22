@@ -13,6 +13,8 @@ targets:
     deploymentTarget: "26.0"
     sources:
       - Sources
+      - path: AppIcon.icon
+        type: file
     dependencies:
       - package: Portview
         product: PortviewHostCore
