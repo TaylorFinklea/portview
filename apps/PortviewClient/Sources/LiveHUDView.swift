@@ -37,9 +37,12 @@ struct LiveHUDView: View {
                     onZoom: { zoom = min(6, max(1, $0)) }
                 )
                 .frame(width: size.width, height: size.height)
-                .scaleEffect(zoomGeometry.renderScale, anchor: .center)
-                .offset(x: zoomGeometry.pan.x, y: zoomGeometry.pan.y)
-                .animation(Glass.cursorFollow, value: session.cursorNormalized)
+                // Zoom is applied in the Metal shader (sampleRect), NOT as a CA scaleEffect — so the
+                // present is synchronized (no tear) and the on-screen window is invariant to host
+                // re-crops (no jump). The session computes the sample rect per-frame against each
+                // frame's own region (atomic); the view just supplies the zoom + its size.
+                .onChange(of: zoom) { _, z in session.magnifierZoom = z }
+                .onChange(of: size) { _, s in session.magnifierViewSize = s }
                 .onChange(of: zoomGeometry.cropRequest) { _, crop in session.requestViewport(crop) }
                 .allowsHitTesting(!isReconnecting)
                 .overlay {
@@ -76,7 +79,11 @@ struct LiveHUDView: View {
                     }
                 }
             }
-            .onAppear { session.renderer.samplerMode = samplerMode }
+            .onAppear {
+                session.renderer.samplerMode = samplerMode
+                session.magnifierViewSize = size
+                session.magnifierZoom = zoom
+            }
         }
         .ignoresSafeArea()
     }

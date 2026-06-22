@@ -16,6 +16,12 @@ final class MetalVideoRenderer {
     private var textureCache: CVMetalTextureCache?
     private weak var layer: CAMetalLayer?
     var samplerMode: VideoSamplerMode = .linear
+    /// The sub-rect of the frame texture to sample (UV [0,1]), set by the view from `ZoomGeometry`.
+    /// Full frame = overview; a sub-rect = the magnified window. The zoom happens HERE (in-shader,
+    /// sampling into the full-res drawable) rather than as a Core Animation transform on the layer —
+    /// so there's one synchronized present per frame (no tear) and the on-screen window is invariant
+    /// to host re-crops (no jump). Read on the next `render`; frames stream continuously during a pan.
+    var sampleRect = CGRect(x: 0, y: 0, width: 1, height: 1)
 
     init() {
         let device = MTLCreateSystemDefaultDevice()
@@ -72,9 +78,16 @@ final class MetalVideoRenderer {
               let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else { return }
 
-        var scale = Self.aspectFitScale(content: CGSize(width: width, height: height), into: layer.drawableSize)
+        // Aspect-fit the SAMPLED region (its pixel size), not the whole frame: at zoom 1 sampleRect is
+        // the full frame → the usual letterbox; zoomed in it's the window sub-rect whose aspect matches
+        // the view → fills it. The fragment samples sampleRect.origin + uv * sampleRect.size.
+        let rect = sampleRect
+        let sampledPixels = CGSize(width: Double(width) * rect.width, height: Double(height) * rect.height)
+        var scale = Self.aspectFitScale(content: sampledPixels, into: layer.drawableSize)
+        var uvRect = SIMD4<Float>(Float(rect.minX), Float(rect.minY), Float(rect.width), Float(rect.height))
         encoder.setRenderPipelineState(pipeline)
         encoder.setVertexBytes(&scale, length: MemoryLayout<SIMD2<Float>>.size, index: 0)
+        encoder.setFragmentBytes(&uvRect, length: MemoryLayout<SIMD4<Float>>.size, index: 0)
         encoder.setFragmentTexture(sourceTexture, index: 0)
         encoder.setFragmentSamplerState(sampler, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
@@ -113,8 +126,9 @@ final class MetalVideoRenderer {
             out.uv = uvs[vid];
             return out;
         }
-        fragment float4 portview_fragment(VSOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]]) {
-            return tex.sample(s, in.uv);
+        fragment float4 portview_fragment(VSOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler s [[sampler(0)]], constant float4 &uvRect [[buffer(0)]]) {
+            float2 sampleUV = uvRect.xy + in.uv * uvRect.zw;
+            return tex.sample(s, sampleUV);
         }
         """
         guard let library = try? device.makeLibrary(source: source, options: nil) else { return nil }

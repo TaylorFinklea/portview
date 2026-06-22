@@ -6,6 +6,14 @@
 
 `main`
 
+## Latest Session (2026-06-22 #2 — zoom Phase C: in-shader zoom (tearing + jumps fixed))
+
+- Device-verified Phase A: **tearing GONE**, but the picture **still jumped/repainted** when panning → implemented **Phase C** (in-shader zoom). Build-green; installed on Roshar; device-verify pending. Decision: decisions.md (2026-06-22 top, updated). Roadmap item `[~]` (A+C both done, device-verify C).
+- **Phase C**: `ZoomGeometry` now emits `sampleRect` (visible window mapped into the current frame's region, texture UV) instead of `renderScale`/`pan`; the Metal fragment shader samples that sub-rect into the full-res drawable (`uvRect` uniform); `LiveHUDView` dropped `.scaleEffect/.offset/.animation`. **`sampleRect` is computed PER-FRAME in `SessionViewModel` against that frame's own region** (view pushes only `magnifierZoom`+`magnifierViewSize`) → UV and pixels are the same generation (no 1-frame re-crop jump). Not clamped to [0,1] → a fast pan-past edge-clamps (sampler) instead of pinching. On-screen window invariant to re-crops; full-res sampling (crispness bonus). zoom-1 reduces to the prior letterboxed overview.
+- **Review (native, SHIP-WITH-FIXES) caught 2 real bugs I fixed before commit**: (#1 HIGH) sampleRect pushed via SwiftUI onChange lagged render() by a frame → 1-frame jump on every re-crop → moved the computation into the per-frame render path; (#2 MED) clamping pinched the picture on a fast pan-past → unclamp + let the sampler edge-clamp.
+- New pure test `testSampledWindowIsInvariantToFrameViewport` locks the no-jump invariant (display-window recovered from (sampleRect,f) constant across f). Verify: iOS `xcodebuild test` **44**.
+- NEXT (device verify): zoomed pan should be **smooth (no jumps) + crisp**, tearing still gone. If good → close the zoom item. Standing queue: SAS core+E+C-cap, motion fix, M7 (need the relaunched host).
+
 ## Latest Session (2026-06-22 — first device test of the magnifier; zoom-tearing Phase A + menu-bar Quit)
 
 - **FIRST ON-DEVICE MAGNIFIER TEST** (user, Roshar): **NO CRASH** — the rapid-zoom landmine is cleared on hardware ✅ (the whole point of the discrete capture-size ladder). Crispness "usable for now", Glass look great, persistence good. Two issues reported: (a) **screen tearing + repaint glitches when zoomed**; (b) menu-bar couldn't kill the host.

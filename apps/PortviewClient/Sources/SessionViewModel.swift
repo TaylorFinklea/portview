@@ -291,6 +291,22 @@ final class SessionViewModel: ObservableObject {
         viewportRequests.request(rect)
     }
 
+    /// View-supplied magnifier inputs (the GeometryReader size + pinch zoom). Set by `LiveHUDView`;
+    /// combined with the live cursor + each frame's own region to compute the shader sample rect at
+    /// render time (so it never lags the frame it's paired with).
+    var magnifierViewSize: CGSize = .zero
+    var magnifierZoom: CGFloat = 1
+
+    /// The texture sub-rect to sample for a frame showing `region`. Full frame when not zoomed or
+    /// before the view size is known (overview).
+    private func magnifierSampleRect(forFrameRegion region: CGRect) -> CGRect {
+        guard magnifierZoom > 1.001, magnifierViewSize.width > 0, magnifierViewSize.height > 0 else {
+            return CGRect(x: 0, y: 0, width: 1, height: 1)
+        }
+        return ZoomGeometry(view: magnifierViewSize, displaySize: displaySize,
+                            cursor: cursorNormalized, zoom: magnifierZoom, frameViewport: region).sampleRect
+    }
+
     private func resetViewport() {
         let full = CGRect(x: 0, y: 0, width: 1, height: 1)
         frameViewport = full
@@ -490,6 +506,10 @@ final class SessionViewModel: ObservableObject {
                     let region = CGRect(x: frame.normalizedViewportX, y: frame.normalizedViewportY,
                                         width: frame.normalizedViewportW, height: frame.normalizedViewportH)
                     if region != frameViewport { frameViewport = region }
+                    // Compute the sampled sub-rect against THIS frame's own region so the UV rect and
+                    // the pixels are the same generation — pushing it from the view via onChange lagged
+                    // render() by a frame and reintroduced a 1-frame jump on every re-crop.
+                    renderer.sampleRect = magnifierSampleRect(forFrameRegion: region)
                     renderer.render(pixelBuffer)
                     if let snapshot = qualityTracker.recordDecodedFrame(frame, decodeMs: decodeMs) {
                         qualityDiagnostics = snapshot
