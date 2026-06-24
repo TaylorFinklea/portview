@@ -2,6 +2,18 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-24] Zoom smooth-pan — display-link eased render loop (the actual fix)
+
+**Context**: Device test of Phase C: tearing stayed gone but the pan was "even jerkier than before." Systematic-debugging + two diagnostic questions to the user localized it precisely: **jerky ONLY when panning, smooth when still, smooth at zoom 1** → the base stream is fine; it's purely the cursor-follow pan.
+
+**Root cause (evidence-backed)**: Phase A's pan was a SwiftUI spring on a CA transform — Core Animation interpolated it every display refresh (smooth, decoupled from video fps). Phase C moved zoom in-shader but made the window update **only when a video frame arrived, with no interpolation** → the pan stepped at video-frame rate and exposed the cursor's per-update jitter. Strictly *less* smoothing than A → jerkier.
+
+**Decision**: Keep the in-shader zoom (no tear, no re-crop jump, crisp) but **drive rendering from a `CADisplayLink` and ease the window toward the cursor at display rate** — restoring A's smooth follow without A's CA transform. Concretely: `ZoomGeometry` now emits `visibleWindow` (display-normalized; no `frameViewport` param — the f-dependent mapping moved out). The renderer holds `targetWindow`/`currentWindow`/`lastPixelBuffer`/`latestFrameRegion`; `submit(buffer, region)` stores the newest frame; `tick()` (per vsync) eases `currentWindow`→`targetWindow`, maps it into the latest frame's region (`sampleRect(window:in:)`), and draws — so the pan is smooth at 120 Hz even if video arrives at 30 fps, and re-crops still don't move the on-screen window. `SessionViewModel` pushes `targetWindow` on cursor/zoom changes and `submit`s each frame; `MetalVideoUIView` owns the display link. Easing is **time-normalized** (`perTickFactor`) so 60/120 Hz feel the same; window is **snapped** (not eased) on a display switch.
+
+**Process**: systematic-debugging (no fix without root cause) → user diagnostic answers → implement → native adversarial review (SHIP-WITH-FIXES; verified no frame-drop, no race, zoom-1 + no-jump invariants hold). 2 review fixes applied: refresh-rate-independent easing (#4 — Roshar is 120 Hz ProMotion) and snap-on-display-switch (#3). Deferred (review, minor): pause the display link at true idle (small power), capture-time frame tagging.
+
+**Verify**: iOS `xcodebuild test` **47** (new `MetalVideoRendererTests`: no-jump invariant, easing-settles, window-past-frame; `ZoomGeometryTests` updated to `visibleWindow`). NOT pushed. **Device-verify**: zoomed pan should now be SMOOTH (the headline), tearing still gone, crisp; reset-zoom/display-switch cut cleanly. Easing feel tunable via `MetalVideoRenderer.easingFactor` (0.28; lower = smoother/laggier).
+
 ## [2026-06-22] Zoom tearing + repaint glitches — Phase A (present-sync) landed; Phase C (in-shader zoom) queued
 
 **Context**: First on-device test of the magnifier stack. Result: **no crash** (the rapid-zoom landmine is cleared on hardware ✅), crispness "usable", look/persistence good. New report: **screen tearing + repaint glitches when zoomed in**. Diagnosed via an ultracode workflow (3 code lenses + a web-research lens → synthesis).

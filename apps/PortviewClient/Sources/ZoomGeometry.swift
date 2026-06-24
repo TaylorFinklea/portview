@@ -23,17 +23,16 @@ import CoreGraphics
 struct ZoomGeometry {
     /// Padded host crop request (normalized display coords).
     let cropRequest: CGRect
-    /// Sub-rect of the current frame's texture to sample, in UV [0,1] (top-left origin). Clamped to
-    /// [0,1] so a window that has run past a not-yet-re-cropped frame samples the edge (clampToEdge)
-    /// rather than outside the texture.
-    let sampleRect: CGRect
+    /// The visible window in DISPLAY-normalized coords (window ∩ display). This is the smoothing
+    /// TARGET: the renderer eases its rendered window toward this at display rate and maps it into each
+    /// frame's region per tick (`MetalVideoRenderer.sampleRect(window:in:)`). Keeping the target in
+    /// display space (not the frame's UV) is what makes the on-screen window invariant to host re-crops.
+    /// At zoom 1 it's the whole display (→ overview, letterboxed).
+    let visibleWindow: CGRect
 
-    init(view: CGSize, displaySize: CGSize, cursor: CGPoint, zoom: CGFloat, frameViewport: CGRect) {
+    init(view: CGSize, displaySize: CGSize, cursor: CGPoint, zoom: CGFloat) {
         let viewAspect = view.width / max(1, view.height)
         let displayAspect = displaySize.width / max(1, displaySize.height)
-        // The received frame shows `f` of the display; at zoom 1 / no crop it's the whole display.
-        let f = (frameViewport.width > 0 && frameViewport.height > 0)
-            ? frameViewport : CGRect(x: 0, y: 0, width: 1, height: 1)
 
         // View-aspect window over the display (normalized). base*/zoom; base (zoom 1) is the smallest
         // view-aspect rect containing the unit display, so zoom 1 == overview.
@@ -59,17 +58,7 @@ struct ZoomGeometry {
         let cropX1 = min(1, visX1 + padX), cropY1 = min(1, visY1 + padY)
         cropRequest = CGRect(x: cropX0, y: cropY0, width: cropX1 - cropX0, height: cropY1 - cropY0)
 
-        // Map the visible window into the current frame's region `f`, in texture UV. The same display
-        // window maps to the same on-screen result regardless of `f`: recovering the window as
-        // `f.origin + sampleRect.origin * f.size` returns the visible window for any `f`. NOT clamped to
-        // [0,1]: if a fast pan runs the window past the not-yet-re-cropped frame, the UVs exceed [0,1]
-        // and the clampToEdge sampler smears the edge — while the rect's SIZE (the window's true pixel
-        // aspect) is preserved, so the renderer aspect-fits it to the same on-screen rect instead of
-        // pinching the picture to a sliver.
-        let u0 = (visX0 - f.minX) / f.width
-        let v0 = (visY0 - f.minY) / f.height
-        let u1 = (visX1 - f.minX) / f.width
-        let v1 = (visY1 - f.minY) / f.height
-        sampleRect = CGRect(x: u0, y: v0, width: max(0.0001, u1 - u0), height: max(0.0001, v1 - v0))
+        visibleWindow = CGRect(x: visX0, y: visY0,
+                               width: max(0.0001, visX1 - visX0), height: max(0.0001, visY1 - visY0))
     }
 }

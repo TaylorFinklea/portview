@@ -281,6 +281,9 @@ final class SessionViewModel: ObservableObject {
         cursorNormalized = CGPoint(x: 0.5, y: 0.5)
         resetViewport()
         resetQualityDiagnostics()
+        // Cut to the new display's window instead of easing across from the old one's.
+        updateMagnifierTarget()
+        renderer.snapWindow()
         send(.switchDisplay(SwitchDisplay(displayID: displayID)))
     }
 
@@ -292,19 +295,21 @@ final class SessionViewModel: ObservableObject {
     }
 
     /// View-supplied magnifier inputs (the GeometryReader size + pinch zoom). Set by `LiveHUDView`;
-    /// combined with the live cursor + each frame's own region to compute the shader sample rect at
-    /// render time (so it never lags the frame it's paired with).
-    var magnifierViewSize: CGSize = .zero
-    var magnifierZoom: CGFloat = 1
+    /// combined with the live cursor to compute the renderer's cursor-follow target window.
+    var magnifierViewSize: CGSize = .zero { didSet { updateMagnifierTarget() } }
+    var magnifierZoom: CGFloat = 1 { didSet { updateMagnifierTarget() } }
 
-    /// The texture sub-rect to sample for a frame showing `region`. Full frame when not zoomed or
-    /// before the view size is known (overview).
-    private func magnifierSampleRect(forFrameRegion region: CGRect) -> CGRect {
+    /// Push the current cursor-follow target (display-normalized window) to the renderer, which eases
+    /// toward it at display rate. Called whenever the cursor / zoom / view size changes. Full display
+    /// (overview) when not zoomed or before the view size is known.
+    private func updateMagnifierTarget() {
+        let full = CGRect(x: 0, y: 0, width: 1, height: 1)
         guard magnifierZoom > 1.001, magnifierViewSize.width > 0, magnifierViewSize.height > 0 else {
-            return CGRect(x: 0, y: 0, width: 1, height: 1)
+            renderer.targetWindow = full
+            return
         }
-        return ZoomGeometry(view: magnifierViewSize, displaySize: displaySize,
-                            cursor: cursorNormalized, zoom: magnifierZoom, frameViewport: region).sampleRect
+        renderer.targetWindow = ZoomGeometry(view: magnifierViewSize, displaySize: displaySize,
+                                             cursor: cursorNormalized, zoom: magnifierZoom).visibleWindow
     }
 
     private func resetViewport() {
@@ -329,6 +334,7 @@ final class SessionViewModel: ObservableObject {
         let nx = min(1, max(0, cursorNormalized.x + sentDx * inputSensitivity / displaySize.width))
         let ny = min(1, max(0, cursorNormalized.y + sentDy * inputSensitivity / displaySize.height))
         cursorNormalized = CGPoint(x: nx, y: ny)
+        updateMagnifierTarget()  // re-aim the eased cursor-follow window
     }
 
     func sendClick() {
@@ -506,11 +512,10 @@ final class SessionViewModel: ObservableObject {
                     let region = CGRect(x: frame.normalizedViewportX, y: frame.normalizedViewportY,
                                         width: frame.normalizedViewportW, height: frame.normalizedViewportH)
                     if region != frameViewport { frameViewport = region }
-                    // Compute the sampled sub-rect against THIS frame's own region so the UV rect and
-                    // the pixels are the same generation — pushing it from the view via onChange lagged
-                    // render() by a frame and reintroduced a 1-frame jump on every re-crop.
-                    renderer.sampleRect = magnifierSampleRect(forFrameRegion: region)
-                    renderer.render(pixelBuffer)
+                    // Hand the frame + its region to the renderer; the display-link `tick` draws it
+                    // (easing the window toward the cursor target at display rate, so the pan is smooth
+                    // even when frames arrive slower than the display refresh).
+                    renderer.submit(pixelBuffer, region: region)
                     if let snapshot = qualityTracker.recordDecodedFrame(frame, decodeMs: decodeMs) {
                         qualityDiagnostics = snapshot
                     }
@@ -520,7 +525,7 @@ final class SessionViewModel: ObservableObject {
                 // (the common case during a drag) must not re-write `cursorNormalized`, or it re-targets
                 // the cursor-follow spring every report for no visible motion → micro-stutter.
                 let p = CGPoint(x: cursor.normalizedX, y: cursor.normalizedY)
-                if !p.isClose(to: cursorNormalized) { cursorNormalized = p }
+                if !p.isClose(to: cursorNormalized) { cursorNormalized = p; updateMagnifierTarget() }
             case .clipboardUpdate(let update):
                 UIPasteboard.general.string = update.text
             case .audioFrame(let audio):

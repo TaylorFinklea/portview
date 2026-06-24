@@ -22,10 +22,11 @@ struct LiveHUDView: View {
     var body: some View {
         GeometryReader { geo in
             let size = geo.size
+            // Used here only for the host crop request; the renderer's eased cursor-follow window is
+            // driven from the session (renderer.targetWindow).
             let zoomGeometry = ZoomGeometry(
                 view: size, displaySize: session.displaySize,
-                cursor: session.cursorNormalized, zoom: zoom,
-                frameViewport: session.frameViewport)
+                cursor: session.cursorNormalized, zoom: zoom)
 
             ZStack {
                 TrackpadVideoView(

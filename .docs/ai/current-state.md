@@ -6,6 +6,14 @@
 
 `main`
 
+## Latest Session (2026-06-24 — zoom smooth-pan: display-link eased render loop)
+
+- Device test of Phase C: tearing gone but pan **"even jerkier."** systematic-debugging + 2 user diagnostic answers localized it: **jerky only when panning, smooth when still + at zoom 1** → cursor-follow pan, not the stream. Root cause: Phase C dropped display-rate smoothing (window stepped at video-frame rate, no interpolation) — strictly less than Phase A's CA spring.
+- **Fix (build-green; device-verify pending — Roshar went unavailable mid-install)**: keep in-shader zoom, but drive rendering from a **CADisplayLink** and **ease the window toward the cursor at display rate**. `ZoomGeometry`→`visibleWindow` (display coords; dropped the `frameViewport` param). Renderer: `targetWindow`/`currentWindow`/`lastPixelBuffer`/`latestFrameRegion`; `submit(buffer,region)` stores a frame; `tick()` eases + maps window→UV per vsync + draws. `SessionViewModel` pushes `targetWindow` on cursor/zoom; `submit`s frames. `MetalVideoUIView` owns the link. Time-normalized easing (60/120Hz parity); snap on display switch.
+- Reviewed native SHIP-WITH-FIXES (no frame-drop, no race, zoom-1 + no-jump invariants hold) → applied 2: refresh-rate-independent easing (Roshar=120Hz ProMotion), snap-on-display-switch. Deferred: pause display link at idle (minor power).
+- Tests: `MetalVideoRendererTests` (no-jump invariant moved here + easing-settles + window-past-frame) + `ZoomGeometryTests` updated. Verify: iOS `xcodebuild test` **47**.
+- NEXT (device verify when Roshar's back — build ready at /tmp/pv-client): zoomed pan should be SMOOTH (headline), tearing still gone, crisp; tune `MetalVideoRenderer.easingFactor` (0.28) if it feels laggy(lower) or steppy. This is the 3rd render iteration (A present-sync → C in-shader → display-link ease); device-confirm before declaring done.
+
 ## Latest Session (2026-06-22 #2 — zoom Phase C: in-shader zoom (tearing + jumps fixed))
 
 - Device-verified Phase A: **tearing GONE**, but the picture **still jumped/repainted** when panning → implemented **Phase C** (in-shader zoom). Build-green; installed on Roshar; device-verify pending. Decision: decisions.md (2026-06-22 top, updated). Roadmap item `[~]` (A+C both done, device-verify C).

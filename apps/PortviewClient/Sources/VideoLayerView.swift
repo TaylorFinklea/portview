@@ -21,6 +21,7 @@ struct TrackpadVideoView: UIViewRepresentable {
         let view = MetalVideoUIView()
         view.backgroundColor = .black
         view.isUserInteractionEnabled = true
+        view.renderer = renderer  // the view's CADisplayLink drives renderer.tick()
         renderer.attach(view.metalLayer)
 
         let coordinator = context.coordinator
