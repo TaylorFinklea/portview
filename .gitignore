@@ -27,3 +27,9 @@ apps/*/*-Info.plist
 *.p12
 *.mobileprovision
 .env
+
+# Local device-test capture videos (not source)
+*.mp4
+*.MP4
+*.mov
+*.MOV
