@@ -44,7 +44,9 @@ struct LiveHUDView: View {
                 // frame's own region (atomic); the view just supplies the zoom + its size.
                 .onChange(of: zoom) { _, z in session.magnifierZoom = z }
                 .onChange(of: size) { _, s in session.magnifierViewSize = s }
-                .onChange(of: zoomGeometry.cropRequest) { _, crop in session.requestViewport(crop) }
+                .onChange(of: zoomGeometry.cropRequest) { _, crop in
+                    session.requestViewport(crop: crop, window: zoomGeometry.visibleWindow)
+                }
                 .allowsHitTesting(!isReconnecting)
                 .overlay {
                     if isReconnecting {

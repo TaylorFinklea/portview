@@ -48,6 +48,10 @@ final class SessionViewModel: ObservableObject {
     private var sessionName: String?
     private var sessionPinHex: String?
     private var qualityTracker = QualityDiagnosticsTracker()
+    // Re-cropping is now gated by edge-hysteresis (`requestViewport`), so this can stay prompt (150ms):
+    // a re-crop fires immediately when you move to a new region, but in-region pans don't re-crop at
+    // all — keeping SCStream.updateConfiguration (which hiccups capture fps) rare without the laggy
+    // "paints a second later" of a blunt throttle.
     private lazy var viewportRequests = ViewportRequestScheduler { [weak self] rect in
         guard let self else { return }
         self.send(.viewport(Viewport(
@@ -287,11 +291,44 @@ final class SessionViewModel: ObservableObject {
         send(.switchDisplay(SwitchDisplay(displayID: displayID)))
     }
 
-    /// Ask the host to crop its capture to `rect` (normalized) — the magnifier. Rate-limited by a
-    /// leading+trailing throttle so the host crop tracks the cursor DURING a pan (the first move
-    /// re-crops immediately, then at most once per interval) instead of only after movement stops.
-    func requestViewport(_ rect: CGRect) {
-        viewportRequests.request(rect)
+    /// Ask the host to crop its capture to `crop` (padded, normalized) — the magnifier — but only when
+    /// the visible `window` isn't already covered by the region the host is sending. Each re-crop makes
+    /// the host call `SCStream.updateConfiguration`, which hiccups capture frame rate; re-cropping on
+    /// every pan step collapsed zoomed content to ~4 fps. With hysteresis we re-crop only when the
+    /// window nears the captured region's edge (you've panned into new territory) or the crop is too
+    /// loose (e.g. just zoomed in) — so in-region panning keeps full fps while a move to a new region
+    /// still re-crops promptly (the throttle's leading edge fires it immediately).
+    func requestViewport(crop: CGRect, window: CGRect) {
+        guard !isWindowCoveredByCurrentCrop(window) else { return }
+        viewportRequests.request(crop)
+    }
+
+    /// Whether `window` (display-normalized) sits comfortably inside the region the host is already
+    /// sending (`frameViewport`) AND that region isn't wastefully larger than the window — i.e. no
+    /// re-crop is needed. A window edge that coincides with the display boundary needs no margin (the
+    /// host can't capture past the screen).
+    private func isWindowCoveredByCurrentCrop(_ window: CGRect) -> Bool {
+        Self.windowCovered(window, by: frameViewport)
+    }
+
+    /// Pure hysteresis predicate (so the edge cases are testable): `window` is "covered" by captured
+    /// region `f` — no re-crop needed — when it's inside `f` by `margin` on every side (a side flush
+    /// with the display boundary needs no margin, since the host can't capture past the screen) AND `f`
+    /// isn't more than `looseFactor`× the window in either dimension.
+    nonisolated static func windowCovered(_ window: CGRect, by f: CGRect,
+                                          marginFraction: CGFloat = 0.12, looseFactor: CGFloat = 2.5) -> Bool {
+        // Margin is a FRACTION of the window, not absolute: the crop padding is relative (0.25×window),
+        // so at high zoom (tiny window) an absolute margin could exceed the padding and force a re-crop
+        // every frame. `marginFraction` must stay below the padding fraction so a fresh crop is covered.
+        let edge: CGFloat = 0.001
+        let mx = window.width * marginFraction
+        let my = window.height * marginFraction
+        let coveredLeft   = window.minX >= f.minX + mx || f.minX <= edge
+        let coveredRight  = window.maxX <= f.maxX - mx || f.maxX >= 1 - edge
+        let coveredTop    = window.minY >= f.minY + my || f.minY <= edge
+        let coveredBottom = window.maxY <= f.maxY - my || f.maxY >= 1 - edge
+        let tightEnough = f.width <= window.width * looseFactor && f.height <= window.height * looseFactor
+        return coveredLeft && coveredRight && coveredTop && coveredBottom && tightEnough
     }
 
     /// View-supplied magnifier inputs (the GeometryReader size + pinch zoom). Set by `LiveHUDView`;

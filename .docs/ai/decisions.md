@@ -2,6 +2,18 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-26] Zoom — low fps at high zoom: edge-hysteresis re-cropping
+
+**Context**: After capture-time tagging, the residual "flash" was confirmed (device) to happen ONLY on MOVING content, never static. Frame analysis of a moving-content clip: at 6× the stream was **1.5 Mbps · ~4 fps**. The smooth display-link pan can't hide a 4 fps *content* stream → moving content looks choppy/flashy; static has nothing to update so looks fine.
+
+**Root cause (confirmed by experiment)**: at a fixed zoom, every pan step makes the host call `SCStream.updateConfiguration` to move `sourceRect` (~6.6×/s at the 150ms throttle), and updateConfiguration hiccups SCK frame delivery → ~4 fps while panning. Diagnostic: bumping the throttle to 400ms → fps rose (confirms updateConfiguration is the bottleneck) but introduced a laggy "doesn't paint until a second after I move to the new region" (the blunt throttle delays the *needed* re-crop too).
+
+**Decision**: **edge-hysteresis re-cropping** (`SessionViewModel.requestViewport(crop:window:)` + pure `windowCovered`). Re-crop ONLY when the visible window isn't already covered by the region the host is sending (`frameViewport`): it must be inside by a margin on every side (a side flush with the display boundary needs no margin — can't capture past the screen) AND the crop not be >2.5× the window. So in-region pans don't re-crop (fps stays high) while a move to a new region re-crops promptly (the throttle's leading edge, back at 150ms, fires it immediately → paints fast). Gets BOTH high fps and fast paint, unlike the blunt throttle.
+
+**Bug caught pre-device (by the unit tests)**: margin was first absolute (0.05) but the crop padding is relative (0.25×window) — at high zoom the window's padding (e.g. 0.025) < margin → a fresh crop read as "not covered" → would re-crop EVERY frame (a loop). Fixed: margin is a fraction of the window (`marginFraction 0.12` < the 0.25 padding) → scale-invariant.
+
+**Verify**: iOS `xcodebuild test` **54** (new `ViewportHysteresisTests`: in-region covered, near-edge re-crops, display-edge-no-margin, initial-zoom-in re-crops, fresh-crop covered, scale-invariance). NOT pushed. **Device-verify**: high zoom + panning on MOVING content should now be high-fps AND paint promptly on region changes. If fps still dips on fast cross-screen pans, raise the crop padding (more headroom, trades crispness) — tunable.
+
 ## [2026-06-26] Zoom — capture-time frame tagging (kills the re-crop "wrong-content flash")
 
 **Context**: With the smooth-pan fix landed (device-confirmed: "so much better… a lot smoother… mouse really smooth"), the last artifact was the picture "flashing wrong content" when it repaints at the screen edge. User characterized it as a jump/flash (not a smear) → the deferred **#5 capture-vs-encode tag skew**.

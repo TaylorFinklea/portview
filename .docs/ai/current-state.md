@@ -6,6 +6,15 @@
 
 `main`
 
+## Latest Session (2026-06-26 #2 — zoom low-fps root cause: edge-hysteresis re-cropping)
+
+- Capture-time tagging helped but residual "flash" remained, confirmed (device) to happen ONLY on MOVING content. Pulled frames from a moving-content clip (ai-scratch/, gitignored): at 6× the stream was **1.5 Mbps · ~4 fps** — the smooth pan can't hide a 4fps CONTENT stream → choppy on motion; static fine.
+- **Root cause CONFIRMED by experiment**: per-pan `SCStream.updateConfiguration` (re-crop, ~6.6/s) hiccups SCK fps → ~4fps while panning. Bumped throttle 150→400ms → fps rose (confirms) but caused laggy "paints a second after I move" → so blunt throttle is wrong.
+- **Fix: edge-hysteresis re-cropping** (build-green; installed on Roshar; device-verify pending). `requestViewport(crop:window:)` + pure `windowCovered`: re-crop only when the window isn't already covered by the host's current region (`frameViewport`) — inside-by-margin per side (display-edge needs no margin) AND crop ≤2.5× window. In-region pans → no re-crop (fps high); region change → prompt re-crop (throttle back at 150ms, leading edge → paints fast). Best of both.
+- **Unit tests caught a loop bug pre-device**: absolute margin (0.05) > relative padding (0.25×tiny-window) → re-crop-every-frame loop. Fixed → margin is a window FRACTION (0.12), scale-invariant. `ViewportHysteresisTests` (7). Verify: iOS `xcodebuild test` **54**.
+- Zoom saga: A present-sync (tear ✅) → C in-shader (jumps) → display-link ease (smooth pan ✅) → capture-time tag (wrong-content flash ✅) → hysteresis re-crop (low fps on moving content). All client-side except capture-time tag (host, already in /Applications).
+- NEXT (device verify): high zoom + pan on MOVING content → high fps AND paints promptly. If fast cross-screen pans still dip fps → raise crop padding (headroom vs crispness, tunable in ZoomGeometry padX/padY).
+
 ## Latest Session (2026-06-26 — zoom: capture-time frame tagging (last re-crop glitch))
 
 - Device-confirmed the smooth-pan fix: "so much better at bigger zooms… a lot smoother… mouse really smooth." ✅ Last artifact: picture **flashes wrong content when repainting at the screen edge**. User characterized it as a jump/flash (not a smear) → the deferred **#5 capture-vs-encode tag skew**.
