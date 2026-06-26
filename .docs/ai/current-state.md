@@ -6,6 +6,14 @@
 
 `main`
 
+## Latest Session (2026-06-26 — zoom: capture-time frame tagging (last re-crop glitch))
+
+- Device-confirmed the smooth-pan fix: "so much better at bigger zooms… a lot smoother… mouse really smooth." ✅ Last artifact: picture **flashes wrong content when repainting at the screen edge**. User characterized it as a jump/flash (not a smear) → the deferred **#5 capture-vs-encode tag skew**.
+- **Fix (host-side only; build-green; device-verify pending — needs the rebuilt host relaunched)**: tag each frame with the crop region captured WITH the buffer, not the live viewport at encode time. `SendableFrame.region` snapshotted in the SCStream callback (`appliedRegion`, lock-guarded, set when `updateConfiguration` takes effect); `pumpVideo` tags from `frame.region`. So an old-crop buffer encoded after a re-crop carries the OLD region → client maps the window into the region the pixels actually show → no flash. Doesn't touch the capture-size ladder (no crash risk). Commit cd6c8d9. Decision: decisions.md (2026-06-26 top).
+- Verify: `swift test` **158**, macOS BUILD SUCCEEDED. Client unchanged (already maps into the frame's region) — Roshar already has the latest client; only the HOST needs relaunching (rebuilt at /tmp/pv-host/Build/Products/Debug/PortviewHost.app).
+- Zoom render saga now: A present-sync (tear) → C in-shader (jumps) → display-link ease (smooth pan ✅) → capture-time tagging (re-crop flash). All but the last device-confirmed.
+- NEXT (device verify): relaunch the new host, pan to the edge zoomed → no wrong-content flash. Then the host-side queue (SAS, motion, M7) is finally testable on the same relaunched host.
+
 ## Latest Session (2026-06-24 — zoom smooth-pan: display-link eased render loop)
 
 - Device test of Phase C: tearing gone but pan **"even jerkier."** systematic-debugging + 2 user diagnostic answers localized it: **jerky only when panning, smooth when still + at zoom 1** → cursor-follow pan, not the stream. Root cause: Phase C dropped display-rate smoothing (window stepped at video-frame rate, no interpolation) — strictly less than Phase A's CA spring.

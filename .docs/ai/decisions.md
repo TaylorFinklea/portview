@@ -2,6 +2,16 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-26] Zoom — capture-time frame tagging (kills the re-crop "wrong-content flash")
+
+**Context**: With the smooth-pan fix landed (device-confirmed: "so much better… a lot smoother… mouse really smooth"), the last artifact was the picture "flashing wrong content" when it repaints at the screen edge. User characterized it as a jump/flash (not a smear) → the deferred **#5 capture-vs-encode tag skew**.
+
+**Root cause**: the host tagged each `VideoFrame` with `capture.currentViewport()` at ENCODE time, but the pixels were captured ≤2 frames earlier (the `.bufferingNewest(2)` queue) under a possibly-different crop. On a re-crop the client mapped the zoom window into the NEW region while the pixels were still the OLD region → wrong-content flash, worst at edges where the crop reshapes.
+
+**Decision**: Tag at CAPTURE time. `SendableFrame` carries a `region`, snapshotted in the SCStream `didOutputSampleBuffer` callback from `appliedRegion` (a lock-guarded copy set when `updateConfiguration` takes effect). `pumpVideo` tags the wire frame from `frame.region` instead of the live `currentViewport()`. So a buffer captured under the old crop but encoded after a re-crop carries the OLD region → the client always maps the window into the region the pixels actually show. **Host-side only** (the client already maps into the frame's region); does NOT touch the capture-size ladder → can't reintroduce the crash. Residual: the `updateConfiguration`→first-new-buffer latency is inherent and small (was the dominant queue+encode skew, now removed).
+
+**Verify**: `swift test` 158, macOS BUILD SUCCEEDED. NOT pushed. **Device-verify** (needs the rebuilt host relaunched): pan to the screen edge while zoomed → no wrong-content flash on the re-crop.
+
 ## [2026-06-24] Zoom smooth-pan — display-link eased render loop (the actual fix)
 
 **Context**: Device test of Phase C: tearing stayed gone but the pan was "even jerkier than before." Systematic-debugging + two diagnostic questions to the user localized it precisely: **jerky ONLY when panning, smooth when still, smooth at zoom 1** → the base stream is fine; it's purely the cursor-follow pan.
