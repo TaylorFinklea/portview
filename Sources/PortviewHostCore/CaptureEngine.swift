@@ -9,6 +9,11 @@ import CoreVideo
 struct SendableFrame: @unchecked Sendable {
     let pixelBuffer: CVPixelBuffer
     let pts: CMTime
+    /// The normalized crop region in effect WHEN THIS BUFFER WAS CAPTURED (not at encode time). Tagging
+    /// at capture time keeps the region matched to the pixels: a buffer captured under the old crop that
+    /// is encoded after a re-crop carries the OLD region, so the client never maps the zoom window into
+    /// the wrong region (the "flashes wrong content on re-crop at the edge" glitch).
+    let region: CGRect
 }
 
 /// A slice of captured system audio, already converted to non-interleaved Float32 PCM
@@ -47,6 +52,11 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     private let queue = DispatchQueue(label: "portview.capture")
     private let audioQueue = DispatchQueue(label: "portview.capture.audio")
     private let viewportState = ViewportState()
+    // Synchronously-readable copy of the applied crop region, so the capture callback can stamp each
+    // buffer with the region active at production time (the actor `viewportState` can't be awaited from
+    // the sync `SCStreamOutput` callback). Updated when a re-crop actually takes effect.
+    private let regionLock = NSLock()
+    private var appliedRegion = CGRect(x: 0, y: 0, width: 1, height: 1)
     private let continuation: AsyncStream<SendableFrame>.Continuation
     let frames: AsyncStream<SendableFrame>
     private let audioContinuation: AsyncStream<SendableAudioFrame>.Continuation
@@ -66,6 +76,13 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
 
     func currentViewport() async -> CGRect { await viewportState.get() }
     func consumeKeyframeRequest() async -> Bool { await viewportState.consumeKeyframeRequest() }
+
+    private func setAppliedRegion(_ rect: CGRect) {
+        regionLock.lock(); appliedRegion = rect; regionLock.unlock()
+    }
+    private func currentAppliedRegion() -> CGRect {
+        regionLock.lock(); defer { regionLock.unlock() }; return appliedRegion
+    }
 
     init(width: Int, height: Int) {
         self.width = width
@@ -140,6 +157,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         let unchangedSize = config.width == outputSize.width && config.height == outputSize.height
         if unchangedRect && unchangedSize {
             await viewportState.set(normalizedRect, requestKeyframe: false)
+            setAppliedRegion(normalizedRect)
             return true
         }
         // Snapshot the last-applied state so we can roll back if the update throws — `config` is a
@@ -159,6 +177,10 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             let requestKeyframe = CaptureSizing.cropRequiresKeyframe(
                 from: CaptureSizing.Size(width: priorWidth, height: priorHeight), to: outputSize)
             await viewportState.set(normalizedRect, requestKeyframe: requestKeyframe)
+            // Mark the new region as applied AFTER updateConfiguration completes (Apple's signal it's in
+            // effect), so buffers produced from here on are stamped with it; in-flight old-crop buffers
+            // captured before this point keep the old region.
+            setAppliedRegion(normalizedRect)
             return true
         } catch {
             config.sourceRect = priorRect
@@ -181,7 +203,10 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             guard CMSampleBufferGetNumSamples(sampleBuffer) > 0,
                   CMSampleBufferIsValid(sampleBuffer),
                   let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-            continuation.yield(SendableFrame(pixelBuffer: pixelBuffer, pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer)))
+            continuation.yield(SendableFrame(
+                pixelBuffer: pixelBuffer,
+                pts: CMSampleBufferGetPresentationTimeStamp(sampleBuffer),
+                region: currentAppliedRegion()))
         case .audio:
             handleAudio(sampleBuffer)
         default:

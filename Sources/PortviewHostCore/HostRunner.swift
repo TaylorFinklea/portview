@@ -596,7 +596,10 @@ public struct HostRunner: Sendable {
                 sequence += 1
                 needsKeyframe = false
                 stats.recordFrame(byteCount: payload.count, isKeyframe: sample.isKeyframe, encodeMs: encodeMs)
-                let viewport = await capture.currentViewport()
+                // Tag with the region captured WITH this buffer (not the live viewport, which may have
+                // re-cropped since this buffer was produced) so the client maps the zoom window into the
+                // region the pixels actually show — no wrong-content flash on re-crop.
+                let viewport = frame.region
                 try await connection.send(.videoFrame(VideoFrame(
                     sequence: sequence,
                     ptsMicros: UInt64(max(0, CMTimeGetSeconds(frame.pts)) * 1_000_000),
