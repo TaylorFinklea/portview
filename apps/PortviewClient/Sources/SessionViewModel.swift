@@ -316,7 +316,10 @@ final class SessionViewModel: ObservableObject {
     /// with the display boundary needs no margin, since the host can't capture past the screen) AND `f`
     /// isn't more than `looseFactor`× the window in either dimension.
     nonisolated static func windowCovered(_ window: CGRect, by f: CGRect,
-                                          marginFraction: CGFloat = 0.12, looseFactor: CGFloat = 2.5) -> Bool {
+                                          marginFraction: CGFloat = 0.12, looseFactor: CGFloat = 3.2) -> Bool {
+        // `looseFactor` must exceed the fresh crop's window-multiple so a just-applied crop reads as
+        // covered (else it re-crops every frame): padding 0.6 → 2.2×window, snapped up by the ≤1.25×
+        // capture-size ladder → ≤2.75×; 3.2 clears it.
         // Margin is a FRACTION of the window, not absolute: the crop padding is relative (0.25×window),
         // so at high zoom (tiny window) an absolute margin could exceed the padding and force a re-crop
         // every frame. `marginFraction` must stay below the padding fraction so a fresh crop is covered.
