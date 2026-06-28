@@ -6,6 +6,13 @@
 
 `main`
 
+## Latest Session (2026-06-28 — zoom crop padding 0.9→1.5 (ultrawide re-crop tearing))
+
+- Device feedback: display-refresh works ✅. But re-crop "tearing" on the ULTRAWIDE host (not smaller screens) — a given pan crosses more display area → more `updateConfiguration` re-crop hitches.
+- **Fix**: `ZoomGeometry` padX/padY 0.9→**1.5** (captured region = 4×window), `windowCovered` looseFactor 4.2→**6.0** (clears the 4×→≤5× ladder-snapped multiple). Confirmed `CaptureSizing.cropOutputSize` caps at native display res + scales output with the crop fraction → wider padding costs BANDWIDTH (LAN, fine), NOT crispness under Auto bitrate. Client-only.
+- ZoomGeometryTests threshold `<0.8`→`<0.9` (padding 1.5 → cropRequest.width 0.8 at zoom 5). Verify: iOS `xcodebuild test` **57**, built + installed on Roshar.
+- NEXT (device verify): ultrawide high-zoom pan → tearing/hitches even rarer. If still present, push padding higher (tunable; watch ultrawide bandwidth) or investigate present-sync on the large drawable.
+
 ## Latest Session (2026-06-27 — host runtime display refresh: multi-monitor switcher without relaunch)
 
 - Fixed the roadmap-Now item: the host snapshotted displays ONCE at launch, so a monitor woken/connected after launch never appeared and the client switcher (`displays.count > 1`) hid until relaunch. Now LIVE.

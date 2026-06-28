@@ -52,12 +52,14 @@ struct ZoomGeometry {
 
         // Crop request = the visible window, padded for pan headroom. Deliberately the window's OWN
         // aspect (not square) so it shrinks for an ultrawide display on a portrait phone. Generous
-        // padding (0.9×window each side) gives the hysteresis lots of room to pan before re-cropping —
-        // each re-crop is a `SCStream.updateConfiguration` hiccup, the residual "hitch when the crop
-        // refreshes". The bigger captured region is encoded at NATIVE density (see CaptureSizing.
-        // cropOutputSize), so this costs bandwidth (plentiful here), NOT crispness.
-        let padX = (visX1 - visX0) * 0.9
-        let padY = (visY1 - visY0) * 0.9
+        // padding (1.5×window each side → captured region = 4×window) gives the hysteresis lots of room
+        // to pan before re-cropping — each re-crop is a `SCStream.updateConfiguration` hiccup, the
+        // residual "hitch/tear when the crop refreshes" (worse on a large ultrawide host, where a given
+        // pan crosses more display area → more re-crops). The bigger captured region is encoded at NATIVE
+        // density (see CaptureSizing.cropOutputSize, capped at the display so a sub-rect is never
+        // downscaled), so under Auto bitrate this costs bandwidth (plentiful on LAN), NOT crispness.
+        let padX = (visX1 - visX0) * 1.5
+        let padY = (visY1 - visY0) * 1.5
         let cropX0 = max(0, visX0 - padX), cropY0 = max(0, visY0 - padY)
         let cropX1 = min(1, visX1 + padX), cropY1 = min(1, visY1 + padY)
         cropRequest = CGRect(x: cropX0, y: cropY0, width: cropX1 - cropX0, height: cropY1 - cropY0)

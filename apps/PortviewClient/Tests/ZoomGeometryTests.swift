@@ -32,7 +32,7 @@ final class ZoomGeometryTests: XCTestCase {
     /// visible window is a genuine sub-rect of the display.
     func testHighZoomOnUltrawideRequestsCroppedRegion() {
         let g = ZoomGeometry(view: phone, displaySize: ultrawide, cursor: center, zoom: 5)
-        XCTAssertLessThan(g.cropRequest.width, 0.8) // a real crop, not the whole display (was 1.0; padded 0.9)
+        XCTAssertLessThan(g.cropRequest.width, 0.9) // a real crop, not the whole display (padding 1.5 → 0.8 here)
         XCTAssertLessThan(g.visibleWindow.width, 0.5) // the magnified window itself is small
         XCTAssertGreaterThan(g.visibleWindow.width, 0)
     }
