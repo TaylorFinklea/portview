@@ -6,6 +6,15 @@
 
 `main`
 
+## Latest Session (2026-06-27 — host runtime display refresh: multi-monitor switcher without relaunch)
+
+- Fixed the roadmap-Now item: the host snapshotted displays ONCE at launch, so a monitor woken/connected after launch never appeared and the client switcher (`displays.count > 1`) hid until relaunch. Now LIVE.
+- **New `DisplaysUpdate` msg (tag 25)**; host `refreshDisplaysLoop` polls `SCShareableContent.current` every 2s + `HostControl.broadcast`s when `displaysChanged` (order-independent set compare); `DisplayRegistry` (lock-guarded) is the live source for handshake + `switchDisplay` (replaced `SendableDisplays`). Runs alongside `serveConnections` in a `withTaskGroup` under the existing cancel handler.
+- **Client** `.displaysUpdate` → updates `session.displays` (switcher returns); `resolvedActiveDisplay` keeps/retargets the streamed display if it vanished; tracks resolution change.
+- Reviewed clean (native code-reviewer, no issues ≥80: teardown, registry thread-safety, broadcast-vs-video concurrency, msg ordering). Decision: decisions.md (2026-06-27).
+- **Verify**: `swift test` **166** (+8: DisplaysUpdateTests ×3, DisplayRefreshTests ×5), macOS host BUILD SUCCEEDED, iOS `xcodebuild test` **57** (+3 `resolvedActiveDisplay`). (Recreated a missing iPhone-17 sim device — the iOS 26.0.1 runtime disk image was present, just had no device.) Host reinstalled to /Applications, client reinstalled on Roshar. NOT pushed.
+- NEXT (device verify): connect with one monitor → wake/plug a 2nd display mid-session → switcher reappears within ~2s, no relaunch; switching works. Plus the standing device-verify queue (zoom padding 0.9, SAS, motion, M7).
+
 ## Latest Session (2026-06-26 #2 — zoom low-fps root cause: edge-hysteresis re-cropping)
 
 - Capture-time tagging helped but residual "flash" remained, confirmed (device) to happen ONLY on MOVING content. Pulled frames from a moving-content clip (ai-scratch/, gitignored): at 6× the stream was **1.5 Mbps · ~4 fps** — the smooth pan can't hide a 4fps CONTENT stream → choppy on motion; static fine.

@@ -40,6 +40,7 @@ public enum Frame {
         case .sasClientReveal(let m): encode(m)
         case .sasHostReveal(let m): encode(m)
         case .sasClientConfirm(let m): encode(m)
+        case .displaysUpdate(let m): encode(m)
         }
     }
 
@@ -83,6 +84,7 @@ public enum Frame {
         case .sasClientReveal: return .sasClientReveal(try SASClientReveal(from: &r))
         case .sasHostReveal: return .sasHostReveal(try SASHostReveal(from: &r))
         case .sasClientConfirm: return .sasClientConfirm(try SASClientConfirm(from: &r))
+        case .displaysUpdate: return .displaysUpdate(try DisplaysUpdate(from: &r))
         }
     }
 }

@@ -2,6 +2,21 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-27] Host — runtime display refresh (multi-monitor switcher without relaunch)
+
+**Context**: The host snapshotted `SCShareableContent.current.displays` ONCE at launch and shared it (immutable `SendableDisplays`) with every connection. A monitor connected/woken after launch never appeared, so the client's display switcher (gated on `displays.count > 1`) stayed hidden until a full host relaunch. Surfaced when the user relaunched the host with the 2nd display asleep and "lost the ability to change monitors."
+
+**Decision**: Make the display list live and push changes to connected clients.
+- **Protocol**: new `DisplaysUpdate` message (tag 25), host→client, carrying `[DisplayInfo]` — the same payload `ServerHello` already carries, but sendable on its own whenever the set changes.
+- **Host**: `DisplayRegistry` (lock-guarded `@unchecked Sendable`) replaces `SendableDisplays` as the shared display source; the handshake `ServerHello` and `switchDisplay(forID:)` read it live. `refreshDisplaysLoop` polls `SCShareableContent.current` every 2s (the same source as the launch snapshot) and, when `displaysChanged` (order-independent set compare, sensitive to id/count/dims) is true, updates the registry and `HostControl.broadcast`s a `DisplaysUpdate`. The loop runs alongside `serveConnections` in a `withTaskGroup` under the existing cancellation handler (cancel → `listener.cancel()` ends the connections stream → `group.next()` returns → `cancelAll()` stops the poll). An empty snapshot is ignored so a transient read can't blank the registry.
+- **Client**: `.displaysUpdate` updates `session.displays` (switcher reappears). `resolvedActiveDisplay(current:among:)` keeps the streamed display if still offered, else falls back to the first AND retargets the host via `switchDisplay` (so the stream isn't stranded on a removed display); a resolution change on the active display updates `displaySize`.
+
+**Why polling, not `NSApplication.didChangeScreenParametersNotification`**: keeps `PortviewHostCore` decoupled from AppKit (it's a library used by both the app and the CLI), and `SCShareableContent.current` is the authoritative source already trusted at launch. 2s matches the app's existing permission poll cadence; the cost is negligible.
+
+**Why broadcast only reaches streaming sessions**: SAS-preamble connections are never registered in `HostControl` (separate `serveSASPreamble` path), so a `DisplaysUpdate` can't leak onto an unpinned preamble connection — it only carries SAS messages.
+
+**Verify**: `swift test` **166** (`DisplaysUpdateTests` ×3, `DisplayRefreshTests` ×5), macOS host BUILD SUCCEEDED, iOS `xcodebuild test` **57** (`GlassMappingTests` +3 `resolvedActiveDisplay`). The iOS 26.0.1 sim runtime disk image was present but had no simulator device — recreated an iPhone-17 device, then the full iOS suite ran green; client also builds + installs on Roshar. Reviewed clean (native code-reviewer: teardown, registry thread-safety, broadcast-vs-video-send concurrency, serverHello-before-displaysUpdate ordering all verified; no issues ≥80). NOT pushed. **Device-verify**: connect with one monitor → wake/plug a 2nd mid-session → switcher reappears within ~2s, no relaunch; switching to it works.
+
 ## [2026-06-26] Zoom — low fps at high zoom: edge-hysteresis re-cropping
 
 **Context**: After capture-time tagging, the residual "flash" was confirmed (device) to happen ONLY on MOVING content, never static. Frame analysis of a moving-content clip: at 6× the stream was **1.5 Mbps · ~4 fps**. The smooth display-link pan can't hide a 4 fps *content* stream → moving content looks choppy/flashy; static has nothing to update so looks fine.

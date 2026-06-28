@@ -276,6 +276,14 @@ final class SessionViewModel: ObservableObject {
         audioPlayer.stop()
     }
 
+    /// Resolve which display stays active after the host re-advertises its display list mid-session
+    /// (a monitor connected/woke/was removed). Keep the current one if it's still offered; otherwise
+    /// fall back to the first so the UI stays consistent. An empty list leaves the current id untouched.
+    nonisolated static func resolvedActiveDisplay(current: UInt32, among displays: [DisplayInfo]) -> UInt32 {
+        if displays.contains(where: { $0.id == current }) { return current }
+        return displays.first?.id ?? current
+    }
+
     /// Re-target the live stream to another of the host's displays (no reconnect).
     func switchDisplay(to displayID: UInt32) {
         guard displayID != activeDisplayID,
@@ -566,6 +574,20 @@ final class SessionViewModel: ObservableObject {
                 // the cursor-follow spring every report for no visible motion → micro-stutter.
                 let p = CGPoint(x: cursor.normalizedX, y: cursor.normalizedY)
                 if !p.isClose(to: cursorNormalized) { cursorNormalized = p; updateMagnifierTarget() }
+            case .displaysUpdate(let update):
+                // The host re-advertised its displays (a monitor connected/woke/was removed). Refresh
+                // the list so the display switcher reappears without a reconnect.
+                displays = update.displays
+                let resolved = Self.resolvedActiveDisplay(current: activeDisplayID, among: update.displays)
+                if resolved != activeDisplayID {
+                    // The streamed display went away — retarget the host to the fallback (switchDisplay
+                    // sends `.switchDisplay` and resets the viewport/cursor for the new display).
+                    switchDisplay(to: resolved)
+                } else if let active = update.displays.first(where: { $0.id == activeDisplayID }) {
+                    // Same active display; track a resolution change so the zoom geometry stays correct.
+                    let size = CGSize(width: max(1, Double(active.width)), height: max(1, Double(active.height)))
+                    if size != displaySize { displaySize = size }
+                }
             case .clipboardUpdate(let update):
                 UIPasteboard.general.string = update.text
             case .audioFrame(let audio):

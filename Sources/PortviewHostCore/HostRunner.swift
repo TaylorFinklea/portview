@@ -89,6 +89,17 @@ public final class HostControl: @unchecked Sendable {
         }
     }
 
+    /// Send a message to every active client session (e.g. a `DisplaysUpdate` when the host's display
+    /// configuration changes). Best-effort and fire-and-forget, per connection.
+    public func broadcast(_ message: AnyMessage) {
+        lock.lock()
+        let active = Array(connections.values)
+        lock.unlock()
+        for connection in active {
+            Task { try? await connection.send(message) }
+        }
+    }
+
     /// Close every active client session. The listener stays up and keeps advertising, so we first
     /// send a graceful `bye` (and let it flush) — the client treats that as a deliberate close and
     /// will NOT auto-reconnect, whereas a bare close looks like a network drop and would re-bind.
@@ -198,12 +209,23 @@ public struct HostRunner: Sendable {
                 onEvent(Self.accessibilityWarningEvent(for: identity))
             }
 
-            let sendableDisplays = SendableDisplays(displays)
+            let registry = DisplayRegistry(displays)
             let hostCertBytes = (try? tlsIdentity.certificateSHA256()).map { [UInt8]($0) } ?? []
             await withTaskCancellationHandler {
-                await Self.serveConnections(listener.connections) { connection in
-                    await Self.serve(connection, displays: sendableDisplays, hostCertSHA256: hostCertBytes,
-                                     emit: onEvent, control: control, sas: sasControl)
+                await withTaskGroup(of: Void.self) { group in
+                    // Re-advertise displays when the configuration changes (monitor connected/woken/removed).
+                    group.addTask {
+                        await Self.refreshDisplaysLoop(registry: registry, control: control, emit: onEvent)
+                    }
+                    group.addTask {
+                        await Self.serveConnections(listener.connections) { connection in
+                            await Self.serve(connection, registry: registry, hostCertSHA256: hostCertBytes,
+                                             emit: onEvent, control: control, sas: sasControl)
+                        }
+                    }
+                    // serveConnections returns only on cancellation; tear down the refresh loop with it.
+                    await group.next()
+                    group.cancelAll()
                 }
             } onCancel: {
                 listener.cancel()
@@ -302,6 +324,51 @@ public struct HostRunner: Sendable {
         .accessibilityWarning(Self.accessibilityHelp(for: identity))
     }
 
+    /// Map ScreenCaptureKit displays to the wire `DisplayInfo` advertised to clients. Used both at
+    /// handshake (`ServerHello`) and by the runtime refresh loop (`DisplaysUpdate`) so both paths
+    /// describe a display identically.
+    static func displayInfos(from displays: [SCDisplay]) -> [DisplayInfo] {
+        displays.map {
+            DisplayInfo(id: UInt32($0.displayID), name: "Display \($0.displayID)",
+                        width: UInt32($0.width), height: UInt32($0.height), scaleX100: 100)
+        }
+    }
+
+    /// Whether the display configuration changed enough to re-advertise. Order-independent (the OS may
+    /// reorder the list) but sensitive to identity, count, and dimensions — so a monitor connecting,
+    /// waking, being removed, or changing resolution triggers a `DisplaysUpdate`, while a bare reorder
+    /// of the same set does not.
+    static func displaysChanged(from old: [DisplayInfo], to new: [DisplayInfo]) -> Bool {
+        old.sorted { $0.id < $1.id } != new.sorted { $0.id < $1.id }
+    }
+
+    /// Periodically re-read the host's displays and re-advertise to connected clients when the set
+    /// changes. The display list is otherwise snapshotted once at launch, so a monitor connected/woken
+    /// after the host started would never appear (and the client's switcher would stay hidden) without
+    /// this. Polls `SCShareableContent.current` (the same source as the launch snapshot); a momentarily
+    /// empty snapshot is ignored so a transient read can't blank the registry.
+    static func refreshDisplaysLoop(
+        registry: DisplayRegistry,
+        control: HostControl?,
+        emit: @escaping @Sendable (HostRunnerEvent) -> Void,
+        interval: Duration = .seconds(2)
+    ) async {
+        var last = displayInfos(from: registry.current())
+        while !Task.isCancelled {
+            try? await Task.sleep(for: interval)
+            if Task.isCancelled { break }
+            guard let content = try? await SCShareableContent.current else { continue }
+            let displays = content.displays
+            guard !displays.isEmpty else { continue }
+            let infos = displayInfos(from: displays)
+            guard displaysChanged(from: last, to: infos) else { continue }
+            last = infos
+            registry.set(displays)
+            emit(.message("Displays changed: \(infos.count) display(s) available."))
+            control?.broadcast(.displaysUpdate(DisplaysUpdate(displays: infos)))
+        }
+    }
+
     /// Default ceiling on concurrently-served connections. A legit host serves one streaming client
     /// plus a few transient SAS preambles; this caps a connection flood (Guardrail C). Each accepted
     /// connection still spawns a task that reads its first message before doing anything, and a SAS
@@ -334,14 +401,14 @@ public struct HostRunner: Sendable {
     /// input messages (injected as CGEvents); video streams concurrently from a child task.
     private static func serve(
         _ connection: PortviewConnection,
-        displays: SendableDisplays,
+        registry: DisplayRegistry,
         hostCertSHA256: [UInt8] = [],
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in },
         control: HostControl? = nil,
         sas: SASPairingControl? = nil
     ) async {
         await withTaskCancellationHandler {
-            await serveSession(connection, displays: displays, hostCertSHA256: hostCertSHA256,
+            await serveSession(connection, registry: registry, hostCertSHA256: hostCertSHA256,
                                emit: emit, control: control, sas: sas)
         } onCancel: {
             connection.close()
@@ -350,14 +417,13 @@ public struct HostRunner: Sendable {
 
     private static func serveSession(
         _ connection: PortviewConnection,
-        displays: SendableDisplays,
+        registry: DisplayRegistry,
         hostCertSHA256: [UInt8] = [],
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in },
         control: HostControl? = nil,
         sas: SASPairingControl? = nil
     ) async {
-        let displays = displays.values
-        guard let firstDisplay = displays.first else { connection.close(); return }
+        guard let firstDisplay = registry.current().first else { connection.close(); return }
 
         // Peek the first message to LOCK this connection's role BEFORE building any session
         // scaffolding. An SAS-preamble connection (first message = client commit) is UNPINNED (TOFU)
@@ -371,11 +437,7 @@ public struct HostRunner: Sendable {
             return
         }
 
-        let displayInfos = displays.map {
-            DisplayInfo(id: UInt32($0.displayID), name: "Display \($0.displayID)",
-                        width: UInt32($0.width), height: UInt32($0.height), scaleX100: 100)
-        }
-        var server = ServerHandshake(displays: displayInfos, supportedCodecs: [.hevc])
+        var server = ServerHandshake(displays: Self.displayInfos(from: registry.current()), supportedCodecs: [.hevc])
         let clipboard = ClipboardSync()
         clipboard.start { text in
             Task { try? await connection.send(.clipboardUpdate(ClipboardUpdate(text: text))) }
@@ -411,7 +473,7 @@ public struct HostRunner: Sendable {
         }
 
         func display(forID id: UInt32) -> SCDisplay {
-            displays.first { UInt32($0.displayID) == id } ?? firstDisplay
+            registry.current().first { UInt32($0.displayID) == id } ?? firstDisplay
         }
         func startVideo(on display: SCDisplay) {
             videoTask?.cancel()
@@ -637,12 +699,24 @@ public struct HostRunner: Sendable {
     }
 }
 
-private struct SendableDisplays: @unchecked Sendable {
-    // ScreenCaptureKit does not annotate SCDisplay as Sendable. We only share these immutable
-    // display descriptors with per-connection tasks; capture mutation happens inside SCStream.
-    let values: [SCDisplay]
+/// The host's live display list, shared across the refresh loop and every per-connection session task.
+/// Snapshotted at launch and updated in place when the display configuration changes, so a session's
+/// `switchDisplay`/handshake always sees the current set (not a stale launch snapshot).
+/// ScreenCaptureKit does not annotate `SCDisplay` as Sendable; we only share these immutable display
+/// descriptors, so the lock-guarded array is safe to mark `@unchecked Sendable`.
+final class DisplayRegistry: @unchecked Sendable {
+    private let lock = NSLock()
+    private var displays: [SCDisplay]
 
-    init(_ values: [SCDisplay]) {
-        self.values = values
+    init(_ displays: [SCDisplay]) { self.displays = displays }
+
+    func current() -> [SCDisplay] {
+        lock.lock(); defer { lock.unlock() }
+        return displays
+    }
+
+    func set(_ new: [SCDisplay]) {
+        lock.lock(); defer { lock.unlock() }
+        displays = new
     }
 }

@@ -212,5 +212,25 @@ final class GlassMappingTests: XCTestCase {
         XCTAssertNil(IncomingFileTransfers.safeFilename(""))
     }
 
+    // MARK: - Runtime display refresh (DisplaysUpdate)
+
+    private func display(_ id: UInt32, _ w: UInt32 = 1920, _ h: UInt32 = 1080) -> DisplayInfo {
+        DisplayInfo(id: id, name: "Display \(id)", width: w, height: h, scaleX100: 100)
+    }
+
+    func testResolvedActiveDisplayKeepsCurrentWhenStillPresent() {
+        let displays = [display(1), display(2)]
+        XCTAssertEqual(SessionViewModel.resolvedActiveDisplay(current: 2, among: displays), 2)
+    }
+
+    func testResolvedActiveDisplayFallsBackToFirstWhenRemoved() {
+        let displays = [display(3), display(4)]
+        XCTAssertEqual(SessionViewModel.resolvedActiveDisplay(current: 2, among: displays), 3)
+    }
+
+    func testResolvedActiveDisplayKeepsCurrentWhenListEmpty() {
+        XCTAssertEqual(SessionViewModel.resolvedActiveDisplay(current: 7, among: []), 7)
+    }
+
     private let pin = String(repeating: "a", count: 64)
 }
