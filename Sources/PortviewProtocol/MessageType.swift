@@ -25,4 +25,5 @@ public enum MessageType: UInt8, Sendable {
     case sasHostReveal = 23
     case sasClientConfirm = 24
     case displaysUpdate = 25
+    case hostLockStatus = 26
 }

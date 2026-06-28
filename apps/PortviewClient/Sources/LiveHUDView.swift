@@ -17,6 +17,7 @@ struct LiveHUDView: View {
         ("⌘", .command), ("⇧", .shift), ("⌥", .option), ("⌃", .control)
     ]
     private var isReconnecting: Bool { session.status == .reconnecting }
+    private var isHostLocked: Bool { session.hostLocked }
     private var hostName: String { session.hostName ?? "Mac" }
 
     var body: some View {
@@ -47,9 +48,9 @@ struct LiveHUDView: View {
                 .onChange(of: zoomGeometry.cropRequest) { _, crop in
                     session.requestViewport(crop: crop, window: zoomGeometry.visibleWindow)
                 }
-                .allowsHitTesting(!isReconnecting)
+                .allowsHitTesting(!isReconnecting && !isHostLocked)
                 .overlay {
-                    if isReconnecting {
+                    if isReconnecting || isHostLocked {
                         Color(hex: 0x080B0E, opacity: 0.58).blur(radius: 0.5)
                     }
                 }
@@ -109,7 +110,10 @@ struct LiveHUDView: View {
         .padding(.horizontal, 10)
         .padding(.top, 52)
         .padding(.bottom, 30)
-        .overlay { if isReconnecting { reconnectingCard } }
+        .overlay {
+            if isReconnecting { reconnectingCard }
+            else if isHostLocked { hostLockedCard }
+        }
     }
 
     private var telemetryRail: some View {
@@ -297,6 +301,30 @@ struct LiveHUDView: View {
                     .font(.grotesk(17, .semibold))
                     .foregroundStyle(Glass.text1Bright)
                 Text("the Mac's IP changed — re-binding over Bonjour. Input paused.")
+                    .font(.mono(10))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(Glass.text2)
+                    .padding(.horizontal, 4)
+            }
+            .padding(20)
+            .glassPanel()
+            .overlay(RoundedRectangle(cornerRadius: Glass.sheet, style: .continuous)
+                .strokeBorder(Glass.degraded.opacity(0.3), lineWidth: 1))
+            .padding(.horizontal, 34)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var hostLockedCard: some View {
+        VStack(spacing: 0) {
+            VStack(spacing: 12) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 40, weight: .medium))
+                    .foregroundStyle(Glass.degraded)
+                Text("\(hostName) is locked")
+                    .font(.grotesk(17, .semibold))
+                    .foregroundStyle(Glass.text1Bright)
+                Text("screen capture paused — unlock the Mac to resume. Input paused.")
                     .font(.mono(10))
                     .multilineTextAlignment(.center)
                     .foregroundStyle(Glass.text2)

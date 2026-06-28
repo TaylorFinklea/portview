@@ -6,6 +6,14 @@
 
 `main`
 
+## Latest Session (2026-06-28 #2 — keep-awake + host-lock status; "locked screen" achievable slice)
+
+- After the locked-screen feasibility spike (verdict: don't build the daemon), built the achievable slice. ultracode: design workflow → TDD → adversarial review workflow.
+- **KeepAwake** (id-keyed Set, injectable backend+ticker): holds `PreventUserIdleDisplaySleep` + periodic `IOPMAssertionDeclareUserActivity` (the actual idle-lock suppressor) while ≥1 client connected; wired into HostControl register/deregister/disconnectAll (disconnectAll can't strand it). **LockMonitor**: DistributedNotificationCenter + CGSession seed → broadcasts new `HostLockStatus` msg (tag 26); client seeded at handshake too. **Client**: hostLocked → "capture paused" overlay + `inputPaused` gates ALL input; reset per stream attempt.
+- Review (21 agents, 5 lenses + per-finding refute): 7 real findings fixed — **2 functional** (input bypassed the lock gate; hostLocked stranded across reconnect) + a `.default`-QoS timer fix (utility coalesced the re-arm) + test-coverage gaps. Rest refuted.
+- **Verify**: `swift test` **183** (HostLockStatus ×4, KeepAwake ×10, LockMonitor ×3), macOS host BUILD SUCCEEDED, iOS **57**. Host bundle updated at /Applications (was RUNNING — quit+relaunch to load new code); client reinstalled on Roshar. Decision: decisions.md (2026-06-28). NOT pushed.
+- NEXT (device verify): client connected + Mac idle past display-sleep/screensaver timeout → stays awake, no idle-lock; manual lock → client "capture paused" overlay + input disabled; unlock → resumes. CAVEAT: manual/policy-immediate lock not preventable; no remote unlock (by macOS design).
+
 ## Latest Session (2026-06-28 — zoom crop padding 0.9→1.5 (ultrawide re-crop tearing))
 
 - Device feedback: display-refresh works ✅. But re-crop "tearing" on the ULTRAWIDE host (not smaller screens) — a given pan crosses more display area → more `updateConfiguration` re-crop hitches.

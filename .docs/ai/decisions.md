@@ -2,6 +2,21 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-06-28] Host — keep-awake + host-lock status (the achievable slice of "work on a locked screen")
+
+**Context**: User asked to make Portview "work on a locked screen / unlock it." The 2026-06-28 feasibility spike (phases/locked-screen-feasibility-report.md) established the real locked/login/unlock case is walled off (secure event input, first-party-only privileged path, TCC can't bootstrap without a logged-in user). The achievable, worthwhile slice: keep the Mac from idle-locking mid-session, and tell the client when the host IS locked so it pauses instead of showing a black frame.
+
+**Decision**:
+- **KeepAwake** (PortviewHostCore): holds a system keep-awake assertion for EXACTLY the span when ≥1 streaming session is active. Keyed by a `Set<String>` of session ids (NOT a bare counter) so `disconnectAll` clearing sessions out from under the per-connection teardown can't strand it (a late `sessionEnded` for an already-removed id is a no-op). Wired into `HostControl.register/deregister/disconnectAll`. Two assertions: `kIOPMAssertionTypePreventUserIdleDisplaySleep` (keeps the screen lit so the viewer keeps seeing content) + a periodic `IOPMAssertionDeclareUserActivity` re-arm — the display-sleep assertion ALONE does NOT stop the screensaver/idle-lock (verified in the design research), so the re-arm is what actually suppresses the idle lock. Backend AND ticker are injectable (`KeepAwakeBackend`, `KeepAwakeTicker`) so transitions + the periodic re-arm are tested deterministically without IOKit or wall-clock timers.
+- **LockMonitor** (PortviewHostCore): seeds the authoritative state from `CGSessionCopyCurrentDictionary` (silently — no startup transition), then forwards live `com.apple.screenIsLocked`/`screenIsUnlocked` distributed notifications (non-sandboxed only; undocumented but long-stable — backed by the CGSession seed, never gating security). `HostRunner.run` broadcasts a new `HostLockStatus(locked:)` (tag 26) on change; each client is ALSO seeded the current state at handshake (so one connecting while locked pauses at once).
+- **Client**: `hostLocked` published state → "capture paused" overlay; `inputPaused` gates EVERY input send (pointer/click/scroll/text/key) — not just the trackpad's hit-testing — and `hostLocked` is reset per stream attempt so a reconnect after the host unlocked can't strand the overlay.
+
+**Why the QoS bump**: the re-arm timer is deadline-sensitive (must fire well under the ~60s screensaver threshold); `.utility` QoS coalesces/defers too aggressively (caught when the timing test only saw the immediate kick), so the dispatch ticker uses `.default` QoS with ~10% leeway.
+
+**Process (ultracode)**: design/mapping workflow (3 codebase mappers + 1 macOS-best-practices researcher) → TDD per layer → adversarial review workflow (5 lenses → per-finding refutation, 21 agents). Review surfaced 7 real findings (2 functional: client input bypassed the lock gate; `hostLocked` stranded across reconnect) — all fixed; the rest refuted (e.g. "lock overlay leaks the lock screen" — false: the secure desktop isn't capturable, frames are blank/black).
+
+**Verify**: `swift test` **183** (HostLockStatus ×4, KeepAwake ×10, LockMonitor ×3), macOS host BUILD SUCCEEDED, iOS `xcodebuild test` **57**. Reviewed (adversarial workflow) — no surviving findings after fixes. NOT pushed. **Device-verify**: idle past the display-sleep/screensaver timeout with a client connected → stays awake, doesn't idle-lock; manual lock → client overlay + input disabled; unlock → resumes.
+
 ## [2026-06-27] Host — runtime display refresh (multi-monitor switcher without relaunch)
 
 **Context**: The host snapshotted `SCShareableContent.current.displays` ONCE at launch and shared it (immutable `SendableDisplays`) with every connection. A monitor connected/woken after launch never appeared, so the client's display switcher (gated on `displays.count > 1`) stayed hidden until a full host relaunch. Surfaced when the user relaunched the host with the 2nd display asleep and "lost the ability to change monitors."

@@ -54,17 +54,31 @@ public enum HostRunnerEvent: Equatable, Sendable {
 public final class HostControl: @unchecked Sendable {
     private let lock = NSLock()
     private var connections: [String: PortviewConnection] = [:]
+    /// Holds a system keep-awake assertion while >=1 client is connected, so the Mac doesn't idle-sleep
+    /// or idle-lock mid-session. Keyed by session id (see KeepAwake) so it survives `disconnectAll`.
+    private let keepAwake: KeepAwake
 
-    public init() {}
+    public init() {
+        self.keepAwake = KeepAwake(backend: IOKitKeepAwakeBackend())
+    }
+
+    /// Test seam: inject a fake keep-awake backend.
+    init(keepAwake: KeepAwake) {
+        self.keepAwake = keepAwake
+    }
 
     func register(_ id: String, _ connection: PortviewConnection) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         connections[id] = connection
+        lock.unlock()
+        keepAwake.sessionBegan(id)
     }
 
     func deregister(_ id: String) {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         connections[id] = nil
+        lock.unlock()
+        keepAwake.sessionEnded(id)
     }
 
     /// Send a file to the connected iPhone (Mac→iPhone transfer): an offer then ordered 64 KB
@@ -108,6 +122,7 @@ public final class HostControl: @unchecked Sendable {
         let active = Array(connections.values)
         connections.removeAll()
         lock.unlock()
+        keepAwake.endAll()
         for connection in active {
             Task {
                 try? await connection.send(.bye(Bye(reason: "Disconnected by host")))
@@ -211,6 +226,15 @@ public struct HostRunner: Sendable {
 
             let registry = DisplayRegistry(displays)
             let hostCertBytes = (try? tlsIdentity.certificateSHA256()).map { [UInt8]($0) } ?? []
+            // Tell connected clients when the host screen locks/unlocks so they can pause the live view
+            // (a locked Mac captures the secure desktop / blank, not the user's content).
+            let lockMonitor = LockMonitor { locked in
+                control?.broadcast(.hostLockStatus(HostLockStatus(locked: locked)))
+                onEvent(.message(locked ? "🔒 Screen locked — live view paused for connected clients."
+                                        : "🔓 Screen unlocked — live view resumed."))
+            }
+            lockMonitor.start()
+            defer { lockMonitor.stop() }
             await withTaskCancellationHandler {
                 await withTaskGroup(of: Void.self) { group in
                     // Re-advertise displays when the configuration changes (monitor connected/woken/removed).
@@ -499,6 +523,11 @@ public struct HostRunner: Sendable {
                         connectedDeviceID = sessionID
                         control?.register(sessionID, connection)
                         emit(.deviceConnected(id: sessionID, name: hello.deviceName))
+                        // Seed this client with the current lock state (the live broadcast only reaches
+                        // already-connected clients), so one that connects while locked pauses at once.
+                        if LockMonitor.currentlyLocked() {
+                            try? await connection.send(.hostLockStatus(HostLockStatus(locked: true)))
+                        }
                     }
                 } catch {
                     print("handshake error: \(error)")

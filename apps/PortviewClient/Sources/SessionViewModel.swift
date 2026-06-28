@@ -40,6 +40,9 @@ final class SessionViewModel: ObservableObject {
     /// Updated when the host confirms a viewport; the client renders the residual zoom against it.
     @Published var frameViewport = CGRect(x: 0, y: 0, width: 1, height: 1)
     @Published var qualityDiagnostics = QualityDiagnostics()
+    /// True when the host reports its screen is locked — the captured content is the secure desktop /
+    /// blank, so the client pauses the live view and shows a "capture paused" overlay.
+    @Published var hostLocked = false
     /// The name of the Mac this session is bound to (for reconnect status copy); nil before connect.
     @Published private(set) var hostName: String?
     /// Set when a stream succeeds: the host to remember, carrying the connection's resolved concrete
@@ -271,6 +274,7 @@ final class SessionViewModel: ObservableObject {
         incomingFiles.removeAll()
         displays = []
         activeDisplayID = 0
+        hostLocked = false
         resetViewport()
         resetQualityDiagnostics()
         audioPlayer.stop()
@@ -373,7 +377,13 @@ final class SessionViewModel: ObservableObject {
 
     // MARK: - Input (client → host)
 
+    /// Control input is paused while the host screen is locked (injecting into the secure desktop is
+    /// dropped by macOS anyway, and the lock overlay tells the user it's paused). Gates every input
+    /// path here — not just the trackpad's hit-testing — so keyboard/scroll are paused too.
+    private var inputPaused: Bool { hostLocked }
+
     func sendPointerMove(dx: CGFloat, dy: CGFloat) {
+        guard !inputPaused else { return }
         let sentDx = dx.rounded()
         let sentDy = dy.rounded()
         send(.pointerMove(PointerMove(dx: Int32(sentDx), dy: Int32(sentDy))))
@@ -386,25 +396,30 @@ final class SessionViewModel: ObservableObject {
     }
 
     func sendClick() {
+        guard !inputPaused else { return }
         // Down then up on the ordered lane — FIFO guarantees they can't invert into a stuck click.
         send(.pointerButton(PointerButton(button: .left, isDown: true)))
         send(.pointerButton(PointerButton(button: .left, isDown: false)))
     }
 
     func sendScroll(dx: CGFloat, dy: CGFloat) {
+        guard !inputPaused else { return }
         send(.scroll(Scroll(dx: Int32(dx.rounded()), dy: Int32(dy.rounded()))))
     }
 
     func sendText(_ text: String) {
+        guard !inputPaused else { return }
         send(.typeText(TypeText(text: text)))
     }
 
     func sendKey(_ key: SpecialKey, modifiers: KeyModifiers = []) {
+        guard !inputPaused else { return }
         send(.keyEvent(KeyEvent(special: key, modifiers: modifiers)))
     }
 
     /// Send a single character as a key chord (used for shortcuts like ⌘C).
     func sendChar(_ character: String, modifiers: KeyModifiers) {
+        guard !inputPaused else { return }
         send(.keyEvent(KeyEvent(character: character, modifiers: modifiers)))
     }
 
@@ -517,6 +532,9 @@ final class SessionViewModel: ObservableObject {
         // partial transfer from a dropped session and clear its stale "Receiving…" status.
         incomingFiles.removeAll()
         transferStatus = nil
+        // Clear any stale lock overlay from a prior attempt; the host re-seeds the current state at
+        // handshake (it only sends locked:true), so a reconnect after the host UNLOCKED can't strand it.
+        hostLocked = false
         var client = ClientHandshake(
             deviceID: UIDevice.current.identifierForVendor?.uuidString ?? "ios-client",
             deviceName: UIDevice.current.name,
@@ -588,6 +606,11 @@ final class SessionViewModel: ObservableObject {
                     let size = CGSize(width: max(1, Double(active.width)), height: max(1, Double(active.height)))
                     if size != displaySize { displaySize = size }
                 }
+            case .hostLockStatus(let lock):
+                // The host's screen locked/unlocked. Pause/resume the live view (a locked Mac captures
+                // the secure desktop / blank, not the user's content). Guard so an unchanged state
+                // doesn't fire objectWillChange.
+                if lock.locked != hostLocked { hostLocked = lock.locked }
             case .clipboardUpdate(let update):
                 UIPasteboard.general.string = update.text
             case .audioFrame(let audio):
