@@ -122,15 +122,29 @@ public final class PortviewConnection: @unchecked Sendable {
     private func receiveNext() {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [weak self] data, _, isComplete, error in
             guard let self else { return }
-            if let data, !data.isEmpty,
-               let messages = try? self.decoder.push([UInt8](data)) {
-                for message in messages { self.inboundContinuation.yield(message) }
+            if let data, !data.isEmpty, !self.processIncoming([UInt8](data)) {
+                return
             }
             if isComplete || error != nil {
                 self.inboundContinuation.finish()
                 return
             }
             self.receiveNext()
+        }
+    }
+
+    /// Decode `bytes` into messages and yield them. Returns `false` if a known-tag frame's
+    /// body was malformed, in which case the inbound stream has already been finished
+    /// (mirroring the isComplete/error path) instead of silently stalling on the swallowed
+    /// decode error. Exposed (internal) so tests can drive it without a live socket.
+    func processIncoming(_ bytes: [UInt8]) -> Bool {
+        do {
+            let messages = try decoder.push(bytes)
+            for message in messages { inboundContinuation.yield(message) }
+            return true
+        } catch {
+            inboundContinuation.finish()
+            return false
         }
     }
 }
