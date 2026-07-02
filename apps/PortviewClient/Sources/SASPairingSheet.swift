@@ -1,4 +1,5 @@
 import SwiftUI
+import PortviewClientCore
 
 /// 6-digit SAS pairing entry for a Bonjour-discovered Mac (replaces typing the 64-hex pin). The Mac
 /// displays a code; the user types it here. A match means the cert the client captured really is the

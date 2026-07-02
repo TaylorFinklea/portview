@@ -1,5 +1,6 @@
 import XCTest
 import Network
+import PortviewClientCore
 import PortviewProtocol
 import PortviewTransport
 
@@ -78,7 +79,7 @@ final class GlassMappingTests: XCTestCase {
     func testReconnectCandidatesPrefersDiscoveredThenFallback() {
         let fallback = NWEndpoint.hostPort(host: "10.0.0.5", port: 7443)
         let match = discovered("Roshar")
-        let result = SessionViewModel.reconnectCandidates(
+        let result = ReconnectPlanning.reconnectCandidates(
             name: "Roshar", fallback: fallback, discovered: [discovered("Other"), match])
         XCTAssertEqual(result, [match.endpoint, fallback])
     }
@@ -86,7 +87,7 @@ final class GlassMappingTests: XCTestCase {
     /// No matching discovered host → only the fallback endpoint.
     func testReconnectCandidatesFallbackOnlyWithoutMatch() {
         let fallback = NWEndpoint.hostPort(host: "10.0.0.5", port: 7443)
-        let result = SessionViewModel.reconnectCandidates(
+        let result = ReconnectPlanning.reconnectCandidates(
             name: "Roshar", fallback: fallback, discovered: [discovered("Other")])
         XCTAssertEqual(result, [fallback])
     }
@@ -94,7 +95,7 @@ final class GlassMappingTests: XCTestCase {
     /// When the fallback IS the rediscovered service endpoint, don't try it twice.
     func testReconnectCandidatesDedupesFallbackEqualToDiscovered() {
         let service = discovered("Roshar")
-        let result = SessionViewModel.reconnectCandidates(
+        let result = ReconnectPlanning.reconnectCandidates(
             name: "Roshar", fallback: service.endpoint, discovered: [service])
         XCTAssertEqual(result, [service.endpoint])
     }
@@ -124,18 +125,18 @@ final class GlassMappingTests: XCTestCase {
     // MARK: - Resolved endpoint → host:port (for persisting discovered Macs)
 
     func testHostPortFromResolvedHostPortEndpoint() {
-        let result = SessionViewModel.hostPort(from: .hostPort(host: "192.168.1.42", port: 7443))
+        let result = ReconnectPlanning.hostPort(from: .hostPort(host: "192.168.1.42", port: 7443))
         XCTAssertEqual(result?.host, "192.168.1.42")
         XCTAssertEqual(result?.port, 7443)
     }
 
     func testHostPortNilForServiceEndpoint() {
         let service = NWEndpoint.service(name: "Roshar", type: "_portview._udp", domain: "local.", interface: nil)
-        XCTAssertNil(SessionViewModel.hostPort(from: service))
+        XCTAssertNil(ReconnectPlanning.hostPort(from: service))
     }
 
     func testHostPortNilForNilEndpoint() {
-        XCTAssertNil(SessionViewModel.hostPort(from: nil))
+        XCTAssertNil(ReconnectPlanning.hostPort(from: nil))
     }
 
     // MARK: - Saved-host upsert (refresh by name; add by new name)
@@ -220,16 +221,16 @@ final class GlassMappingTests: XCTestCase {
 
     func testResolvedActiveDisplayKeepsCurrentWhenStillPresent() {
         let displays = [display(1), display(2)]
-        XCTAssertEqual(SessionViewModel.resolvedActiveDisplay(current: 2, among: displays), 2)
+        XCTAssertEqual(DisplaySelection.resolvedActiveDisplay(current: 2, among: displays), 2)
     }
 
     func testResolvedActiveDisplayFallsBackToFirstWhenRemoved() {
         let displays = [display(3), display(4)]
-        XCTAssertEqual(SessionViewModel.resolvedActiveDisplay(current: 2, among: displays), 3)
+        XCTAssertEqual(DisplaySelection.resolvedActiveDisplay(current: 2, among: displays), 3)
     }
 
     func testResolvedActiveDisplayKeepsCurrentWhenListEmpty() {
-        XCTAssertEqual(SessionViewModel.resolvedActiveDisplay(current: 7, among: []), 7)
+        XCTAssertEqual(DisplaySelection.resolvedActiveDisplay(current: 7, among: []), 7)
     }
 
     private let pin = String(repeating: "a", count: 64)

@@ -16,14 +16,6 @@ final class SessionViewModel: ObservableObject {
         case idle, connecting, streaming, reconnecting, failed(String)
     }
 
-    /// Sub-flow for SAS (6-digit) pairing of a Bonjour-discovered Mac, before the pinned session.
-    enum SASPairingState: Equatable {
-        case connecting          // running the commit/reveal preamble
-        case awaitingCode        // preamble done; waiting for the user to type the code shown on the Mac
-        case mismatch            // typed code didn't match — possible interception
-        case failed(String)      // preamble error
-    }
-
     @Published var status: Status = .idle
     /// Non-nil while pairing a discovered Mac via the 6-digit SAS code (drives the entry sheet).
     @Published var sasPairing: SASPairingState?
@@ -123,125 +115,32 @@ final class SessionViewModel: ObservableObject {
 
     // MARK: - SAS (6-digit) pairing
 
-    private var sasDerivedCode: String?
-    private var sasCapturedPinHex: String?
-    private var sasEndpoint: NWEndpoint?
-    private var sasName: String?
-    /// The preamble connection is HELD open across the user-typing phase so the client can send an
-    /// authenticated `SASClientConfirm` (Guardrail E) on the same peer. Torn down via `teardownSAS`.
-    private var sasConnection: PortviewConnection?
-    /// The secret needed to compute the confirm MAC (zeroed by `teardownSAS`).
-    private var sasSecret: (clientNonce: [UInt8], hostNonce: [UInt8], cert: [UInt8])?
+    /// Owns the SAS pairing sub-flow (preamble connection, derived code, confirm secret); `sasPairing`
+    /// mirrors its state for the entry sheet, and on a match it calls back into `start` to re-dial
+    /// pinned with the captured cert hash.
+    private let pairingCoordinator = SASClientCoordinator()
 
-    /// Begin SAS pairing for a Bonjour-discovered Mac (no pin typed). Runs the commit-then-reveal
-    /// preamble over an unpinned (TOFU) connection that captures the host's leaf cert, derives the
-    /// 6-digit code, and parks awaiting the user to type the code the Mac displays. On a match we
-    /// re-dial PINNED with the captured hash (so the streaming session is always pin-anchored).
+    init() {
+        pairingCoordinator.onStateChange = { [weak self] state in self?.sasPairing = state }
+        pairingCoordinator.startPinnedSession = { [weak self] endpoint, pinHex, name in
+            self?.start(endpoints: [endpoint], pinHex: pinHex, reconnectName: name)
+        }
+    }
+
+    /// Begin SAS pairing for a Bonjour-discovered Mac (no pin typed). Cancels any live session task,
+    /// then hands the commit→reveal→derive→confirm flow to the coordinator.
     func beginSASPairing(to host: DiscoveredHost) {
-        teardownSAS()
-        sasPairing = .connecting
-        sasEndpoint = host.endpoint
-        sasName = host.name
         task?.cancel()
-        task = Task { [weak self] in await self?.runSASPreamble(endpoint: host.endpoint) }
+        pairingCoordinator.begin(endpoint: host.endpoint, name: host.name)
     }
 
-    private func runSASPreamble(endpoint: NWEndpoint) async {
-        let connection: PortviewConnection
-        let capturedHash: Data
-        do {
-            (connection, capturedHash) = try await PortviewConnection.connectCapturingCert(to: endpoint)
-        } catch {
-            failSAS("Couldn't reach the Mac to pair."); return
-        }
-        sasConnection = connection  // stored now so teardownSAS owns its close on every exit
-        do {
-            let certBytes = [UInt8](capturedHash)
-            // Client commits its nonce first (bound to the captured cert + role), before any reveal.
-            let clientNonce = SASCode.randomNonce()
-            let clientCommit = SASCode.commit(nonce: clientNonce, role: .client, certSHA256: certBytes)
-            try await connection.send(.sasClientCommit(SASClientCommit(commit: clientCommit)))
-
-            var inbound = connection.inbound.makeAsyncIterator()
-            guard case .sasHostCommit(let hostCommit)? = await inbound.next() else {
-                failSAS("Pairing failed — no response from the Mac."); return
-            }
-            // Reveal only after the host has committed.
-            try await connection.send(.sasClientReveal(SASClientReveal(nonce: clientNonce)))
-            guard case .sasHostReveal(let hostReveal)? = await inbound.next() else {
-                failSAS("Pairing failed — the Mac didn't complete the exchange."); return
-            }
-            guard SASCode.verify(commitment: hostCommit.commit, nonce: hostReveal.nonce,
-                                 role: .host, certSHA256: certBytes) else {
-                failSAS("Pairing failed — the Mac's response didn't verify."); return
-            }
-
-            let code = SASCode.derive(clientNonce: clientNonce, hostNonce: hostReveal.nonce, certSHA256: certBytes)
-            if Task.isCancelled { return }  // cancelSASPairing already tore the connection down
-            sasDerivedCode = code
-            sasCapturedPinHex = capturedHash.map { String(format: "%02x", $0) }.joined()
-            sasSecret = (clientNonce, hostReveal.nonce, certBytes)
-            sasPairing = .awaitingCode  // connection stays open for the confirm
-        } catch {
-            failSAS("Couldn't reach the Mac to pair.")
-        }
-    }
-
-    /// Set an SAS failure state, but never after the user cancelled (which already tore the flow down —
-    /// a late write would flash the sheet back). Also releases the held connection.
-    private func failSAS(_ message: String) {
-        guard !Task.isCancelled else { return }
-        teardownSAS()
-        sasPairing = .failed(message)
-    }
-
-    /// The user typed the code the Mac shows. Match → trust the captured cert → send the confirm on the
-    /// held preamble connection, then re-dial PINNED. Mismatch → the captured cert isn't the Mac's
-    /// (possible interception) → refuse.
+    /// The user typed the code the Mac shows; the coordinator decides match/mismatch/expired.
     func submitSASCode(_ typed: String) {
-        let entered = typed.filter(\.isNumber)
-        guard let derived = sasDerivedCode, let pinHex = sasCapturedPinHex, let endpoint = sasEndpoint else {
-            failSAS("Pairing expired — start again.")
-            return
-        }
-        guard entered == derived else {
-            teardownSAS()
-            sasPairing = .mismatch
-            return
-        }
-        // Match. Capture what we need locally, clear stored state WITHOUT closing (we hold `conn`), then
-        // best-effort send the confirm + close on a detached task, then re-dial pinned. Doing the send
-        // off the VM's `task` means `start()`'s `task?.cancel()` can't race the in-flight confirm.
-        let name = sasName
-        let conn = sasConnection
-        let secret = sasSecret
-        teardownSAS(closeConnection: false)
-        sasPairing = nil
-        if let conn, let secret {
-            let mac = SASCode.confirmation(clientNonce: secret.clientNonce, hostNonce: secret.hostNonce, certSHA256: secret.cert)
-            Task { try? await conn.send(.sasClientConfirm(SASClientConfirm(mac: mac))); conn.close() }
-        }
-        start(endpoints: [endpoint], pinHex: pinHex, reconnectName: name)
+        pairingCoordinator.submitCode(typed)
     }
 
     func cancelSASPairing() {
-        task?.cancel()
-        task = nil
-        teardownSAS()
-        sasPairing = nil
-    }
-
-    /// The single teardown chokepoint for SAS state: close (unless we hand the connection off) + nil the
-    /// held connection, zero the secret, and clear the derived code / pin / endpoint / name. Does NOT
-    /// touch `sasPairing` — callers set the terminal UI state (.mismatch/.failed/nil) themselves.
-    private func teardownSAS(closeConnection: Bool = true) {
-        if closeConnection { sasConnection?.close() }
-        sasConnection = nil
-        sasSecret = nil
-        sasDerivedCode = nil
-        sasCapturedPinHex = nil
-        sasEndpoint = nil
-        sasName = nil
+        pairingCoordinator.cancel()
     }
 
     private func start(endpoints: [NWEndpoint], pinHex: String, reconnectName: String?) {
@@ -283,14 +182,6 @@ final class SessionViewModel: ObservableObject {
         audioPlayer.stop()
     }
 
-    /// Resolve which display stays active after the host re-advertises its display list mid-session
-    /// (a monitor connected/woke/was removed). Keep the current one if it's still offered; otherwise
-    /// fall back to the first so the UI stays consistent. An empty list leaves the current id untouched.
-    nonisolated static func resolvedActiveDisplay(current: UInt32, among displays: [DisplayInfo]) -> UInt32 {
-        if displays.contains(where: { $0.id == current }) { return current }
-        return displays.first?.id ?? current
-    }
-
     /// Re-target the live stream to another of the host's displays (no reconnect).
     func switchDisplay(to displayID: UInt32) {
         guard displayID != activeDisplayID,
@@ -323,30 +214,7 @@ final class SessionViewModel: ObservableObject {
     /// re-crop is needed. A window edge that coincides with the display boundary needs no margin (the
     /// host can't capture past the screen).
     private func isWindowCoveredByCurrentCrop(_ window: CGRect) -> Bool {
-        Self.windowCovered(window, by: frameViewport)
-    }
-
-    /// Pure hysteresis predicate (so the edge cases are testable): `window` is "covered" by captured
-    /// region `f` — no re-crop needed — when it's inside `f` by `margin` on every side (a side flush
-    /// with the display boundary needs no margin, since the host can't capture past the screen) AND `f`
-    /// isn't more than `looseFactor`× the window in either dimension.
-    nonisolated static func windowCovered(_ window: CGRect, by f: CGRect,
-                                          marginFraction: CGFloat = 0.12, looseFactor: CGFloat = 6.0) -> Bool {
-        // `looseFactor` must exceed the fresh crop's window-multiple so a just-applied crop reads as
-        // covered (else it re-crops every frame): padding 1.5 → 4×window, snapped up by the ≤1.25×
-        // capture-size ladder → ≤5×; 6.0 clears it.
-        // Margin is a FRACTION of the window, not absolute: the crop padding is relative (0.25×window),
-        // so at high zoom (tiny window) an absolute margin could exceed the padding and force a re-crop
-        // every frame. `marginFraction` must stay below the padding fraction so a fresh crop is covered.
-        let edge: CGFloat = 0.001
-        let mx = window.width * marginFraction
-        let my = window.height * marginFraction
-        let coveredLeft   = window.minX >= f.minX + mx || f.minX <= edge
-        let coveredRight  = window.maxX <= f.maxX - mx || f.maxX >= 1 - edge
-        let coveredTop    = window.minY >= f.minY + my || f.minY <= edge
-        let coveredBottom = window.maxY <= f.maxY - my || f.maxY >= 1 - edge
-        let tightEnough = f.width <= window.width * looseFactor && f.height <= window.height * looseFactor
-        return coveredLeft && coveredRight && coveredTop && coveredBottom && tightEnough
+        ViewportCoverage.windowCovered(window, by: frameViewport)
     }
 
     /// View-supplied magnifier inputs (the GeometryReader size + pinch zoom). Set by `LiveHUDView`;
@@ -484,7 +352,8 @@ final class SessionViewModel: ObservableObject {
         outboundPump = OutboundInputPump(connection: connection)
     }
 
-    /// Tear down the current connection — the single chokepoint (mirrors `teardownSAS`): CLOSE the
+    /// Tear down the current connection — the single chokepoint (mirrors the SAS coordinator's
+    /// `teardown`): CLOSE the
     /// transport first (cancels the NWConnection and finishes the inbound stream — a stream end,
     /// error, or reconnect drop must never leak a live connection), then drop the outbound lane.
     private func unbindConnection() {
@@ -589,7 +458,7 @@ final class SessionViewModel: ObservableObject {
                 client.didStartStreaming()
                 // Remember this host with the connection's RESOLVED concrete IP — this is what lets a
                 // discovered (Bonjour `.service`) pairing persist, and a moved saved Mac refresh.
-                if let (host, port) = Self.hostPort(from: connection.resolvedRemoteEndpoint),
+                if let (host, port) = ReconnectPlanning.hostPort(from: connection.resolvedRemoteEndpoint),
                    let pinHex = sessionPinHex {
                     connectedHostToSave = PairingPayload(host: host, port: port, pinHex: pinHex, name: sessionName ?? host)
                 }
@@ -626,7 +495,7 @@ final class SessionViewModel: ObservableObject {
                 // The host re-advertised its displays (a monitor connected/woke/was removed). Refresh
                 // the list so the display switcher reappears without a reconnect.
                 displays = update.displays
-                let resolved = Self.resolvedActiveDisplay(current: activeDisplayID, among: update.displays)
+                let resolved = DisplaySelection.resolvedActiveDisplay(current: activeDisplayID, among: update.displays)
                 if resolved != activeDisplayID {
                     // The streamed display went away — retarget the host to the fallback (switchDisplay
                     // sends `.switchDisplay` and resets the viewport/cursor for the new display).
@@ -696,7 +565,7 @@ final class SessionViewModel: ObservableObject {
             status = .reconnecting
             let discovered = await rediscover(name: name, timeout: Self.rediscoverTimeout)
             if Task.isCancelled { return }
-            let candidates = Self.reconnectCandidates(name: name, fallback: fallback, discovered: discovered)
+            let candidates = ReconnectPlanning.reconnectCandidates(name: name, fallback: fallback, discovered: discovered)
 
             if let (connection, _) = try? await connectFirst(candidates, pin: pin) {
                 bindConnection(connection)
@@ -720,36 +589,6 @@ final class SessionViewModel: ObservableObject {
         if !Task.isCancelled, !hasFailed {
             status = .failed("Lost connection to \(name).")
         }
-    }
-
-    /// Reconnect candidates, ordered: a live Bonjour host matching by name (re-resolves the current
-    /// IP after a LAN change) first, then the endpoint we were connected to as the fallback. Pure +
-    /// `nonisolated` so it is unit-testable and callable off the main actor.
-    /// Extract a concrete host:port from a connection's resolved endpoint (only `.hostPort` yields
-    /// one — a `.service`/`.host`/nil endpoint returns nil). Pure + `nonisolated` for unit testing.
-    nonisolated static func hostPort(from endpoint: NWEndpoint?) -> (host: String, port: UInt16)? {
-        guard let endpoint, case let .hostPort(host, port) = endpoint else { return nil }
-        let hostString: String
-        switch host {
-        case .ipv4(let address): hostString = "\(address)"
-        case .ipv6(let address): hostString = "\(address)"
-        case .name(let name, _): hostString = name
-        @unknown default: hostString = "\(host)"
-        }
-        return (hostString, port.rawValue)
-    }
-
-    nonisolated static func reconnectCandidates(
-        name: String, fallback: NWEndpoint, discovered: [DiscoveredHost]
-    ) -> [NWEndpoint] {
-        var endpoints: [NWEndpoint] = []
-        if let match = discovered.first(where: { $0.name == name }) {
-            endpoints.append(match.endpoint)
-        }
-        if !endpoints.contains(fallback) {
-            endpoints.append(fallback)
-        }
-        return endpoints
     }
 
     /// Browse Bonjour for up to `timeout`, returning as soon as a host named `name` appears (or the
