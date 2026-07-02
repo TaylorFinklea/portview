@@ -36,6 +36,7 @@ import Testing
         #expect(MessageType.hostLockStatus.rawValue == 26)
         #expect(MessageType.ping.rawValue == 27)
         #expect(MessageType.pong.rawValue == 28)
+        #expect(MessageType.clientFeedback.rawValue == 29)
     }
 
     @Test func clientHelloWireBytesArePinned() {
@@ -178,5 +179,11 @@ import Testing
     @Test func pongWireBytesArePinned() {
         let m = Pong(sendMicros: 1_234_567_890_123, hostUptimeMicros: 9_876_543_210)
         #expect(Frame.encodeAny(.pong(m)) == [17, 28, 0, 0, 1, 31, 113, 251, 4, 203, 0, 0, 0, 2, 76, 176, 22, 234])
+    }
+
+    @Test func clientFeedbackWireBytesArePinned() {
+        let m = ClientFeedback(receivedFPSX100: 5_985, receivedMbpsX100: 4_275, averageDecodeMsX100: 250,
+                                decodeQueueDepth: 3, droppedFrames: 7, rttMicros: 15_000)
+        #expect(Frame.encodeAny(.clientFeedback(m)) == [23, 29, 0, 0, 23, 97, 0, 0, 16, 179, 0, 0, 0, 250, 0, 3, 0, 0, 0, 7, 0, 0, 58, 152])
     }
 }

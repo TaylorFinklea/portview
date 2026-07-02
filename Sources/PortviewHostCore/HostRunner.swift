@@ -378,6 +378,27 @@ public struct HostRunner: Sendable {
         return result
     }
 
+    /// Holds the latest `ClientFeedback` snapshot (tag 29) a connection's client reported, for a
+    /// future host-side quality controller to read (the control policy is a separate bead — this is
+    /// storage only). Lock-guarded (mirroring `HostControl`) so the inbound dispatch task can write
+    /// while the encode path reads.
+    final class ClientFeedbackHolder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var latestValue: ClientFeedback?
+
+        func update(_ feedback: ClientFeedback) {
+            lock.lock()
+            latestValue = feedback
+            lock.unlock()
+        }
+
+        func latest() -> ClientFeedback? {
+            lock.lock()
+            defer { lock.unlock() }
+            return latestValue
+        }
+    }
+
     /// Guards a `CheckedContinuation` against a double-resume when two racing tasks may both try
     /// to complete it; only the first `tryResume()` call succeeds.
     private actor SingleResumeGate {
@@ -440,6 +461,9 @@ public struct HostRunner: Sendable {
             Task { try? await connection.send(.clipboardUpdate(ClipboardUpdate(text: text))) }
         }
         let fileReceiver = FileReceiver()
+        // Latest client-reported receive-side quality snapshot for THIS connection, held for a
+        // future quality controller (separate bead) to read.
+        let clientFeedback = ClientFeedbackHolder()
         // Identifies this session for the host UI; set once the client handshake names the device.
         var connectedDeviceID: String?
         // Client-requested stream params (StartSession), honored by capture + encoder and reused
@@ -535,6 +559,8 @@ public struct HostRunner: Sendable {
                 try? await connection.send(.pong(Pong(sendMicros: ping.sendMicros, hostUptimeMicros: hostUptimeMicros)))
             case .pong:
                 break
+            case .clientFeedback(let feedback):
+                clientFeedback.update(feedback)
             default:
                 break
             }

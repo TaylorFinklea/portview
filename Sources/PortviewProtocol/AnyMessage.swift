@@ -28,6 +28,7 @@ public enum AnyMessage: Equatable, Sendable {
     case hostLockStatus(HostLockStatus)
     case ping(Ping)
     case pong(Pong)
+    case clientFeedback(ClientFeedback)
 
     public var messageType: MessageType {
         switch self {
@@ -59,6 +60,7 @@ public enum AnyMessage: Equatable, Sendable {
         case .hostLockStatus: .hostLockStatus
         case .ping: .ping
         case .pong: .pong
+        case .clientFeedback: .clientFeedback
         }
     }
 }

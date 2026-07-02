@@ -60,6 +60,7 @@ import Testing
             MessageType.hostLockStatus.rawValue,
             MessageType.ping.rawValue,
             MessageType.pong.rawValue,
+            MessageType.clientFeedback.rawValue,
         ]
         let actual = Set(MessageType.allCases.map(\.rawValue))
         #expect(actual == expected)

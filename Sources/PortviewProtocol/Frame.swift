@@ -49,6 +49,7 @@ public enum Frame {
         case .hostLockStatus(let m): encode(m)
         case .ping(let m): encode(m)
         case .pong(let m): encode(m)
+        case .clientFeedback(let m): encode(m)
         }
     }
 
@@ -99,6 +100,7 @@ public enum Frame {
         case .hostLockStatus: return .hostLockStatus(try HostLockStatus(from: &r))
         case .ping: return .ping(try Ping(from: &r))
         case .pong: return .pong(try Pong(from: &r))
+        case .clientFeedback: return .clientFeedback(try ClientFeedback(from: &r))
         }
     }
 }

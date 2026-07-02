@@ -52,6 +52,9 @@ final class SessionViewModel: ObservableObject {
     private var sessionName: String?
     private var sessionPinHex: String?
     private var qualityTracker = QualityDiagnosticsTracker()
+    /// Latest Ping/Pong round-trip time (µs), reported in `ClientFeedback`; 0 until the first Pong
+    /// of a connection lands.
+    private var latestRTTMicros: UInt32 = 0
     // Re-cropping is now gated by edge-hysteresis (`requestViewport`), so this can stay prompt (150ms):
     // a re-crop fires immediately when you move to a new region, but in-region pans don't re-crop at
     // all — keeping SCStream.updateConfiguration (which hiccups capture fps) rare without the laggy
@@ -376,6 +379,21 @@ final class SessionViewModel: ObservableObject {
         qualityDiagnostics = QualityDiagnostics()
     }
 
+    /// Report the 1s receive-side snapshot to the host (`ClientFeedback`, tag 29) so a host-side
+    /// quality controller can adapt the stream, then refresh the RTT measurement with a fresh Ping
+    /// on the same cadence. Piggybacks on the snapshot so feedback flows only while video does.
+    private func sendQualityFeedback(_ snapshot: QualityDiagnostics) {
+        send(.clientFeedback(ClientFeedback(
+            receivedFPSX100: UInt32(max(0, (snapshot.receivedFPS * 100.0).rounded())),
+            receivedMbpsX100: UInt32(max(0, (snapshot.receivedMbps * 100.0).rounded())),
+            averageDecodeMsX100: UInt32(max(0, (snapshot.averageDecodeMs * 100.0).rounded())),
+            decodeQueueDepth: 0,  // decode is inline + serial today; reserved for a pipelined decoder
+            droppedFrames: UInt32(max(0, snapshot.droppedFrames)),
+            rttMicros: latestRTTMicros
+        )))
+        send(.ping(Ping(sendMicros: UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000))))
+    }
+
     // MARK: - Input (client → host)
 
     /// Control input is paused while the host screen is locked (injecting into the secure desktop is
@@ -536,6 +554,8 @@ final class SessionViewModel: ObservableObject {
         // Clear any stale lock overlay from a prior attempt; the host re-seeds the current state at
         // handshake (it only sends locked:true), so a reconnect after the host UNLOCKED can't strand it.
         hostLocked = false
+        // A prior connection's RTT is meaningless for this one; 0 = "not yet measured".
+        latestRTTMicros = 0
         var client = ClientHandshake(
             deviceID: UIDevice.current.identifierForVendor?.uuidString ?? "ios-client",
             deviceName: UIDevice.current.name,
@@ -585,6 +605,7 @@ final class SessionViewModel: ObservableObject {
                     renderer.submit(pixelBuffer, region: region)
                     if let snapshot = qualityTracker.recordDecodedFrame(frame, decodeMs: decodeMs) {
                         qualityDiagnostics = snapshot
+                        sendQualityFeedback(snapshot)
                     }
                 }
             case .cursorPosition(let cursor):
@@ -623,6 +644,13 @@ final class SessionViewModel: ObservableObject {
                 if region != frameViewport { frameViewport = region }
             case .qualityStats(let stats):
                 qualityDiagnostics = qualityTracker.updateHostStats(stats)
+            case .pong(let pong):
+                // Both ends of the measurement are this device's monotonic clock (the host echoes
+                // sendMicros verbatim). Guard against a garbage echo putting "sent" after "now".
+                let nowMicros = UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000)
+                if nowMicros >= pong.sendMicros {
+                    latestRTTMicros = UInt32(clamping: nowMicros - pong.sendMicros)
+                }
             case .fileOffer(let offer):
                 // The name is peer-supplied; offer() sanitizes it and opens the destination, or
                 // rejects an unsafe name (path-traversal defense).
