@@ -7,7 +7,7 @@ import CoreVideo
 /// One pixel buffer in → one encoded `CMSampleBuffer` out.
 public final class VideoEncoder: @unchecked Sendable {
     private let session: VTCompressionSession
-    public let averageBitRate: Int
+    public private(set) var averageBitRate: Int
 
     public init(width: Int, height: Int, codec: CMVideoCodecType = kCMVideoCodecType_HEVC,
                 averageBitRate: Int? = nil) throws {
@@ -48,6 +48,13 @@ public final class VideoEncoder: @unchecked Sendable {
 
     deinit {
         VTCompressionSessionInvalidate(session)
+    }
+
+    /// Updates the target bitrate on the LIVE session — VideoToolbox supports this without a
+    /// session rebuild or a forced keyframe.
+    public func setAverageBitRate(_ bps: Int) {
+        VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: bps as CFNumber)
+        averageBitRate = bps
     }
 
     /// Encode one pixel buffer; returns the encoded sample buffer (keyframe by default).
