@@ -2,6 +2,11 @@ import Foundation
 import Network
 import PortviewProtocol
 
+/// Thrown when a connection doesn't become `.ready` within the connect deadline. An unreachable
+/// endpoint (no route, or nothing listening) parks `NWConnection` in `.waiting` — retrying, never
+/// `.ready`, never `.failed` — so without the deadline `connect` would hang forever.
+public struct ConnectTimeoutError: Error {}
+
 /// One Portview session over a secure connection.
 ///
 /// Transport: framed messages travel over a single bidirectional connection. The default is now
@@ -59,11 +64,18 @@ public final class PortviewConnection: @unchecked Sendable {
         return (connection, leafSHA256)
     }
 
-    private static func connect(to endpoint: NWEndpoint, parameters: NWParameters) async throws -> PortviewConnection {
+    /// Default bound on how long `connect` waits for a connection to become `.ready`. Comfortably
+    /// under the client's 30s reconnect window, so an unreachable host fails fast enough to retry.
+    static let connectTimeout: Duration = .seconds(10)
+
+    /// `internal` (not `private`) so tests can drive the connect path with a short injected
+    /// `timeout` against an unreachable endpoint.
+    static func connect(to endpoint: NWEndpoint, parameters: NWParameters,
+                        timeout: Duration = connectTimeout) async throws -> PortviewConnection {
         let queue = DispatchQueue(label: "portview.connection")
         let nw = NWConnection(to: endpoint, using: parameters)
         let connection = PortviewConnection(connection: nw, queue: queue)
-        try await connection.awaitReady()
+        try await connection.awaitReady(timeout: timeout)
         connection.startReceiveLoop()
         return connection
     }
@@ -85,6 +97,23 @@ public final class PortviewConnection: @unchecked Sendable {
     }
 
     // MARK: - Internal
+
+    /// Race `awaitReady()` against `timeout`, throwing `ConnectTimeoutError` if the connection
+    /// isn't `.ready` in time. `.waiting`/`.preparing` never resume `awaitReady()` on their own
+    /// (an unreachable host parks in `.waiting`, retrying forever), so the deadline uses
+    /// cancellation — `awaitReady()`'s designed escape hatch — to cancel the wedged connection
+    /// and bound every connect.
+    private func awaitReady(timeout: Duration) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask { try await self.awaitReady() }
+            group.addTask {
+                try await Task.sleep(for: timeout)
+                throw ConnectTimeoutError()
+            }
+            defer { group.cancelAll() }
+            _ = try await group.next()
+        }
+    }
 
     /// Start the connection and resume once it is ready (or throw on failure). Cancellable:
     /// if the awaiting task is cancelled (e.g. a connect timeout), the connection is cancelled,
@@ -149,11 +178,24 @@ public final class PortviewConnection: @unchecked Sendable {
     }
 }
 
+/// Errors surfaced by `PortviewListener.start()` beyond the underlying `NWError`s.
+public enum PortviewListenerError: Error {
+    /// The listener reported `.ready` without a bound port — nothing routable to advertise.
+    case noBoundPort
+}
+
 /// Accepts incoming Portview QUIC connections (host side).
 public final class PortviewListener: @unchecked Sendable {
     private let listener: NWListener
     private let queue: DispatchQueue
     private let connectionContinuation: AsyncStream<PortviewConnection>.Continuation
+    /// Guards the cancel-before-start dead zone: `NWListener` delivers NO state callback (not
+    /// even `.cancelled`) when `start(queue:)` follows `cancel()`, so `start()` must observe a
+    /// prior cancel itself. The lock orders the flag against `listener.start(queue:)` so a
+    /// concurrent `cancel()` either sets the flag before `start()` checks it, or lands on a
+    /// started listener (which fires `.cancelled` through the state handler).
+    private let startLock = NSLock()
+    private var cancelled = false
 
     /// Incoming connections, each a ready `PortviewConnection`.
     public let connections: AsyncStream<PortviewConnection>
@@ -194,29 +236,64 @@ public final class PortviewListener: @unchecked Sendable {
         }
     }
 
-    /// Start listening and return the bound port once ready.
+    /// Start listening and return the bound port once ready. Every state resolves the
+    /// continuation (`.waiting`/`.cancelled`/a nil-port `.ready` previously fell through and
+    /// wedged the host run task forever, holding the persisted port), and — mirroring
+    /// `awaitReady`'s shape — cancelling the awaiting task cancels the listener, which fires
+    /// `.cancelled` and resumes, so this can never hang.
     public func start() async throws -> NWEndpoint.Port {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<NWEndpoint.Port, Error>) in
-            listener.stateUpdateHandler = { [weak self] state in
-                switch state {
-                case .ready:
-                    if let port = self?.listener.port {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<NWEndpoint.Port, Error>) in
+                listener.stateUpdateHandler = { [weak self] state in
+                    switch state {
+                    case .ready:
                         self?.listener.stateUpdateHandler = nil
-                        cont.resume(returning: port)
+                        if let port = self?.listener.port {
+                            cont.resume(returning: port)
+                        } else {
+                            self?.listener.cancel()
+                            cont.resume(throwing: PortviewListenerError.noBoundPort)
+                        }
+                    case .waiting(let error):
+                        // For a listener, `.waiting` means the binding is unavailable (e.g. the
+                        // port is taken); it would otherwise park here retrying indefinitely.
+                        // Fail fast — `HostRunner.startListener` already falls back to an
+                        // OS-assigned port when a preferred-port `start()` throws.
+                        self?.listener.stateUpdateHandler = nil
+                        self?.listener.cancel()
+                        cont.resume(throwing: error)
+                    case .failed(let error):
+                        self?.listener.stateUpdateHandler = nil
+                        cont.resume(throwing: error)
+                    case .cancelled:
+                        self?.listener.stateUpdateHandler = nil
+                        cont.resume(throwing: CancellationError())
+                    default:
+                        break
                     }
-                case .failed(let error):
-                    self?.listener.stateUpdateHandler = nil
-                    cont.resume(throwing: error)
-                default:
-                    break
                 }
+                startLock.lock()
+                if cancelled {
+                    // Cancel-before-start dead zone: the listener will never fire a state
+                    // callback (see `startLock`), so resume here instead of wedging.
+                    listener.stateUpdateHandler = nil
+                    startLock.unlock()
+                    cont.resume(throwing: CancellationError())
+                    return
+                }
+                listener.start(queue: queue)
+                startLock.unlock()
             }
-            listener.start(queue: queue)
+        } onCancel: {
+            cancel()
         }
     }
 
     public func cancel() {
+        startLock.lock()
+        cancelled = true
         listener.cancel()
+        startLock.unlock()
         connectionContinuation.finish()
     }
 }
