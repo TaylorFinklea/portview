@@ -57,6 +57,10 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     // the sync `SCStreamOutput` callback). Updated when a re-crop actually takes effect.
     private let regionLock = NSLock()
     private var appliedRegion = CGRect(x: 0, y: 0, width: 1, height: 1)
+    // Guards `config`/`stream` below, written on the video task (start()) and read/mutated on the
+    // serve-session task (setViewport()/stop()). TODO: replace with a full actor conversion (the
+    // target end state per decisions.md) — this lock is the minimal stopgap for now.
+    private let configLock = NSLock()
     private let continuation: AsyncStream<SendableFrame>.Continuation
     let frames: AsyncStream<SendableFrame>
     private let audioContinuation: AsyncStream<SendableAudioFrame>.Continuation
@@ -84,6 +88,13 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         regionLock.lock(); defer { regionLock.unlock() }; return appliedRegion
     }
 
+    private func setStreamAndConfig(_ stream: SCStream?, _ config: SCStreamConfiguration?) {
+        configLock.lock(); self.stream = stream; self.config = config; configLock.unlock()
+    }
+    private func currentStreamAndConfig() -> (SCStream?, SCStreamConfiguration?) {
+        configLock.lock(); defer { configLock.unlock() }; return (stream, config)
+    }
+
     init(width: Int, height: Int) {
         self.width = width
         self.height = height
@@ -108,8 +119,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
-        self.stream = stream
-        self.config = config
+        setStreamAndConfig(stream, config)
         stream.startCapture { error in
             if let error { print("capture start error: \(error)") }
         }
@@ -124,7 +134,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     /// no-op change (same rect and output dims) returns `true` without reconfiguring.
     func setViewport(normalizedX nx: Double, normalizedY ny: Double,
                      normalizedW nw: Double, normalizedH nh: Double) async -> Bool {
-        guard let stream, let config else { return false }
+        let (streamOpt, configOpt) = currentStreamAndConfig()
+        guard let stream = streamOpt, let config = configOpt else { return false }
         // Snap the captured region's SIZE to the discrete ladder (snapped up so it still covers the
         // requested window), keeping the requested center; the encoder output is sized from the SAME
         // snapped fractions, so the buffer's aspect matches the captured region exactly (no stretch)
@@ -192,6 +203,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     }
 
     func stop() {
+        let (stream, _) = currentStreamAndConfig()
         stream?.stopCapture { _ in }
         continuation.finish()
         audioContinuation.finish()
