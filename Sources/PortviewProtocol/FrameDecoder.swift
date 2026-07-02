@@ -1,5 +1,11 @@
 /// Accumulates a byte stream and yields complete messages as frames arrive.
 public struct FrameDecoder {
+    /// Upper bound on bytes retained between pushes: one maximal frame
+    /// (10-byte varint header + `Frame.maxBodyLength` body). The per-frame
+    /// length guard makes exceeding this unreachable; this backstop keeps the
+    /// bound explicit if that guard is ever bypassed or refactored away.
+    static let maxBufferedBytes = 10 + Int(Frame.maxBodyLength)
+
     private var buffer: [UInt8] = []
     public init() {}
 
@@ -33,6 +39,9 @@ public struct FrameDecoder {
                 // Skip this frame: consume it and keep decoding subsequent frames.
             }
             buffer.removeFirst(headerSize + Int(bodyLength))
+        }
+        guard buffer.count <= Self.maxBufferedBytes else {
+            throw WireError.malformed("frame buffer overflow")
         }
         return messages
     }

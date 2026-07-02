@@ -54,6 +54,35 @@ import Testing
         }
     }
 
+    @Test func acceptsMaximalFrameTrickledInChunks() throws {
+        // A frame body at exactly Frame.maxBodyLength must survive chunked delivery:
+        // the decoder legitimately buffers the whole body before it can drain, so
+        // the in-flight buffer cap must sit above ceiling + header, never below.
+        var stream = BinaryWriter()
+        stream.putVarUInt(Frame.maxBodyLength)
+        var body = [UInt8](repeating: 0, count: Int(Frame.maxBodyLength))
+        body[0] = 99 // unknown tag: the frame is skipped, not decoded
+
+        var decoder = FrameDecoder()
+        #expect(try decoder.push(stream.bytes).isEmpty)
+        // Stop one byte short: the retained buffer peaks at header + body - 1,
+        // the largest state an honest peer can ever put the decoder in.
+        #expect(try decoder.push(Array(body.dropLast())).isEmpty)
+        #expect(try decoder.push([body[body.count - 1]]).isEmpty) // completes; unknown tag skipped
+
+        let after = Bye(reason: "after")
+        #expect(try decoder.push(Frame.encode(after)) == [.bye(after)])
+    }
+
+    @Test func varintContinuationFloodThrows() {
+        // Ten continuation bytes can never form a valid length prefix; the decoder
+        // must throw rather than keep buffering in hope of a terminator.
+        var decoder = FrameDecoder()
+        #expect(throws: WireError.malformed("varint too long")) {
+            _ = try decoder.push([UInt8](repeating: 0x80, count: 10))
+        }
+    }
+
     @Test func skipsUnknownTagWithoutWedging() throws {
         let a = Bye(reason: "first")
         let b = Bye(reason: "second")
