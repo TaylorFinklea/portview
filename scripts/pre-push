@@ -1,0 +1,10 @@
+#!/bin/sh
+# Git pre-push hook: run the full local preflight gate before any push.
+#
+# Install (from the repo root), either:
+#   cp scripts/pre-push .git/hooks/pre-push
+# or:
+#   git config core.hooksPath scripts
+set -e
+cd "$(git rev-parse --show-toplevel)"
+exec make preflight

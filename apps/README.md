@@ -47,6 +47,22 @@ In Xcode: pick your iPhone as the destination, then Run. Use QR pairing, Bonjour
 
 To try it in the **iOS Simulator** (host and client on the same Mac), use `127.0.0.1` as the IP.
 
+## Preflight gate (no hosted CI yet)
+
+There is deliberately no GitHub Actions workflow (hosted macOS-26 runners are unreliable). Run the full gate locally from the repo root:
+
+```bash
+make preflight   # swift test + macOS host build + iOS simulator tests
+```
+
+To run it automatically before every push, install the pre-push hook (either way):
+
+```bash
+cp scripts/pre-push .git/hooks/pre-push
+# or
+git config core.hooksPath scripts
+```
+
 ## What works / what's next
 
 - ✅ Live screen view, trackpad/keyboard control, clipboard, audio, file transfer, multi-monitor, QUIC transport, Metal renderer, diagnostics HUD.
