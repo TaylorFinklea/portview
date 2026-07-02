@@ -21,9 +21,14 @@ public final class PortviewConnection: @unchecked Sendable {
     private let connection: NWConnection
     private let queue: DispatchQueue
     private var decoder = FrameDecoder()
-    private let inboundContinuation: AsyncStream<AnyMessage>.Continuation
+    /// Two-lane bounded buffer behind `inbound` (internal so tests can observe its bounds).
+    let inboundBuffer: InboundBuffer
 
-    /// Messages received from the peer, in arrival order.
+    /// Messages received from the peer. Control messages arrive lossless and in order; video
+    /// frames coalesce to the newest two when the consumer falls behind (the drops surface as
+    /// sequence gaps in the client's diagnostics). When buffered control payload crosses the
+    /// buffer's high water, the receive loop pauses so the transport's flow control pushes back
+    /// on the peer; it resumes once this stream is drained below the low water.
     public let inbound: AsyncStream<AnyMessage>
 
     /// The live connection's resolved remote endpoint (a `.hostPort` once the path is up), so a
@@ -34,7 +39,13 @@ public final class PortviewConnection: @unchecked Sendable {
     init(connection: NWConnection, queue: DispatchQueue) {
         self.connection = connection
         self.queue = queue
-        (self.inbound, self.inboundContinuation) = AsyncStream<AnyMessage>.makeStream()
+        let buffer = InboundBuffer()
+        self.inboundBuffer = buffer
+        self.inbound = AsyncStream(unfolding: { await buffer.next() })
+        buffer.setOnResumeReceive { [weak self] in
+            guard let self else { return }
+            self.queue.async { self.receiveNext() }
+        }
     }
 
     /// Connect over QUIC (the default). A bare QUIC `NWConnection` is a single bidirectional stream;
@@ -93,7 +104,7 @@ public final class PortviewConnection: @unchecked Sendable {
     /// Cancel the connection and finish the inbound stream.
     public func close() {
         connection.cancel()
-        inboundContinuation.finish()
+        inboundBuffer.finish()
     }
 
     // MARK: - Internal
@@ -151,30 +162,48 @@ public final class PortviewConnection: @unchecked Sendable {
     private func receiveNext() {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 20) { [weak self] data, _, isComplete, error in
             guard let self else { return }
-            if let data, !data.isEmpty, !self.processIncoming([UInt8](data)) {
-                return
+            // Re-arm strictly from THIS ingest's verdict, never a re-read of the pause flag:
+            // the consumer may clear the pause (dispatching its own re-arm) concurrently, and a
+            // re-read that races it would arm the receive loop twice.
+            var pauseReceive = false
+            if let data, !data.isEmpty {
+                switch self.ingest([UInt8](data)) {
+                case .fatal: return
+                case .ok(let paused): pauseReceive = paused
+                }
             }
             if isComplete || error != nil {
-                self.inboundContinuation.finish()
+                self.inboundBuffer.finish()
                 return
             }
-            self.receiveNext()
+            if !pauseReceive { self.receiveNext() }
         }
     }
 
-    /// Decode `bytes` into messages and yield them. Returns `false` if a known-tag frame's
-    /// body was malformed, in which case the inbound stream has already been finished
-    /// (mirroring the isComplete/error path) instead of silently stalling on the swallowed
-    /// decode error. Exposed (internal) so tests can drive it without a live socket.
-    func processIncoming(_ bytes: [UInt8]) -> Bool {
+    private enum IngestResult {
+        case fatal
+        case ok(pauseReceive: Bool)
+    }
+
+    /// Decode `bytes` into the two-lane buffer. `.fatal` means a known-tag frame's body was
+    /// malformed and the inbound stream has already been finished (mirroring the
+    /// isComplete/error path) instead of silently stalling on the swallowed decode error.
+    private func ingest(_ bytes: [UInt8]) -> IngestResult {
         do {
             let messages = try decoder.push(bytes)
-            for message in messages { inboundContinuation.yield(message) }
-            return true
+            return .ok(pauseReceive: inboundBuffer.enqueue(messages))
         } catch {
-            inboundContinuation.finish()
-            return false
+            inboundBuffer.finish()
+            return .fatal
         }
+    }
+
+    /// Test seam preserving the pre-buffer contract: `false` = fatal decode error (the inbound
+    /// stream is already finished). Exposed (internal) so tests can drive decode + buffering
+    /// without a live socket.
+    func processIncoming(_ bytes: [UInt8]) -> Bool {
+        if case .fatal = ingest(bytes) { return false }
+        return true
     }
 }
 
