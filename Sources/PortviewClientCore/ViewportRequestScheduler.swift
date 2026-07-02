@@ -8,7 +8,7 @@ import Foundation
 /// (so new regions stream in as you move) instead of only re-cropping after you stop — the old idle
 /// debounce meant "nothing repaints until I stop, then it takes a beat".
 @MainActor
-final class ViewportRequestScheduler {
+public final class ViewportRequestScheduler {
     private static let fullViewport = CGRect(x: 0, y: 0, width: 1, height: 1)
 
     private let interval: Duration
@@ -19,12 +19,12 @@ final class ViewportRequestScheduler {
     private var lastFire: ContinuousClock.Instant?
     private var task: Task<Void, Never>?
 
-    init(interval: Duration = .milliseconds(150), send: @escaping (CGRect) -> Void) {
+    public init(interval: Duration = .milliseconds(150), send: @escaping (CGRect) -> Void) {
         self.interval = interval
         self.send = send
     }
 
-    func request(_ rect: CGRect) {
+    public func request(_ rect: CGRect) {
         pending = rect
         guard task == nil else { return }  // a trailing fire is already scheduled; it picks up `pending`
         let elapsed = lastFire.map { clock.now - $0 } ?? interval
@@ -35,7 +35,7 @@ final class ViewportRequestScheduler {
         }
     }
 
-    func reset() {
+    public func reset() {
         task?.cancel()
         task = nil
         pending = nil

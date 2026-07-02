@@ -1,7 +1,7 @@
 import XCTest
 import CoreGraphics
 
-@testable import PortviewClient
+import PortviewClientCore
 
 /// The magnifier geometry. The broken case was an ultrawide host on a portrait phone: the old square
 /// crop (`max(visW, visH)`) stayed full-display at usable zoom, so nothing was magnified. The zoom is

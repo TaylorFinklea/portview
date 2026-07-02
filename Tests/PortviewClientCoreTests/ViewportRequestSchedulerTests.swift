@@ -1,7 +1,7 @@
 import CoreGraphics
 import XCTest
 
-@testable import PortviewClient
+import PortviewClientCore
 
 /// The viewport throttle (leading + trailing): the first request after a quiet period fires
 /// immediately so host re-cropping tracks the cursor during a pan; a burst is rate-limited and the

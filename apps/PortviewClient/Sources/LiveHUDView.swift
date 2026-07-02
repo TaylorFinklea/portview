@@ -1,4 +1,5 @@
 import SwiftUI
+import PortviewClientCore
 import PortviewProtocol
 
 /// Screens 4–6 — the live control surface over the streamed Mac. Re-skins the existing streaming

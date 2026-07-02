@@ -20,17 +20,17 @@ import CoreGraphics
 /// `cropRequest` is a padded box around the visible window in the window's OWN aspect (deliberately NOT
 /// square): the host encodes exactly this region. The padding gives room to pan before the host must
 /// re-crop, and at high zoom the small region is encoded at high resolution → crisper.
-struct ZoomGeometry {
+public struct ZoomGeometry {
     /// Padded host crop request (normalized display coords).
-    let cropRequest: CGRect
+    public let cropRequest: CGRect
     /// The visible window in DISPLAY-normalized coords (window ∩ display). This is the smoothing
     /// TARGET: the renderer eases its rendered window toward this at display rate and maps it into each
     /// frame's region per tick (`MetalVideoRenderer.sampleRect(window:in:)`). Keeping the target in
     /// display space (not the frame's UV) is what makes the on-screen window invariant to host re-crops.
     /// At zoom 1 it's the whole display (→ overview, letterboxed).
-    let visibleWindow: CGRect
+    public let visibleWindow: CGRect
 
-    init(view: CGSize, displaySize: CGSize, cursor: CGPoint, zoom: CGFloat) {
+    public init(view: CGSize, displaySize: CGSize, cursor: CGPoint, zoom: CGFloat) {
         let viewAspect = view.width / max(1, view.height)
         let displayAspect = displaySize.width / max(1, displaySize.height)
 
