@@ -106,7 +106,7 @@ final class HostAppModel {
     /// code. Auto-closes after `pairingWindowSeconds` so an idle code can't linger.
     func beginPairing() {
         guard isRunning else { return }
-        sasControl.openWindow()
+        Task { await sasControl.openWindow() }
         isPairing = true
         displayedSASCode = nil
         clientConfirmed = false
@@ -122,7 +122,7 @@ final class HostAppModel {
     func endPairing() {
         pairingTimeoutTask?.cancel()
         pairingTimeoutTask = nil
-        sasControl.closeWindow()
+        Task { await sasControl.closeWindow() }
         isPairing = false
         displayedSASCode = nil
         clientConfirmed = false
