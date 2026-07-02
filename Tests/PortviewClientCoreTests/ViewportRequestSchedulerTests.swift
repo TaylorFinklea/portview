@@ -28,7 +28,12 @@ final class ViewportRequestSchedulerTests: XCTestCase {
         scheduler.request(a)        // leading → sent now
         scheduler.request(b)        // throttled (coalesced into pending)
         scheduler.request(latest)   // overwrites pending
-        try await Task.sleep(for: .milliseconds(60))
+        // Poll instead of a fixed sleep: under parallel-suite load the trailing MainActor task
+        // can lag well past the nominal 20ms interval (this flaked at a fixed 60ms).
+        let deadline = ContinuousClock.now + .seconds(5)
+        while sent.count < 2, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
 
         XCTAssertEqual(sent, [a, latest])  // leading a, trailing latest; b coalesced away
     }
