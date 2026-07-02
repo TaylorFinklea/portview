@@ -8,6 +8,10 @@ Portview — open-source, native-feeling iPhone→Mac screen sharing & control (
 
 Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 
+## Architecture review (2026-07-01)
+
+Fable 5 six-lens review → decomposed the roadmap into a fleet-dispatchable beads backlog. Full report: `.docs/ai/phases/arch-review-2026-07-01-report.md`; ADR in `decisions.md` (2026-07-01). The durable backlog now lives in **beads** (`bd ready`); the epics are `screenshare-1n6` (wire-safety, P0), `screenshare-jfj` (PortviewClientCore + decomposition, P1), `screenshare-1nt` (host trust / mutual auth, P1), `screenshare-ja1` (real-time media foundation, P2), `screenshare-523` (concurrency correctness, P2). Start with `w-skip` (unknown-tag wedge — the wire-safety root) and `cc-target` (PortviewClientCore keystone). The Now/Next/Later below remains the device-verify + product-milestone view.
+
 ## Now / Next / Later
 
 ### Now
@@ -45,7 +49,7 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 - [ ] Magnifier follow-ups (if on-device testing shows them): tune the residual-settle timing; consider raising encode bitrate when cropped; smooth the crop transition.
 - [x] **IP stability** (split out of the persistent-identity work) — DONE (build-green; device-verify pending), commit `4fe9d79`. Saved-Mac reconnect now prefers a live Bonjour host matching by name (re-resolves the current IP), then the saved `host:port` fallback; pin unchanged so cert pinning still gates. Decision in decisions.md (2026-06-14). <!-- follow-up below: refresh the stored fallback IP after a Bonjour reconnect -->
 - [x] **Expose the resolved remote endpoint on `PortviewConnection`** — DONE 2026-06-15. `resolvedRemoteEndpoint` (`currentPath?.remoteEndpoint`) now drives unified remember-on-first-stream in `SessionViewModel`/`ContentView`: (a) a discovery-paired Mac persists with its concrete IP, and (b) a moved saved Mac's IP refreshes in place (name→host:port→pin upsert avoids duplicates). See decisions.md (2026-06-15).
-- [ ] **Serialize all outbound input through one ordered consumer** (Glass-HUD review #3, hardening) — `SessionViewModel.send()` spawns a Task per message, so pointer-move vs click/scroll/key ordering can race (the down/up *pair* is already fixed by sending both in one Task). Full fix: push outbound input into an `AsyncStream` drained by one Task that awaits each `connection.send` in turn. `tier_floor: senior`, `complexity: S`. Low priority (human-paced input rarely races).
+- [x] **Serialize all outbound input through one ordered consumer** (Glass-HUD review #3, hardening) — DONE (confirmed by the 2026-07-01 arch review; bead `screenshare-8ds` closed). `OutboundInputPump` is wired into `SessionViewModel` (field 71, bind 461, finish 466-467, enqueue 473) with `OutboundInputPumpTests`.
 
 ### Later
 - [ ] M6 polish: adaptive bitrate/fps, reconnect + APNs re-wake, settings, TCC onboarding UI. Device keypairs + revocable PairingStore. *(Quality HUD now exists as dev diagnostics; product polish still TBD.)*

@@ -6,6 +6,14 @@
 
 `main`
 
+## Latest Session (2026-07-01 — architecture review + fleet backlog in beads)
+
+- Fable 5 ran a six-lens adversarial arch review (concurrency/protocol/media/security/boundaries/roadmap-fit). Report: `.docs/ai/phases/arch-review-2026-07-01-report.md`. ADR: decisions.md (2026-07-01, PROPOSED).
+- **5 load-bearing findings** (code-verified): (1) unknown wire tags SILENTLY WEDGE the connection → adding any new tag old-host↔new-client is a session-killing break TODAY (dependency root); (2) host authenticates NO client — any peer reaching the port gets full control (crit); (3) locked-screen input gate is client-side only (crit); (4) M6 features share a missing RTT/clock/feedback/live-bitrate keystone; (5) no PortviewClientCore + 2 god files + a real CaptureEngine.config/stream data race.
+- **Filed 35 beads** (5 epics + 30 tasks, verified 20-edge dep graph, no cycles, all machine-verifiable). Epics: `screenshare-1n6` wire-safety (P0), `screenshare-jfj` clientcore+decomp (P1), `screenshare-1nt` trust/mutual-auth (P1), `screenshare-ja1` rt-media (P2), `screenshare-523` concurrency (P2). Enriched vs9/ins/10p/627; closed 8ds (OutboundInputPump already done).
+- **User decisions**: threat model = LAN/Tailscale/WireGuard → mutual-auth P1 not P0; re-wake = CloudKit silent push; do all four clusters + forward planning.
+- NEXT (fleet): `bd ready` → start `w-skip` (kyf, the wire-safety keystone) and `cc-target` (1j0, unblocks junior fan-out) first. NOT committed-with-push. NO code changed this session (planning only) — beads + docs only.
+
 ## Latest Session (2026-06-28 #2 — keep-awake + host-lock status; "locked screen" achievable slice)
 
 - After the locked-screen feasibility spike (verdict: don't build the daemon), built the achievable slice. ultracode: design workflow → TDD → adversarial review workflow.

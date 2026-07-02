@@ -2,6 +2,30 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-01] Architecture review — five decision clusters + fleet backlog (PROPOSED)
+
+**Context**: Fable 5 ran a six-lens adversarial architecture review (concurrency / wire-protocol / media / security / module-boundaries / roadmap-fit) to break the roadmap into work cheaper fleet models (Sonnet 5, GPT-5.5, open-source) can execute. Full synthesis: `.docs/ai/phases/arch-review-2026-07-01-report.md`. Findings are code-cited; every critical/high was independently refuted before acceptance.
+
+**The five load-bearing findings** (all verified against the real code, several by hand):
+1. **Unknown wire tags silently, permanently wedge the connection** — `Frame.decodeBody` throws before `FrameDecoder` consumes the frame; `PortholeConnection.receiveNext` swallows via `try?`; inbound stream never finishes → infinite re-throw, unbounded buffer. So adding ANY new tag (new client vs old host) is a session-killing break TODAY. This makes "skip unknown tags" the dependency ROOT of all new-message work.
+2. **Host authenticates no client (critical)** — `QUICParameters.server` sets only a local identity; `serveSession` grants full control to any peer completing a bare `ClientHello`; the pin is client-side-only and the SAS window is never checked on the streaming path. The unbuilt M6 "device keypairs + revocable PairingStore" is the fix.
+3. **Locked-screen input gate is client-side only (critical)** — `InputInjector.handle` posts CGEvents unconditionally; a modified client injects into a locked Mac. Cheap host-side fix.
+4. **M6 features share one missing foundation** — adaptive bitrate, latency harness, and lip-sync all need infrastructure that doesn't exist: live encoder-bitrate setter (bitrate is init-only → forces the crash-adjacent rebuild), client→host feedback, RTT/clock primitive, presentation clock. Build the keystone once.
+5. **Client has no testable core; two 750-line god files; a real `CaptureEngine.config`/`stream` data race; serve-slot starvation.** `PortviewClientCore` is the highest-leverage Lead extraction (lowers the tier_floor of all client work + unblocks CI).
+
+**Decisions (PROPOSED — to ratify)**:
+- **A** Wire evolution: unknown tags MUST skip not wedge; thread + use the negotiated version; golden-frame KAT + reserved tag ranges as regression gates. EPIC `screenshare-1n6`.
+- **B** Host authenticates clients via device keypairs + a revocable keychain-backed PairingStore, verified before any scaffolding; lock gate + file/clipboard caps host-side. Lead-tier spec first. EPIC `screenshare-1nt`.
+- **C** Real-time media rides one keystone (Ping/Pong RTT + live `setAverageBitRate` + client→host feedback), then adaptive bitrate / presentation clock / PTS lip-sync. EPIC `screenshare-ja1`.
+- **D** Stand up `PortviewClientCore` once, then decompose the god files as pure value types; local `make preflight` pre-push gate (no reliable hosted macOS-26 runner); GlassTheme stays per-app. EPIC `screenshare-jfj`.
+- **E** Fix the CaptureEngine data race + serve-slot starvation; move toward actor isolation + a session-owned host outbound lane. EPIC `screenshare-523`.
+
+**User decisions (2026-07-01)**: threat model = local LAN / Tailscale / WireGuard → mutual-auth is P1 (not P0), but a real exposure on untrusted LAN. Re-wake = CloudKit silent push (own iCloud, no hosted server) → spec `screenshare-8qi`. Fleet does all four clusters + forward planning.
+
+**Backlog**: 35 new beads (5 epics + 30 tasks) with a verified 20-edge dependency graph (no cycles), all machine-verifiable; device-observable effects are separate human-gated follow-ups. Enriched `vs9`/`ins`/`10p`/`627` to dispatchable specs; closed `8ds` (already done — `OutboundInputPump`). `bd ready` surfaces the roots; `w-skip` (kyf) and `cc-target` (1j0) are the two keystones to do first.
+
+**Why PROPOSED not ratified**: the decisions reshape the wire protocol, trust model, and module layout — the user should review the report before the fleet executes the XL/lead-tier items. The P0/P1 machine-verifiable roots (w-skip, w-golden, cc-target, t-lockgate, t-filecap, x-capturerace) are safe to start immediately.
+
 ## [2026-06-28] Host — keep-awake + host-lock status (the achievable slice of "work on a locked screen")
 
 **Context**: User asked to make Portview "work on a locked screen / unlock it." The 2026-06-28 feasibility spike (phases/locked-screen-feasibility-report.md) established the real locked/login/unlock case is walled off (secure event input, first-party-only privileged path, TCC can't bootstrap without a logged-in user). The achievable, worthwhile slice: keep the Mac from idle-locking mid-session, and tell the client when the host IS locked so it pauses instead of showing a black frame.
