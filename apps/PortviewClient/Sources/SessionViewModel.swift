@@ -266,8 +266,7 @@ final class SessionViewModel: ObservableObject {
     }
 
     func disconnect() {
-        connection?.close() // close first so the inbound stream finishes, then drop the outbound lane
-        unbindConnection()
+        unbindConnection() // closes the transport (the inbound stream finishes) and drops the outbound lane
         task?.cancel()
         task = nil
         status = .idle
@@ -473,14 +472,24 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
+    /// Closes the bound connection's transport. Captured at bind (production = the connection's
+    /// `close()`); a settable seam so tests can assert teardown closes the connection — a concrete
+    /// `PortviewConnection` can't be constructed without a live socket.
+    var closeConnection: (() -> Void)?
+
     /// Bind the ordered outbound input lane to a freshly-connected connection.
     private func bindConnection(_ connection: PortviewConnection) {
         self.connection = connection
+        closeConnection = { connection.close() }
         outboundPump = OutboundInputPump(connection: connection)
     }
 
-    /// Tear down the current connection's outbound lane (so it never leaks across reconnects).
+    /// Tear down the current connection — the single chokepoint (mirrors `teardownSAS`): CLOSE the
+    /// transport first (cancels the NWConnection and finishes the inbound stream — a stream end,
+    /// error, or reconnect drop must never leak a live connection), then drop the outbound lane.
     private func unbindConnection() {
+        closeConnection?()
+        closeConnection = nil
         outboundPump?.finish()
         outboundPump = nil
         connection = nil
