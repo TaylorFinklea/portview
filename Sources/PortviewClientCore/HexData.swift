@@ -1,6 +1,6 @@
 import Foundation
 
-extension Data {
+public extension Data {
     /// Parse a hex string (e.g. a certificate pin) into bytes; nil if malformed.
     init?(hexString: String) {
         let cleaned = hexString.trimmingCharacters(in: .whitespacesAndNewlines)

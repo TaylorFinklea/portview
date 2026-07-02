@@ -22,6 +22,8 @@ targets:
         product: PortviewMedia
       - package: Portview
         product: PortviewProtocol
+      - package: Portview
+        product: PortviewClientCore
     info:
       path: Portview-Info.plist
       properties:

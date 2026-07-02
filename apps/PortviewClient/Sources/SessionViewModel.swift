@@ -5,6 +5,7 @@ import CoreMedia
 import PortviewProtocol
 import PortviewTransport
 import PortviewMedia
+import PortviewClientCore
 
 /// Drives a Portview client session: connect (cert-pinned) → handshake → receive video
 /// frames → rebuild sample buffers → enqueue for display. If a live session drops, it re-binds the
