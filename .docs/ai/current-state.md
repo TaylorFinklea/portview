@@ -6,15 +6,18 @@
 
 `main`
 
-## Latest Session (2026-07-02 #2 — fleet execution: 18 beads landed, 229→286 tests)
+## Latest Session (2026-07-02 #2 — fleet execution: 23 beads landed, 229→304 tests)
 
-- Fable 5 executed the fleet backlog per handoff (security/crypto track SKIPPED per scope rule — 1nt/5yw/7jl/9m2 untouched). 18 beads closed, one commit each (7c5042e..be6edb0 + docs), NOT pushed.
-- **P0**: 1n6.1 (pre-auth ~10-byte crash — UInt64-space Frame.maxBodyLength=16MiB guard at 3 surfaces, 4 traps reproduced RED), 1n6.2 (decoder buffer backstop), 1j0 (PortviewClientCore keystone — unblocked all client extractions).
-- **Waves (native fleet agents, lead-reviewed patches)**: 9zm ClientFeedback tag 29 + client Ping sender + host holder; jfj.1 client file caps (2GiB/8GiB host-mirror); 950 Makefile+pre-push preflight; 089/ou5 ClientCore extractions; 523.1/.2 transport wedge fixes (+extra finding: cancel-before-start delivers NO state callback); 523.3 unbind close chokepoint; 523.4 MessageReader iterator ownership; ja1.1 audio interruption recovery; ja1.3 CVMetalTexture GPU-completion retain; qi0 PresentationClock+PTSJitterBuffer; cqv.1 signing via apps/Portview.xcconfig (+gitignored local override); cqv.3 versions/PrivacyInfo/export-compliance.
-- **Lead-implemented**: 523.5 two-lane InboundBuffer backpressure (ADR 2026-07-02 #2). Flake fix: moved viewport throttle test → poll-with-deadline (5s).
-- Verify: swift test 286/64 (×2), make preflight all legs, iOS sim 57 tests, host BUILD SUCCEEDED. Filed: 2nn clipboard cap (P3), 36p/5ep device-verifies (P2).
-- IN FLIGHT at write time: chain A agent (83b statics + 0c2 SASClientCoordinator extraction — invariant-pinned prompt, lead diff review pending).
-- NEXT: land chain A → {2nn → 350 → ja1.2} chain → cqv.4 os.Logger + cqv.5 SECURITY.md/license sweeps (repo-wide, run last). DEFERRED to a user-present session: cqv.2 (lead tier, notarization, account-gated).
+- Fable 5 executed the fleet backlog per handoff (security/crypto track SKIPPED per scope rule — 1nt/5yw/7jl/9m2 untouched). 23 beads closed, ~15 commits (7c5042e..a789867), NOT pushed. User asked to stop after this fleet finished.
+- **P0**: 1n6.1 (pre-auth ~10-byte crash — UInt64-space Frame.maxBodyLength=16MiB guard at 3 surfaces, 4 traps reproduced RED), 1n6.2 (decoder buffer backstop), 1j0 (PortviewClientCore keystone).
+- **Wire/protocol**: 9zm ClientFeedback tag 29 + client Ping sender; 350 handshake exposes negotiatedVersion + bump-rule docs; ja1.2 RequestKeyframe tag 30 + VideoDecoder kVTInvalidSessionErr rebuild-retry + client foreground hook; 2nn clipboard 1MiB send-cap (both sides).
+- **ClientCore epic (jfj)**: 089 ZoomGeometry/ViewportRequestScheduler moved; ou5 CursorPrediction; 83b ViewportCoverage/DisplaySelection/ReconnectPlanning; 0c2 SASClientCoordinator (5-exit teardown audit 1:1, host SAS tests byte-untouched); jfj.1 client file caps (2GiB/8GiB); 950 Makefile+pre-push preflight.
+- **Concurrency (523)**: .1/.2 transport wedge fixes (+extra finding: cancel-before-start delivers NO state callback); .3 unbind close chokepoint; .4 MessageReader iterator ownership; .5 two-lane InboundBuffer backpressure (lead-implemented, ADR 2026-07-02 #2).
+- **rt-media (ja1)**: .1 audio interruption recovery; .3 CVMetalTexture GPU-completion retain; qi0 PresentationClock+PTSJitterBuffer.
+- **Release (cqv)**: .1 signing via apps/Portview.xcconfig (+gitignored local override); .3 versions/PrivacyInfo/export-compliance.
+- Verify: swift test 304/68, iOS + host BUILD SUCCEEDED, make preflight all legs. Flake fixed: viewport throttle test → poll-with-deadline. Filed: 36p/5ep device-verifies (P2).
+- STOPPED here per user request. Nothing pushed — user reviews + pushes.
+- NEXT when resuming: cqv.4 os.Logger + cqv.5 SECURITY.md/license (repo-wide sweeps, run last). DEFERRED to a user-present session: cqv.2 (lead tier, notarization, account-gated). All device-verify beads (89q/1wm/b27/ed4/pkb/11s/ve5/43i/6j7/er1/36p/5ep) HUMAN-gated. Security/crypto epic 1nt untouched (separate session).
 
 ## Latest Session (2026-07-02 — re-review synthesis: specs folded, ADR, backlog filed)
 
