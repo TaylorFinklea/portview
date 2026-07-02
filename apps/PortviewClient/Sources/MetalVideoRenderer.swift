@@ -131,6 +131,11 @@ final class MetalVideoRenderer {
         encoder.setFragmentSamplerState(sampler, index: 0)
         encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
         encoder.endEncoding()
+        // Keep the CVMetalTexture wrapper alive until the GPU has finished sampling it: dropping it
+        // when render() returns lets the texture cache recycle the backing IOSurface mid-draw
+        // (tearing/garbage under load). Handlers must be added BEFORE commit; deliberately NOT
+        // waitUntilCompleted, which would stall the presentsWithTransaction path tuned below.
+        commandBuffer.addCompletedHandler { _ in _ = cvTexture }
         // With presentsWithTransaction we present manually after the buffer is scheduled, on the main
         // actor (this runs in the display-link's runloop turn), so the present joins its CATransaction.
         commandBuffer.commit()
