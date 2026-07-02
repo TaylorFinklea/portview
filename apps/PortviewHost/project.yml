@@ -1,8 +1,13 @@
 name: PortviewHost
 options:
-  bundleIdPrefix: dev.finklea
   deploymentTarget:
     macOS: "26.0"
+# Signing team + bundle-id prefix come from ../Portview.xcconfig (shared with
+# the iOS client). Per-developer override: ../Portview.local.xcconfig — see
+# apps/README.md "Building with your own team".
+configFiles:
+  Debug: ../Portview.xcconfig
+  Release: ../Portview.xcconfig
 packages:
   Portview:
     path: ../..
@@ -15,6 +20,8 @@ targets:
       - Sources
       - path: AppIcon.icon
         type: file
+      - path: PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: Portview
         product: PortviewHostCore
@@ -22,15 +29,18 @@ targets:
       path: PortviewHost-Info.plist
       properties:
         CFBundleDisplayName: "Portview Host"
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ITSAppUsesNonExemptEncryption: false
         LSApplicationCategoryType: public.app-category.utilities
         NSLocalNetworkUsageDescription: "Portview publishes and accepts local-network connections from your iPhone to mirror and control this Mac."
         NSBonjourServices:
           - _portview._udp
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.finklea.portview.host
+        PRODUCT_BUNDLE_IDENTIFIER: $(PORTVIEW_BUNDLE_ID_PREFIX).portview.host
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: K7CBQW6MPG
+        DEVELOPMENT_TEAM: $(PORTVIEW_DEVELOPMENT_TEAM)
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
 schemes:
   PortviewHost:

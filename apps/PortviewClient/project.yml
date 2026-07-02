@@ -1,8 +1,12 @@
 name: PortviewClient
 options:
-  bundleIdPrefix: dev.finklea
   deploymentTarget:
     iOS: "26.0"
+# Signing team + bundle-id prefix come from the shared xcconfig in apps/.
+# Per-developer override: apps/Portview.local.xcconfig — see apps/README.md "Building with your own team".
+configFiles:
+  Debug: ../Portview.xcconfig
+  Release: ../Portview.xcconfig
 packages:
   Portview:
     path: ../..
@@ -15,6 +19,8 @@ targets:
       - Sources
       - path: AppIcon.icon
         type: file
+      - path: PrivacyInfo.xcprivacy
+        buildPhase: resources
     dependencies:
       - package: Portview
         product: PortviewTransport
@@ -27,6 +33,10 @@ targets:
     info:
       path: Portview-Info.plist
       properties:
+        CFBundleDisplayName: "Portview"
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        ITSAppUsesNonExemptEncryption: false
         NSLocalNetworkUsageDescription: "Portview connects to your Mac on your local network to mirror its screen."
         NSCameraUsageDescription: "Portview uses the camera to scan the pairing QR code shown on your Mac."
         NSBonjourServices:
@@ -34,10 +44,10 @@ targets:
         UILaunchScreen: {}
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.finklea.portview
+        PRODUCT_BUNDLE_IDENTIFIER: $(PORTVIEW_BUNDLE_ID_PREFIX).portview
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
-        DEVELOPMENT_TEAM: K7CBQW6MPG
+        DEVELOPMENT_TEAM: $(PORTVIEW_DEVELOPMENT_TEAM)
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
   PortviewClientTests:
     type: bundle.unit-test
@@ -51,7 +61,7 @@ targets:
         product: PortviewTransport
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: dev.finklea.portview.tests
+        PRODUCT_BUNDLE_IDENTIFIER: $(PORTVIEW_BUNDLE_ID_PREFIX).portview.tests
         GENERATE_INFOPLIST_FILE: YES
 schemes:
   PortviewClient:

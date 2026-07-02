@@ -47,6 +47,42 @@ In Xcode: pick your iPhone as the destination, then Run. Use QR pairing, Bonjour
 
 To try it in the **iOS Simulator** (host and client on the same Mac), use `127.0.0.1` as the IP.
 
+## Building with your own team
+
+Signing identity for **both** apps is single-sourced in
+`apps/Portview.xcconfig` (the client project references it via a
+relative `configFiles` path). The tracked defaults are the upstream
+maintainer's team (`K7CBQW6MPG`) and bundle-id prefix (`dev.finklea`), so the
+maintainer's build stays zero-config.
+
+To build with your own Apple Developer account, **don't edit tracked files** —
+create `apps/Portview.local.xcconfig` (gitignored):
+
+```
+PORTVIEW_DEVELOPMENT_TEAM = YOURTEAMID
+PORTVIEW_BUNDLE_ID_PREFIX = com.yourdomain
+```
+
+That overrides the defaults for both apps: bundle ids become
+`com.yourdomain.portview` (client), `com.yourdomain.portview.host` (host), and
+`com.yourdomain.portview.tests` (client unit tests). The override is resolved
+at build time, so you don't need to re-run `xcodegen generate` after creating
+or editing it.
+
+## Versioning
+
+`MARKETING_VERSION` (user-facing, e.g. `1.0`) and `CURRENT_PROJECT_VERSION`
+(build number, e.g. `1`) also live in `apps/Portview.xcconfig` —
+**bump both apps from that one file**. The generated Info.plists reference
+`$(MARKETING_VERSION)` / `$(CURRENT_PROJECT_VERSION)`, so a bump takes effect
+on the next build; no `xcodegen generate` re-run needed.
+
+TestFlight readiness: each app ships a `PrivacyInfo.xcprivacy` (no tracking,
+no data collection; declares UserDefaults `CA92.1` on the client and
+`systemUptime` `35F9.1` on both) and sets `ITSAppUsesNonExemptEncryption` to
+`false` (standard TLS-only exemption). Archive/upload validation against App
+Store Connect has not been run yet.
+
 ## Preflight gate (no hosted CI yet)
 
 There is deliberately no GitHub Actions workflow (hosted macOS-26 runners are unreliable). Run the full gate locally from the repo root:
