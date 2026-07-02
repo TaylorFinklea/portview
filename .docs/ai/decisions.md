@@ -2,6 +2,34 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-02 #2] P0 wire hardening SHIPPED + inbound-backpressure design (ACCEPTED)
+
+**Context**: The fleet-execution session implemented the P0 cluster from the entry below
+(18 beads landed; see git log 7c5042e..be6edb0). Two design decisions made in flight are
+worth recording beyond commit messages:
+
+1. **`Frame.maxBodyLength` = 16 MiB** (wire ceiling, beads 1n6.1/1n6.2). Rationale: ~8× the
+   largest legitimate frame (multi-MB HEVC keyframes at 80 Mbps), 256× the 64 KiB file chunk,
+   and it bounds worst-case pre-auth decoder memory at 256 MiB across the 16-connection serve
+   cap. **Consequence**: clipboard text is sent uncapped, so a >16 MiB copy now drops the
+   session — sender-side cap filed as `screenshare-2nn` (P3). Checked in UInt64 space BEFORE
+   any `Int()` conversion at all three decode surfaces; `readBytes` bounds check rewritten in
+   subtraction form (`count <= storage.count - offset`) against addition-overflow traps.
+2. **Two-lane in-process inbound buffer over a lane split or stream policies** (bead 523.5).
+   `PortviewConnection.inbound` stays `AsyncStream<AnyMessage>` via `AsyncStream(unfolding:)`
+   pulling from `InboundBuffer`: control = lossless FIFO whose buffered payload bytes gate the
+   receive re-arm (4 MiB high / 1 MiB low hysteresis → the paused receive fills the QUIC
+   window → real end-to-end pushback, which a newest-N policy alone cannot give for file
+   transfers); video = newest-2 coalesce (mirrors `CaptureEngine.bufferingNewest(2)`; drops
+   surface as `ClientFeedback.droppedFrames` sequence gaps). Rejected: `AsyncStream` buffering
+   policies (producers never suspend; would drop control) and doing the QUIC lane split now
+   (pre-empts the lane spec — this buffer IS the lane taxonomy enforced in-process until the
+   split lands at stream level). Re-arm decisions use the enqueue call's own verdict, never a
+   flag re-read (consumer-clear race would double-arm the receive loop).
+   Related (bead 523.4): `HostRunner.MessageReader` now owns the inbound iterator for the
+   connection's lifetime with a memoized `pendingRead` — a timed-out read is re-awaited, never
+   abandoned, so `AsyncStream`'s fatal two-consumer case is unreachable by construction.
+
 ## [2026-07-02] Fresh re-review confirmation + wire-decoder P0 hardening + 3 lead specs folded (PROPOSED)
 
 **Context**: Follow-up to the 2026-07-01 arch-review ADR below. A fresh, independent six-lens
