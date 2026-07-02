@@ -5,6 +5,10 @@ public struct ClientHandshake {
     }
     public private(set) var state: State = .idle
 
+    /// The wire version agreed with the host (the lower of the two speakers), set once the
+    /// `ServerHello` is accepted; `nil` until then. Callers branch on this to gate versioned behavior.
+    public private(set) var negotiatedVersion: UInt16?
+
     public let deviceID: String
     public let deviceName: String
     public let supportedCodecs: [Codec]
@@ -23,10 +27,11 @@ public struct ClientHandshake {
     /// Validate the `ServerHello` and produce the `StartSession` to send.
     public mutating func handle(_ hello: ServerHello, displayID: UInt32, maxWidth: UInt32, maxHeight: UInt32, maxFPS: UInt16, targetBitrate: UInt32) throws -> StartSession {
         guard state == .awaitingServerHello else { throw HandshakeError.unexpectedMessage }
-        guard ProtocolVersion.negotiate(local: ProtocolVersion.current, remote: hello.protocolVersion) != nil else {
+        guard let agreed = ProtocolVersion.negotiate(local: ProtocolVersion.current, remote: hello.protocolVersion) else {
             throw HandshakeError.versionMismatch
         }
         guard supportedCodecs.contains(hello.chosenCodec) else { throw HandshakeError.noCommonCodec }
+        negotiatedVersion = agreed
         state = .ready
         return StartSession(displayID: displayID, codec: hello.chosenCodec,
                             maxWidth: maxWidth, maxHeight: maxHeight, maxFPS: maxFPS, targetBitrate: targetBitrate)
