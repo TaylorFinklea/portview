@@ -226,9 +226,14 @@ public struct HostRunner: Sendable {
 
             let registry = DisplayRegistry(displays)
             let hostCertBytes = (try? tlsIdentity.certificateSHA256()).map { [UInt8]($0) } ?? []
+            // Host-side authority (not just the client-side UX gate above): drop input injection
+            // while locked, regardless of what any connected client sends. Seed from the current
+            // state in case the Mac is already locked when this session starts.
+            InputInjector.paused = LockMonitor.currentlyLocked()
             // Tell connected clients when the host screen locks/unlocks so they can pause the live view
             // (a locked Mac captures the secure desktop / blank, not the user's content).
             let lockMonitor = LockMonitor { locked in
+                InputInjector.paused = locked
                 control?.broadcast(.hostLockStatus(HostLockStatus(locked: locked)))
                 onEvent(.message(locked ? "🔒 Screen locked — live view paused for connected clients."
                                         : "🔓 Screen unlocked — live view resumed."))

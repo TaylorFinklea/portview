@@ -6,6 +6,32 @@ import PortviewProtocol
 /// Requires Accessibility permission to actually take effect. Tracks the cursor
 /// position itself (trackpad-style relative movement) and clamps to the display.
 final class InputInjector: @unchecked Sendable {
+    /// Host-side authority: when true, `handle(_:)` is a no-op no matter what a (possibly
+    /// modified/hostile) client sends — the ONLY other gate is client-side UX, not a security
+    /// boundary. Shared process-wide (not per-instance) so a single LockMonitor callback in
+    /// HostRunner pauses every current AND future injector across every connected session; a
+    /// fresh connection or display switch can't bypass it. NSLock-guarded to mirror this file's
+    /// sibling `@unchecked Sendable` types (HostControl, CaptureEngine, KeepAwake).
+    private static let pauseLock = NSLock()
+    nonisolated(unsafe) private static var isPaused = false
+
+    var paused: Bool {
+        get { Self.paused }
+        set { Self.paused = newValue }
+    }
+
+    /// Same flag, settable without an instance in hand (used by HostRunner to drive it from the
+    /// LockMonitor callback, which fires before any per-connection injector exists).
+    static var paused: Bool {
+        get { pauseLock.lock(); defer { pauseLock.unlock() }; return isPaused }
+        set { pauseLock.lock(); isPaused = newValue; pauseLock.unlock() }
+    }
+
+    /// Test seam: called once per message that actually reaches injection (i.e. `handle(_:)` was
+    /// NOT paused). CGEvent posting has no observable effect without Accessibility permission, so
+    /// tests assert on this instead of on real system side effects.
+    var didInject: (() -> Void)?
+
     /// Called with the normalized (0…1) cursor position after it moves (throttled).
     var onCursorMoved: ((Double, Double) -> Void)?
     private var position: CGPoint
@@ -21,6 +47,8 @@ final class InputInjector: @unchecked Sendable {
     }
 
     func handle(_ message: AnyMessage) {
+        guard !paused else { return }
+        didInject?()
         switch message {
         case .pointerMove(let m): movePointer(dx: CGFloat(m.dx), dy: CGFloat(m.dy))
         case .pointerButton(let m): button(m.button, down: m.isDown)
