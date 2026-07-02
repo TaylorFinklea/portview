@@ -1,6 +1,11 @@
 /// Self-delimiting framing: `[varint bodyLength][uint8 messageType][payload]`.
 /// `bodyLength` counts the type byte plus the payload.
 public enum Frame {
+    /// Largest frame body a peer may declare. Generous headroom over the biggest
+    /// legitimate frame (multi-MB HEVC keyframes; 64 KiB file chunks) while bounding
+    /// what a malicious length prefix can make the decoder buffer or allocate.
+    public static let maxBodyLength: UInt64 = 16 * 1024 * 1024
+
     /// Encode a single message into one frame.
     public static func encode<M: WireMessage>(_ message: M) -> [UInt8] {
         var payload = BinaryWriter()
@@ -51,6 +56,9 @@ public enum Frame {
     public static func decode(_ bytes: [UInt8]) throws -> AnyMessage {
         var r = BinaryReader(bytes)
         let bodyLength = try r.varUInt()
+        guard bodyLength <= maxBodyLength else {
+            throw WireError.malformed("frame length exceeds maximum")
+        }
         let body = try r.readBytes(Int(bodyLength))
         return try decodeBody(body)
     }

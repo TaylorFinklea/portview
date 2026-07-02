@@ -35,6 +35,25 @@ import Testing
         #expect(collected == [.bye(m)])
     }
 
+    @Test func rejectsFrameLengthAboveIntMax() {
+        // varint for 2^63 (> Int.max): nine continuation bytes then 0x01.
+        // Int(bodyLength) must never see this value — it would trap uncatchably.
+        let header: [UInt8] = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]
+        var decoder = FrameDecoder()
+        #expect(throws: WireError.malformed("frame length exceeds maximum")) {
+            _ = try decoder.push(header)
+        }
+    }
+
+    @Test func rejectsFrameLengthJustOverCeiling() {
+        var w = BinaryWriter()
+        w.putVarUInt(Frame.maxBodyLength + 1)
+        var decoder = FrameDecoder()
+        #expect(throws: WireError.malformed("frame length exceeds maximum")) {
+            _ = try decoder.push(w.bytes)
+        }
+    }
+
     @Test func skipsUnknownTagWithoutWedging() throws {
         let a = Bye(reason: "first")
         let b = Bye(reason: "second")

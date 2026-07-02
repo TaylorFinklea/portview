@@ -48,13 +48,16 @@ public struct BinaryReader: Sendable {
     }
 
     public mutating func readBytes(_ count: Int) throws -> [UInt8] {
-        guard count >= 0, offset + count <= storage.count else { throw WireError.truncated }
+        // Subtraction form: `offset + count` would trap on overflow for count near Int.max.
+        guard count >= 0, count <= storage.count - offset else { throw WireError.truncated }
         defer { offset += count }
         return Array(storage[offset..<offset + count])
     }
 
     public mutating func data() throws -> [UInt8] {
         let n = try varUInt()
+        // Bounds-check in UInt64 space: Int(n) would trap for n above Int.max.
+        guard n <= UInt64(remaining) else { throw WireError.truncated }
         return try readBytes(Int(n))
     }
 

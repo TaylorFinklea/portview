@@ -26,6 +26,22 @@ import Testing
         }
     }
 
+    @Test func decodeRejectsBodyLengthAboveIntMax() {
+        // varint for 2^63 (> Int.max): Int(bodyLength) must never see this value.
+        let bytes: [UInt8] = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]
+        #expect(throws: WireError.malformed("frame length exceeds maximum")) {
+            _ = try Frame.decode(bytes)
+        }
+    }
+
+    @Test func decodeRejectsBodyLengthOverCeiling() {
+        var w = BinaryWriter()
+        w.putVarUInt(Frame.maxBodyLength + 1)
+        #expect(throws: WireError.malformed("frame length exceeds maximum")) {
+            _ = try Frame.decode(w.bytes)
+        }
+    }
+
     @Test func anyMessageReportsItsType() {
         #expect(AnyMessage.bye(Bye(reason: "")).messageType == .bye)
         #expect(AnyMessage.videoFrame(VideoFrame(sequence: 0, ptsMicros: 0, isKeyframe: false, displayID: 0, width: 0, height: 0, data: [])).messageType == .videoFrame)

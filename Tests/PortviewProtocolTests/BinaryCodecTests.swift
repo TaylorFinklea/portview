@@ -50,6 +50,23 @@ import Testing
         }
     }
 
+    @Test func dataRejectsDeclaredLengthAboveIntMax() {
+        var w = BinaryWriter()
+        w.putVarUInt(UInt64(Int.max) + 1)
+        var r = BinaryReader(w.bytes)
+        #expect(throws: WireError.truncated) {
+            _ = try r.data()
+        }
+    }
+
+    @Test func readBytesDoesNotTrapNearIntMax() throws {
+        var r = BinaryReader([1, 2, 3])
+        _ = try r.uint8() // offset = 1, so an `offset + count` bounds check would overflow
+        #expect(throws: WireError.truncated) {
+            _ = try r.readBytes(Int.max)
+        }
+    }
+
     @Test func invalidBoolThrows() {
         var r = BinaryReader([0x02])
         #expect(throws: (any Error).self) {

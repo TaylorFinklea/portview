@@ -16,6 +16,12 @@ public struct FrameDecoder {
             } catch WireError.truncated {
                 break // length prefix not fully arrived yet
             }
+            // Compare in UInt64 space BEFORE any Int() conversion: values above
+            // Int.max would trap uncatchably, and anything above the ceiling would
+            // let a peer make us buffer unbounded memory waiting for the body.
+            guard bodyLength <= Frame.maxBodyLength else {
+                throw WireError.malformed("frame length exceeds maximum")
+            }
             let headerSize = reader.offset
             guard buffer.count - headerSize >= Int(bodyLength) else {
                 break // body not fully arrived yet
