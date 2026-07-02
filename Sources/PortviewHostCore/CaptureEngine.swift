@@ -38,6 +38,12 @@ private actor ViewportState {
         }
     }
 
+    /// Flag a keyframe WITHOUT changing the crop — used to honor a client `.requestKeyframe` so the
+    /// video pump forces the next frame to a keyframe.
+    func requestKeyframe() {
+        keyframeRequested = true
+    }
+
     func consumeKeyframeRequest() -> Bool {
         let requested = keyframeRequested
         keyframeRequested = false
@@ -80,6 +86,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
 
     func currentViewport() async -> CGRect { await viewportState.get() }
     func consumeKeyframeRequest() async -> Bool { await viewportState.consumeKeyframeRequest() }
+    /// Force the next encoded frame to a keyframe (client `.requestKeyframe`), without a re-crop.
+    func requestKeyframe() async { await viewportState.requestKeyframe() }
 
     private func setAppliedRegion(_ rect: CGRect) {
         regionLock.lock(); appliedRegion = rect; regionLock.unlock()

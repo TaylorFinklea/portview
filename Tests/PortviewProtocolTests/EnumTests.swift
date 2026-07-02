@@ -61,6 +61,7 @@ import Testing
             MessageType.ping.rawValue,
             MessageType.pong.rawValue,
             MessageType.clientFeedback.rawValue,
+            MessageType.requestKeyframe.rawValue,
         ]
         let actual = Set(MessageType.allCases.map(\.rawValue))
         #expect(actual == expected)

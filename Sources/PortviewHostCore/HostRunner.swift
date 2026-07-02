@@ -495,6 +495,13 @@ public struct HostRunner: Sendable {
         var server = ServerHandshake(displays: Self.displayInfos(from: await registry.current()), supportedCodecs: [.hevc])
         let clipboard = ClipboardSync()
         clipboard.start { text in
+            // Cap outbound clipboard at the sender: an over-cap copy would make an oversized frame the
+            // client's decoder rejects (WireError.malformed), dropping the session. Skip it entirely
+            // (never truncate — half a clipboard is worse than none).
+            guard Frame.shouldSendClipboard(text) else {
+                print("clipboard: skipping \(text.utf8.count)-byte copy over \(Frame.maxClipboardBytes)-byte cap")
+                return
+            }
             Task { try? await connection.send(.clipboardUpdate(ClipboardUpdate(text: text))) }
         }
         let fileReceiver = FileReceiver()
@@ -598,6 +605,11 @@ public struct HostRunner: Sendable {
                 break
             case .clientFeedback(let feedback):
                 clientFeedback.update(feedback)
+            case .requestKeyframe:
+                // Client asked for a fresh keyframe (e.g. it just returned to the foreground and its
+                // delta chain has a gap). Force the next encoded frame to a keyframe on the active
+                // capture so the stream recovers without waiting for the periodic keyframe.
+                await currentCapture?.requestKeyframe()
             default:
                 break
             }

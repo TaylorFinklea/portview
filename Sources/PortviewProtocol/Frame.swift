@@ -6,6 +6,20 @@ public enum Frame {
     /// what a malicious length prefix can make the decoder buffer or allocate.
     public static let maxBodyLength: UInt64 = 16 * 1024 * 1024
 
+    /// Largest clipboard text payload (UTF-8 bytes) a sender will put on the wire. Sits well under
+    /// `maxBodyLength` (16 MiB) so an enormous copy can never produce an oversized `.clipboardUpdate`
+    /// frame — which the receiving decoder rejects as `WireError.malformed`, dropping the whole
+    /// connection. Both the host (`ClipboardSync`/`HostRunner`) and the client (`SessionViewModel`)
+    /// gate their outbound clipboard on this single limit.
+    public static let maxClipboardBytes = 1 * 1024 * 1024
+
+    /// Whether a clipboard string is small enough to send. Pure so both sides share one tested
+    /// decision. Over-cap payloads are skipped (all-or-nothing) — never truncated, since half a
+    /// clipboard is worse than none. Measured in UTF-8 bytes to match the wire encoding.
+    public static func shouldSendClipboard(_ text: String) -> Bool {
+        text.utf8.count <= maxClipboardBytes
+    }
+
     /// Encode a single message into one frame.
     public static func encode<M: WireMessage>(_ message: M) -> [UInt8] {
         var payload = BinaryWriter()
@@ -50,6 +64,7 @@ public enum Frame {
         case .ping(let m): encode(m)
         case .pong(let m): encode(m)
         case .clientFeedback(let m): encode(m)
+        case .requestKeyframe(let m): encode(m)
         }
     }
 
@@ -101,6 +116,7 @@ public enum Frame {
         case .ping: return .ping(try Ping(from: &r))
         case .pong: return .pong(try Pong(from: &r))
         case .clientFeedback: return .clientFeedback(try ClientFeedback(from: &r))
+        case .requestKeyframe: return .requestKeyframe(try RequestKeyframe(from: &r))
         }
     }
 }

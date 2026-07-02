@@ -310,9 +310,20 @@ final class SessionViewModel: ObservableObject {
 
     /// Push the iPhone's clipboard text to the Mac (user-initiated; iOS restricts auto-reads).
     func pasteToHost() {
-        if let text = UIPasteboard.general.string, !text.isEmpty {
-            send(.clipboardUpdate(ClipboardUpdate(text: text)))
-        }
+        guard let text = UIPasteboard.general.string, !text.isEmpty else { return }
+        // Cap outbound clipboard at the sender (same limit as the host): an over-cap payload would make
+        // an oversized frame the host's decoder rejects (WireError.malformed), dropping the session.
+        // Skip it entirely rather than truncate — half a clipboard is worse than none.
+        guard Frame.shouldSendClipboard(text) else { return }
+        send(.clipboardUpdate(ClipboardUpdate(text: text)))
+    }
+
+    /// Ask the host for a fresh keyframe so the video delta chain recovers after a gap. Called when the
+    /// app returns to the foreground: while backgrounded VideoToolbox may have torn down the decode
+    /// session, and frames missed during the gap leave the delta chain broken until the next keyframe.
+    func requestKeyframe() {
+        guard status == .streaming else { return }
+        send(.requestKeyframe(RequestKeyframe()))
     }
 
     /// Push a file to the Mac (saved to its ~/Downloads). Announce it, then stream ordered

@@ -10,6 +10,8 @@ struct ContentView: View {
     @StateObject private var savedHosts = SavedHostsStore()
     @StateObject private var settings = ClientSettingsStore()
 
+    @Environment(\.scenePhase) private var scenePhase
+
     @State private var manualHost = ""
     @State private var manualPort = ""
     @State private var manualPin = ""
@@ -54,6 +56,11 @@ struct ContentView: View {
                 if status == .streaming, let payload = session.connectedHostToSave {
                     savedHosts.remember(payload)
                 }
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                // Returning to the foreground: ask the host for a keyframe so the delta chain recovers
+                // after the background gap (missed frames / a torn-down decode session).
+                if newPhase == .active { session.requestKeyframe() }
             }
     }
 

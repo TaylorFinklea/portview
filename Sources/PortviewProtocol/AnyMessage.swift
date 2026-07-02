@@ -29,6 +29,7 @@ public enum AnyMessage: Equatable, Sendable {
     case ping(Ping)
     case pong(Pong)
     case clientFeedback(ClientFeedback)
+    case requestKeyframe(RequestKeyframe)
 
     public var messageType: MessageType {
         switch self {
@@ -61,6 +62,7 @@ public enum AnyMessage: Equatable, Sendable {
         case .ping: .ping
         case .pong: .pong
         case .clientFeedback: .clientFeedback
+        case .requestKeyframe: .requestKeyframe
         }
     }
 }

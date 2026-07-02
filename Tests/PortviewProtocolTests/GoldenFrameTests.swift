@@ -37,6 +37,7 @@ import Testing
         #expect(MessageType.ping.rawValue == 27)
         #expect(MessageType.pong.rawValue == 28)
         #expect(MessageType.clientFeedback.rawValue == 29)
+        #expect(MessageType.requestKeyframe.rawValue == 30)
     }
 
     @Test func clientHelloWireBytesArePinned() {
@@ -185,5 +186,10 @@ import Testing
         let m = ClientFeedback(receivedFPSX100: 5_985, receivedMbpsX100: 4_275, averageDecodeMsX100: 250,
                                 decodeQueueDepth: 3, droppedFrames: 7, rttMicros: 15_000)
         #expect(Frame.encodeAny(.clientFeedback(m)) == [23, 29, 0, 0, 23, 97, 0, 0, 16, 179, 0, 0, 0, 250, 0, 3, 0, 0, 0, 7, 0, 0, 58, 152])
+    }
+
+    @Test func requestKeyframeWireBytesArePinned() {
+        // Empty payload: bodyLength = 1 (just the type byte). Frame = [varint 1][type 30].
+        #expect(Frame.encodeAny(.requestKeyframe(RequestKeyframe())) == [1, 30])
     }
 }

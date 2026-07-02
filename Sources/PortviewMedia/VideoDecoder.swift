@@ -24,6 +24,22 @@ public final class VideoDecoder: @unchecked Sendable {
             try rebuildSession(formatDescription: format)
             formatDescription = format
         }
+        do {
+            return try await decodeOnce(sampleBuffer)
+        } catch VideoCodecError.decodeFailed(let status) where Self.isRecoverableSessionStatus(status) {
+            // The decode session was invalidated out-of-band — typically VideoToolbox tears it down
+            // when the app is backgrounded, and it never recovers on its own. Rebuild from the current
+            // format and retry the decode once so the stream heals instead of wedging on decodeFailed.
+            try rebuildSession(formatDescription: format)
+            formatDescription = format
+            return try await decodeOnce(sampleBuffer)
+        }
+    }
+
+    /// One decode attempt against the current session. A non-`noErr` status (synchronous or from the
+    /// async callback) surfaces as `VideoCodecError.decodeFailed(status)` so `decode` can decide
+    /// whether it's a recoverable session-lifecycle error worth a rebuild-and-retry.
+    private func decodeOnce(_ sampleBuffer: CMSampleBuffer) async throws -> CVPixelBuffer {
         guard let session else { throw VideoCodecError.decodeFailed(noErr) }
 
         let boxed: UncheckedSendableBox<CVPixelBuffer> = try await withCheckedThrowingContinuation { cont in
@@ -48,6 +64,13 @@ public final class VideoDecoder: @unchecked Sendable {
         return boxed.value
     }
 
+    /// `kVTInvalidSessionErr` / `kVTVideoDecoderMalfunctionErr` mean the decode session is no longer
+    /// usable (the backgrounding hazard) and is recoverable by rebuilding it. Any other status (bad
+    /// data, etc.) is a real decode failure and is surfaced to the caller unchanged.
+    static func isRecoverableSessionStatus(_ status: OSStatus) -> Bool {
+        status == kVTInvalidSessionErr || status == kVTVideoDecoderMalfunctionErr
+    }
+
     private func rebuildSession(formatDescription: CMFormatDescription) throws {
         if let session {
             VTDecompressionSessionInvalidate(session)
@@ -70,5 +93,11 @@ public final class VideoDecoder: @unchecked Sendable {
             throw VideoCodecError.sessionCreateFailed(status)
         }
         session = created
+    }
+
+    /// Test seam: invalidate the live session out-of-band while keeping the reference, reproducing the
+    /// backgrounding hazard where the next decode returns `kVTInvalidSessionErr`.
+    func invalidateUnderlyingSessionForTesting() {
+        if let session { VTDecompressionSessionInvalidate(session) }
     }
 }

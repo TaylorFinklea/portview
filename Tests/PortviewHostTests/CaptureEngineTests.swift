@@ -23,4 +23,14 @@ import Testing
             #expect(results.allSatisfy { $0 == false })
         }
     }
+
+    @Test func requestKeyframeIsHonoredAndConsumedExactlyOnce() async {
+        // Routes a client `.requestKeyframe` wire message: set the keyframe flag without a re-crop,
+        // then the video pump consumes it once to force the next frame to a keyframe.
+        let engine = CaptureEngine(width: 1920, height: 1080)
+        #expect(await engine.consumeKeyframeRequest() == false)
+        await engine.requestKeyframe()
+        #expect(await engine.consumeKeyframeRequest() == true)
+        #expect(await engine.consumeKeyframeRequest() == false)
+    }
 }
