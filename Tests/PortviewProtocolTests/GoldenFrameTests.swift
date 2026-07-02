@@ -34,6 +34,8 @@ import Testing
         #expect(MessageType.sasClientConfirm.rawValue == 24)
         #expect(MessageType.displaysUpdate.rawValue == 25)
         #expect(MessageType.hostLockStatus.rawValue == 26)
+        #expect(MessageType.ping.rawValue == 27)
+        #expect(MessageType.pong.rawValue == 28)
     }
 
     @Test func clientHelloWireBytesArePinned() {
@@ -166,5 +168,15 @@ import Testing
 
     @Test func hostLockStatusWireBytesArePinned() {
         #expect(Frame.encodeAny(.hostLockStatus(HostLockStatus(locked: true))) == [2, 26, 1])
+    }
+
+    @Test func pingWireBytesArePinned() {
+        let m = Ping(sendMicros: 1_234_567_890_123)
+        #expect(Frame.encodeAny(.ping(m)) == [9, 27, 0, 0, 1, 31, 113, 251, 4, 203])
+    }
+
+    @Test func pongWireBytesArePinned() {
+        let m = Pong(sendMicros: 1_234_567_890_123, hostUptimeMicros: 9_876_543_210)
+        #expect(Frame.encodeAny(.pong(m)) == [17, 28, 0, 0, 1, 31, 113, 251, 4, 203, 0, 0, 0, 2, 76, 176, 22, 234])
     }
 }

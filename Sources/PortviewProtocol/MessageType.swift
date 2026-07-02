@@ -33,4 +33,6 @@ public enum MessageType: UInt8, Sendable, CaseIterable {
     case sasClientConfirm = 24
     case displaysUpdate = 25
     case hostLockStatus = 26
+    case ping = 27
+    case pong = 28
 }

@@ -58,6 +58,8 @@ import Testing
             MessageType.sasClientConfirm.rawValue,
             MessageType.displaysUpdate.rawValue,
             MessageType.hostLockStatus.rawValue,
+            MessageType.ping.rawValue,
+            MessageType.pong.rawValue,
         ]
         let actual = Set(MessageType.allCases.map(\.rawValue))
         #expect(actual == expected)

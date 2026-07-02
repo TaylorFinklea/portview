@@ -26,6 +26,8 @@ public enum AnyMessage: Equatable, Sendable {
     case sasClientConfirm(SASClientConfirm)
     case displaysUpdate(DisplaysUpdate)
     case hostLockStatus(HostLockStatus)
+    case ping(Ping)
+    case pong(Pong)
 
     public var messageType: MessageType {
         switch self {
@@ -55,6 +57,8 @@ public enum AnyMessage: Equatable, Sendable {
         case .sasClientConfirm: .sasClientConfirm
         case .displaysUpdate: .displaysUpdate
         case .hostLockStatus: .hostLockStatus
+        case .ping: .ping
+        case .pong: .pong
         }
     }
 }

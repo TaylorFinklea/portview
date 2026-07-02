@@ -530,6 +530,11 @@ public struct HostRunner: Sendable {
                 fileReceiver.chunk(chunk)
             case .bye:
                 return
+            case .ping(let ping):
+                let hostUptimeMicros = UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000)
+                try? await connection.send(.pong(Pong(sendMicros: ping.sendMicros, hostUptimeMicros: hostUptimeMicros)))
+            case .pong:
+                break
             default:
                 break
             }
