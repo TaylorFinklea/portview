@@ -61,7 +61,7 @@ import PortviewProtocol
         let hostCert = [UInt8](try identity.certificateSHA256())
         let listener = try PortviewListener(quicIdentity: identity)
         let port = try await listener.start()
-        let sas = SASPairingControl(); sas.openWindow()
+        let sas = SASPairingControl(); await sas.openWindow()
         let sink = EventSink()
         let host = runHost(listener, hostCert: hostCert, sas: sas, sink: sink)
         defer { host.cancel(); listener.cancel() }
@@ -92,7 +92,7 @@ import PortviewProtocol
         let hostCert = [UInt8](try identity.certificateSHA256())
         let listener = try PortviewListener(quicIdentity: identity)
         let port = try await listener.start()
-        let sas = SASPairingControl(); sas.openWindow()
+        let sas = SASPairingControl(); await sas.openWindow()
         let sink = EventSink()
         let host = runHost(listener, hostCert: hostCert, sas: sas, sink: sink)
         defer { host.cancel(); listener.cancel() }

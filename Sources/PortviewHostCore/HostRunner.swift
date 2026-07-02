@@ -299,7 +299,7 @@ public struct HostRunner: Sendable {
         emit: @escaping @Sendable (HostRunnerEvent) -> Void,
         interval: Duration = .seconds(2)
     ) async {
-        var last = displayInfos(from: registry.current())
+        var last = displayInfos(from: await registry.current())
         while !Task.isCancelled {
             try? await Task.sleep(for: interval)
             if Task.isCancelled { break }
@@ -309,7 +309,7 @@ public struct HostRunner: Sendable {
             let infos = displayInfos(from: displays)
             guard displaysChanged(from: last, to: infos) else { continue }
             last = infos
-            registry.set(displays)
+            await registry.set(displays)
             emit(.message("Displays changed: \(infos.count) display(s) available."))
             control?.broadcast(.displaysUpdate(DisplaysUpdate(displays: infos)))
         }
@@ -415,7 +415,7 @@ public struct HostRunner: Sendable {
         control: HostControl? = nil,
         sas: SASPairingControl? = nil
     ) async {
-        guard let firstDisplay = registry.current().first else { connection.close(); return }
+        guard let firstDisplay = await registry.current().first else { connection.close(); return }
 
         // Peek the first message to LOCK this connection's role BEFORE building any session
         // scaffolding. An SAS-preamble connection (first message = client commit) is UNPINNED (TOFU)
@@ -434,7 +434,7 @@ public struct HostRunner: Sendable {
             return
         }
 
-        var server = ServerHandshake(displays: Self.displayInfos(from: registry.current()), supportedCodecs: [.hevc])
+        var server = ServerHandshake(displays: Self.displayInfos(from: await registry.current()), supportedCodecs: [.hevc])
         let clipboard = ClipboardSync()
         clipboard.start { text in
             Task { try? await connection.send(.clipboardUpdate(ClipboardUpdate(text: text))) }
@@ -469,8 +469,8 @@ public struct HostRunner: Sendable {
             }
         }
 
-        func display(forID id: UInt32) -> SCDisplay {
-            registry.current().first { UInt32($0.displayID) == id } ?? firstDisplay
+        func display(forID id: UInt32) async -> SCDisplay {
+            await registry.current().first { UInt32($0.displayID) == id } ?? firstDisplay
         }
         func startVideo(on display: SCDisplay) {
             videoTask?.cancel()
@@ -511,9 +511,9 @@ public struct HostRunner: Sendable {
                 do { try server.handle(start) } catch { print("startSession error: \(error)"); return }
                 requestedFPS = StreamParameters.captureFPS(requested: start.maxFPS)
                 requestedBitrate = StreamParameters.encoderBitrate(requested: start.targetBitrate)
-                startVideo(on: display(forID: start.displayID))
+                startVideo(on: await display(forID: start.displayID))
             case .switchDisplay(let switchMessage):
-                startVideo(on: display(forID: switchMessage.displayID))
+                startVideo(on: await display(forID: switchMessage.displayID))
             case .viewport(let viewport):
                 // Magnifier: re-crop the live capture. The viewport now travels in every VideoFrame,
                 // so no separate echo is needed — just apply the crop.
@@ -553,8 +553,8 @@ public struct HostRunner: Sendable {
     ) async {
         defer { connection.close() }
         // Gate: only pair during a user-opened window, and cap attempts within it.
-        guard let sas, sas.isOpen() else { return }
-        guard sas.registerAttempt() else { sas.closeWindow(); return }
+        guard let sas, await sas.isOpen() else { return }
+        guard await sas.registerAttempt() else { await sas.closeWindow(); return }
 
         // Host: fresh nonce + commit, sent before any reveal.
         let hostNonce = SASCode.randomNonce()

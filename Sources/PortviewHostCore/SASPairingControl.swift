@@ -33,11 +33,10 @@ public struct SASAttemptLimiter: Sendable {
     }
 }
 
-/// Thread-safe holder around `SASAttemptLimiter`, shared between the host app (which opens/closes the
-/// window on user action) and the serve loop (which checks the window + counts attempts). Mirrors
-/// `HostControl`'s lock-guarded `@unchecked Sendable` shape.
-public final class SASPairingControl: @unchecked Sendable {
-    private let lock = NSLock()
+/// Actor-isolated holder around `SASAttemptLimiter`, shared between the host app (which opens/closes
+/// the window on user action) and the serve loop (which checks the window + counts attempts). All
+/// callers are already in async contexts, so actor isolation replaces the hand-rolled lock.
+public actor SASPairingControl {
     private var limiter: SASAttemptLimiter
 
     public init(windowDuration: TimeInterval = 120, maxAttempts: Int = 5) {
@@ -45,9 +44,9 @@ public final class SASPairingControl: @unchecked Sendable {
     }
 
     /// User opened the pairing window (e.g. tapped "Pair" on the host).
-    public func openWindow(now: Date = Date()) { lock.lock(); limiter.open(now: now); lock.unlock() }
-    public func closeWindow() { lock.lock(); limiter.close(); lock.unlock() }
+    public func openWindow(now: Date = Date()) { limiter.open(now: now) }
+    public func closeWindow() { limiter.close() }
 
-    func isOpen(now: Date = Date()) -> Bool { lock.lock(); defer { lock.unlock() }; return limiter.isOpen(now: now) }
-    func registerAttempt(now: Date = Date()) -> Bool { lock.lock(); defer { lock.unlock() }; return limiter.registerAttempt(now: now) }
+    func isOpen(now: Date = Date()) -> Bool { limiter.isOpen(now: now) }
+    func registerAttempt(now: Date = Date()) -> Bool { limiter.registerAttempt(now: now) }
 }
