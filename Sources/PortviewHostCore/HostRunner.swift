@@ -426,6 +426,52 @@ public struct HostRunner: Sendable {
         }
     }
 
+    /// Carries a mutable `AsyncIterator` across the unstructured read task below. Only one task
+    /// ever touches `iterator` at a time (the race's winner is read back into the caller's `inout`
+    /// once it settles), so the lack of internal synchronization is safe despite `@unchecked Sendable`.
+    private final class MessageIteratorBox: @unchecked Sendable {
+        var iterator: AsyncStream<AnyMessage>.AsyncIterator
+        init(_ iterator: AsyncStream<AnyMessage>.AsyncIterator) { self.iterator = iterator }
+    }
+
+    /// Race an inbound read against `deadline`, returning `nil` on timeout instead of blocking
+    /// indefinitely. `AsyncStream.next()` isn't itself cancellation-aware, so the loser of the race
+    /// (typically the read, when nothing arrives) is left running unstructured in the background
+    /// rather than awaited — it's harmless and will resolve once the stream eventually yields or
+    /// finishes. Used to bound serve paths' first-message read, which previously had no
+    /// application-level deadline (only the ~30s QUIC idle timeout), letting an idle/phantom
+    /// connection hold a serve-cap slot for the full ~30s.
+    static func nextMessage(
+        from iterator: inout AsyncStream<AnyMessage>.AsyncIterator,
+        deadline: Duration
+    ) async -> AnyMessage? {
+        let box = MessageIteratorBox(iterator)
+        let gate = SingleResumeGate()
+        let result = await withCheckedContinuation { (continuation: CheckedContinuation<AnyMessage?, Never>) in
+            Task {
+                let message = await box.iterator.next()
+                if await gate.tryResume() { continuation.resume(returning: message) }
+            }
+            Task {
+                try? await Task.sleep(for: deadline)
+                if await gate.tryResume() { continuation.resume(returning: nil) }
+            }
+        }
+        iterator = box.iterator
+        return result
+    }
+
+    /// Guards a `CheckedContinuation` against a double-resume when two racing tasks may both try
+    /// to complete it; only the first `tryResume()` call succeeds.
+    private actor SingleResumeGate {
+        private var resumed = false
+        func tryResume() -> Bool {
+            guard !resumed else { return false }
+            resumed = true
+            return true
+        }
+    }
+
     /// Run one client session. A single inbound loop handles the handshake and then
     /// input messages (injected as CGEvents); video streams concurrently from a child task.
     private static func serve(
@@ -458,8 +504,13 @@ public struct HostRunner: Sendable {
         // scaffolding. An SAS-preamble connection (first message = client commit) is UNPINNED (TOFU)
         // and must never reach the clipboard / input-injector / capture / file path — trust is decided
         // by the SAS code comparison, after which the client re-dials pinned. (v2 review CRITICAL-3.)
+        // Bounded by a short deadline (not just the ~30s QUIC idle timeout): an idle or
+        // double-delivered "phantom" connection would otherwise hold a serve-cap slot for the full
+        // ~30s, starving a legit client.
         var inbound = connection.inbound.makeAsyncIterator()
-        guard let firstMessage = await inbound.next() else { connection.close(); return }
+        guard let firstMessage = await nextMessage(from: &inbound, deadline: .seconds(5)) else {
+            connection.close(); return
+        }
         if case .sasClientCommit(let commit) = firstMessage {
             await serveSASPreamble(connection, clientCommit: commit, inbound: &inbound,
                                    hostCertSHA256: hostCertSHA256, sas: sas, emit: emit)
@@ -594,7 +645,10 @@ public struct HostRunner: Sendable {
         do { try await connection.send(.sasHostCommit(SASHostCommit(commit: hostCommit))) } catch { return }
 
         // Client reveal must come next; verify it against the client commit before using the nonce.
-        guard let next = await inbound.next(), case .sasClientReveal(let reveal) = next else { return }
+        // Deadline-bounded (rather than left to the ~30s QUIC idle timeout) so an idle/phantom
+        // preamble connection doesn't hold its slot for the full ~30s.
+        guard let next = await nextMessage(from: &inbound, deadline: .seconds(5)),
+              case .sasClientReveal(let reveal) = next else { return }
         guard SASCode.verify(commitment: clientCommit.commit, nonce: reveal.nonce,
                              role: .client, certSHA256: hostCertSHA256) else { return }
 
