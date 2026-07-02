@@ -1,5 +1,12 @@
 /// The 1-byte tag identifying a message inside a frame. Raw values are the wire encoding.
-public enum MessageType: UInt8, Sendable {
+///
+/// Reserved tag ranges for future additions (lead-assigned; do not self-allocate):
+/// - 1-99: core/stable message types (lead-assigned)
+/// - 100-149: client -> host input/feedback
+/// - 150-199: host -> client telemetry
+/// - 200-254: experimental
+/// - 255: reserved
+public enum MessageType: UInt8, Sendable, CaseIterable {
     case clientHello = 1
     case serverHello = 2
     case startSession = 3
