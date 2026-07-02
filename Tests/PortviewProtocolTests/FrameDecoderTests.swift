@@ -34,4 +34,24 @@ import Testing
         }
         #expect(collected == [.bye(m)])
     }
+
+    @Test func skipsUnknownTagWithoutWedging() throws {
+        let a = Bye(reason: "first")
+        let b = Bye(reason: "second")
+
+        // unknown-tag frame: bodyLen=1, type=99 (unknown), no payload
+        let unknownFrame: [UInt8] = [0x01, 99]
+
+        var stream = Frame.encode(a)
+        stream.append(contentsOf: unknownFrame)
+        stream.append(contentsOf: Frame.encode(b))
+
+        var decoder = FrameDecoder()
+        let messages = try decoder.push(stream)
+        #expect(messages == [.bye(a), .bye(b)])
+
+        let c = Bye(reason: "third")
+        let more = try decoder.push(Frame.encode(c))
+        #expect(more == [.bye(c)])
+    }
 }

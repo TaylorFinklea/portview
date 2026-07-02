@@ -21,7 +21,11 @@ public struct FrameDecoder {
                 break // body not fully arrived yet
             }
             let body = Array(buffer[headerSize..<headerSize + Int(bodyLength)])
-            messages.append(try Frame.decodeBody(body))
+            do {
+                messages.append(try Frame.decodeBody(body))
+            } catch WireError.unknownMessageType {
+                // Skip this frame: consume it and keep decoding subsequent frames.
+            }
             buffer.removeFirst(headerSize + Int(bodyLength))
         }
         return messages
