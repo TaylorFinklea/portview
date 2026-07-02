@@ -408,9 +408,8 @@ final class SessionViewModel: ObservableObject {
         send(.pointerMove(PointerMove(dx: Int32(sentDx), dy: Int32(sentDy))))
         // Predict the cursor locally for instant zoom-follow, using the exact delta we sent so
         // the prediction stays in lockstep with the host (its CursorPosition then matches, no snap).
-        let nx = min(1, max(0, cursorNormalized.x + sentDx * inputSensitivity / displaySize.width))
-        let ny = min(1, max(0, cursorNormalized.y + sentDy * inputSensitivity / displaySize.height))
-        cursorNormalized = CGPoint(x: nx, y: ny)
+        cursorNormalized = CursorPrediction(current: cursorNormalized, dx: sentDx, dy: sentDy,
+                                            sensitivity: inputSensitivity, displaySize: displaySize).predicted
         updateMagnifierTarget()  // re-aim the eased cursor-follow window
     }
 
