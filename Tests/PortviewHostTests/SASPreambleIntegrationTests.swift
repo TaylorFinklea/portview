@@ -24,10 +24,10 @@ import PortviewProtocol
             await withTaskGroup(of: Void.self) { group in
                 for await conn in listener.connections {
                     group.addTask {
-                        var it = conn.inbound.makeAsyncIterator()
-                        guard case .sasClientCommit(let commit)? = await it.next() else { conn.close(); return }
+                        let inbound = HostRunner.MessageReader(conn.inbound)
+                        guard case .sasClientCommit(let commit)? = await inbound.next() else { conn.close(); return }
                         await HostRunner.serveSASPreamble(
-                            conn, clientCommit: commit, inbound: &it, hostCertSHA256: hostCert,
+                            conn, clientCommit: commit, inbound: inbound, hostCertSHA256: hostCert,
                             sas: sas, emit: { e in Task { await sink.add(e) } })
                     }
                 }

@@ -343,39 +343,76 @@ public struct HostRunner: Sendable {
         }
     }
 
-    /// Carries a mutable `AsyncIterator` across the unstructured read task below. Only one task
-    /// ever touches `iterator` at a time (the race's winner is read back into the caller's `inout`
-    /// once it settles), so the lack of internal synchronization is safe despite `@unchecked Sendable`.
-    private final class MessageIteratorBox: @unchecked Sendable {
-        var iterator: AsyncStream<AnyMessage>.AsyncIterator
-        init(_ iterator: AsyncStream<AnyMessage>.AsyncIterator) { self.iterator = iterator }
-    }
+    /// Owns a connection's inbound iterator for the connection's LIFETIME and funnels every read
+    /// through at most one in-flight read task. `AsyncStream.next()` isn't cancellation-aware, so a
+    /// deadline race can't cancel a read that hasn't yielded; instead of abandoning the loser (and
+    /// copying the iterator back to the caller while that read may still be mutating it — a data
+    /// race), a timed-out read stays PENDING here and the next call awaits that same read. The
+    /// iterator is never copied in or out, so no caller can race it, and a message that arrives
+    /// after a timeout is delivered to the next read rather than dropped by a leaked task.
+    ///
+    /// `@unchecked Sendable` asserts: `iterator` is touched only from inside the single pending
+    /// read task; `pendingRead` creation/clearing is lock-serialized, and a new read task starts
+    /// only after the previous one's `iterator.next()` has settled (its value was delivered), so
+    /// iterator accesses never overlap. Callers must read sequentially (one serve loop per
+    /// connection), matching how `serveSession`/`serveSASPreamble` consume inbound messages.
+    final class MessageReader: @unchecked Sendable {
+        private var iterator: AsyncStream<AnyMessage>.AsyncIterator
+        private let lock = NSLock()
+        private var pendingRead: Task<AnyMessage?, Never>?
 
-    /// Race an inbound read against `deadline`, returning `nil` on timeout instead of blocking
-    /// indefinitely. `AsyncStream.next()` isn't itself cancellation-aware, so the loser of the race
-    /// (typically the read, when nothing arrives) is left running unstructured in the background
-    /// rather than awaited — it's harmless and will resolve once the stream eventually yields or
-    /// finishes. Used to bound serve paths' first-message read, which previously had no
-    /// application-level deadline (only the ~30s QUIC idle timeout), letting an idle/phantom
-    /// connection hold a serve-cap slot for the full ~30s.
-    static func nextMessage(
-        from iterator: inout AsyncStream<AnyMessage>.AsyncIterator,
-        deadline: Duration
-    ) async -> AnyMessage? {
-        let box = MessageIteratorBox(iterator)
-        let gate = SingleResumeGate()
-        let result = await withCheckedContinuation { (continuation: CheckedContinuation<AnyMessage?, Never>) in
-            Task {
-                let message = await box.iterator.next()
-                if await gate.tryResume() { continuation.resume(returning: message) }
-            }
-            Task {
-                try? await Task.sleep(for: deadline)
-                if await gate.tryResume() { continuation.resume(returning: nil) }
+        init(_ stream: AsyncStream<AnyMessage>) {
+            iterator = stream.makeAsyncIterator()
+        }
+
+        /// The single in-flight read, starting one only if none is pending. A read left pending by
+        /// a timed-out `next(deadline:)` is reused (its result is memoized by the `Task`), so a
+        /// late message goes to the next reader instead of an abandoned background task.
+        private func pendingOrStartRead() -> Task<AnyMessage?, Never> {
+            lock.lock(); defer { lock.unlock() }
+            if let pendingRead { return pendingRead }
+            let read = Task { [self] in await iterator.next() }
+            pendingRead = read
+            return read
+        }
+
+        /// Clear `read` once its value has actually been delivered to a caller, so the next call
+        /// starts a fresh read. A timed-out read is deliberately NOT cleared — it stays pending.
+        private func finish(_ read: Task<AnyMessage?, Never>) {
+            lock.lock(); defer { lock.unlock() }
+            if pendingRead == read { pendingRead = nil }
+        }
+
+        /// Next inbound message; `nil` when the stream ends. Blocks until one arrives.
+        func next() async -> AnyMessage? {
+            let read = pendingOrStartRead()
+            let message = await read.value
+            finish(read)
+            return message
+        }
+
+        /// Race the next inbound message against `deadline`, returning `nil` on timeout instead of
+        /// blocking indefinitely. Used to bound serve paths' first-message read, which previously
+        /// had no application-level deadline (only the ~30s QUIC idle timeout), letting an
+        /// idle/phantom connection hold a serve-cap slot for the full ~30s. On timeout the read
+        /// stays pending (see above); it is not lost.
+        func next(deadline: Duration) async -> AnyMessage? {
+            let read = pendingOrStartRead()
+            let gate = SingleResumeGate()
+            return await withCheckedContinuation { (continuation: CheckedContinuation<AnyMessage?, Never>) in
+                Task {
+                    let message = await read.value
+                    if await gate.tryResume() {
+                        finish(read)
+                        continuation.resume(returning: message)
+                    }
+                }
+                Task {
+                    try? await Task.sleep(for: deadline)
+                    if await gate.tryResume() { continuation.resume(returning: nil) }
+                }
             }
         }
-        iterator = box.iterator
-        return result
     }
 
     /// Holds the latest `ClientFeedback` snapshot (tag 29) a connection's client reported, for a
@@ -445,12 +482,12 @@ public struct HostRunner: Sendable {
         // Bounded by a short deadline (not just the ~30s QUIC idle timeout): an idle or
         // double-delivered "phantom" connection would otherwise hold a serve-cap slot for the full
         // ~30s, starving a legit client.
-        var inbound = connection.inbound.makeAsyncIterator()
-        guard let firstMessage = await nextMessage(from: &inbound, deadline: .seconds(5)) else {
+        let inbound = MessageReader(connection.inbound)
+        guard let firstMessage = await inbound.next(deadline: .seconds(5)) else {
             connection.close(); return
         }
         if case .sasClientCommit(let commit) = firstMessage {
-            await serveSASPreamble(connection, clientCommit: commit, inbound: &inbound,
+            await serveSASPreamble(connection, clientCommit: commit, inbound: inbound,
                                    hostCertSHA256: hostCertSHA256, sas: sas, emit: emit)
             return
         }
@@ -577,7 +614,7 @@ public struct HostRunner: Sendable {
     static func serveSASPreamble(
         _ connection: PortviewConnection,
         clientCommit: SASClientCommit,
-        inbound: inout AsyncStream<AnyMessage>.AsyncIterator,
+        inbound: MessageReader,
         hostCertSHA256: [UInt8],
         sas: SASPairingControl?,
         emit: @escaping @Sendable (HostRunnerEvent) -> Void
@@ -595,7 +632,7 @@ public struct HostRunner: Sendable {
         // Client reveal must come next; verify it against the client commit before using the nonce.
         // Deadline-bounded (rather than left to the ~30s QUIC idle timeout) so an idle/phantom
         // preamble connection doesn't hold its slot for the full ~30s.
-        guard let next = await nextMessage(from: &inbound, deadline: .seconds(5)),
+        guard let next = await inbound.next(deadline: .seconds(5)),
               case .sasClientReveal(let reveal) = next else { return }
         guard SASCode.verify(commitment: clientCommit.commit, nonce: reveal.nonce,
                              role: .client, certSHA256: hostCertSHA256) else { return }

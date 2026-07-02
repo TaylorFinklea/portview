@@ -51,7 +51,7 @@ import Foundation
     /// completes on its own (phantom/slow-loris — modeling QUIC double-delivery or a stalled client
     /// that never sends its first message) queue up against `maxConcurrent`. Without a first-message
     /// deadline, a legit data-carrying connection queued behind them would never get served. With
-    /// `HostRunner.nextMessage`'s deadline racing the read, each phantom's slot frees after the
+    /// `HostRunner.MessageReader`'s deadline racing the read, each phantom's slot frees after the
     /// deadline elapses, so the data connection is served within a bounded time instead of starving.
     @Test(.timeLimit(.minutes(3))) func deadlineFreesPhantomSlotsSoDataConnectionIsNotStarved() async {
         let phantomCount = 12
@@ -60,15 +60,15 @@ import Foundation
 
         // Phantom connections: an AsyncStream<AnyMessage> that never yields anything (simulates an
         // idle/slow-loris client, or a QUIC stream that never delivers its first message).
-        @Sendable func phantomIterator() -> AsyncStream<AnyMessage>.AsyncIterator {
-            AsyncStream<AnyMessage> { _ in }.makeAsyncIterator()
+        @Sendable func phantomStream() -> AsyncStream<AnyMessage> {
+            AsyncStream<AnyMessage> { _ in }
         }
         // The legit connection: yields a message immediately.
-        @Sendable func dataIterator() -> AsyncStream<AnyMessage>.AsyncIterator {
+        @Sendable func dataStream() -> AsyncStream<AnyMessage> {
             let (stream, cont) = AsyncStream<AnyMessage>.makeStream()
             cont.yield(.bye(Bye(reason: "hello")))
             cont.finish()
-            return stream.makeAsyncIterator()
+            return stream
         }
 
         let servedData = ManagedAtomic()
@@ -80,8 +80,8 @@ import Foundation
 
         let start = ContinuousClock.now
         await HostRunner.serveConnections(connections, maxConcurrent: maxConcurrent) { isDataConnection in
-            var iterator = isDataConnection ? dataIterator() : phantomIterator()
-            let message = await HostRunner.nextMessage(from: &iterator, deadline: deadline)
+            let inbound = HostRunner.MessageReader(isDataConnection ? dataStream() : phantomStream())
+            let message = await inbound.next(deadline: deadline)
             if isDataConnection, message != nil {
                 await servedData.markServed(elapsed: ContinuousClock.now - start)
             }
