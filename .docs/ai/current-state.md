@@ -6,6 +6,14 @@
 
 `main`
 
+## Latest Session (2026-07-02 — re-review synthesis: specs folded, ADR, backlog filed)
+
+- Fresh six-lens re-review CONFIRMED the 2026-07-01 findings + 1 NET-NEW CRITICAL: unauth ~10-byte pre-auth remote crash — `Int(bodyLength)` traps on varint > Int.max (FrameDecoder.swift:20/23/29, Frame.swift:54, BinaryReader.swift:58/51). Plus confirmed pre-auth memory DoS (unbounded FrameDecoder buffer) + no-backpressure inbound stream.
+- 3 lead specs authored + design-fixes folded (all file:line re-verified vs source 2026-07-02): cloudkit-rewake (wall-clock epoch, iOS push plumbing, host zone-create, per-host epoch map), quic-lane-splitting (token via ServerHello, bidi lanes, first-byte classifier, per-tunnel cap, keyframe-on-flip). Mutual-auth spec authored — ONE open enrollment-trust decision deferred to a security-review pass (7jl left OPEN).
+- ADR appended (decisions.md 2026-07-02, PROPOSED): wire-decoder P0 hardening extends epic 1n6.
+- Filed 17 beads (1 new epic screenshare-cqv release-readiness + 16 tasks): 1n6.1/1n6.2 (P0 wire hardening), 523.1-.5 (concurrency), ja1.1-.3 (rt-media), jfj.1 (client file cap), cqv.1-.5 (team/bundle, notarize/install, versioning/TestFlight, os.Logger, SECURITY.md). Closed 8qi (rewake spec done); noted 10p (lane design gate satisfied, still gated on vs9).
+- Baseline 229 green (docs/specs/beads only — no source changes). NOT pushed. NEXT: hand to Opus — `bd ready` roots = 1n6.1/1n6.2 (P0), then 1j0 keystone.
+
 ## Latest Session (2026-07-01 — architecture review + fleet backlog in beads)
 
 - Fable 5 ran a six-lens adversarial arch review (concurrency/protocol/media/security/boundaries/roadmap-fit). Report: `.docs/ai/phases/arch-review-2026-07-01-report.md`. ADR: decisions.md (2026-07-01, PROPOSED).

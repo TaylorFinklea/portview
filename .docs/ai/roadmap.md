@@ -12,6 +12,10 @@ Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
 
 Fable 5 six-lens review → decomposed the roadmap into a fleet-dispatchable beads backlog. Full report: `.docs/ai/phases/arch-review-2026-07-01-report.md`; ADR in `decisions.md` (2026-07-01). The durable backlog now lives in **beads** (`bd ready`); the epics are `screenshare-1n6` (wire-safety, P0), `screenshare-jfj` (PortviewClientCore + decomposition, P1), `screenshare-1nt` (host trust / mutual auth, P1), `screenshare-ja1` (real-time media foundation, P2), `screenshare-523` (concurrency correctness, P2). Start with `w-skip` (unknown-tag wedge — the wire-safety root) and `cc-target` (PortviewClientCore keystone). The Now/Next/Later below remains the device-verify + product-milestone view.
 
+## Re-review + lead specs (2026-07-02)
+
+A fresh re-review (ADR in `decisions.md` 2026-07-02) confirmed the 2026-07-01 findings and surfaced a **NET-NEW P0**: an unauthenticated ~10-byte pre-auth remote crash — `Int(bodyLength)` traps on a varint length > `Int.max` (`FrameDecoder`/`Frame`/`BinaryReader`), plus a pre-auth memory-DoS (unbounded decoder buffer) and a no-backpressure inbound stream. **Do the P0 wire-hardening first: `bd ready` roots `screenshare-1n6.1` (reject over-long frame lengths) + `screenshare-1n6.2` (bound the decoder buffer)** — pre-auth remote DoS on the current wire, above all feature work. Three lead specs authored + design-review-folded (`docs/superpowers/specs/2026-07-01-{cloudkit-rewake,quic-lane-splitting,revocable-pairing-mutual-auth}.md`); the mutual-auth spec carries one open enrollment-trust decision (deferred to a security-review pass; `screenshare-7jl` stays open). New epic **`screenshare-cqv` (prod / open-source release readiness)**: parameterize the hardcoded `DEVELOPMENT_TEAM`/bundle IDs, host notarization + install path, versioning + iOS TestFlight readiness, `os.Logger`, `SECURITY.md`. Concurrency/media/client beads filed under `523`/`ja1`/`jfj`.
+
 ## Now / Next / Later
 
 ### Now

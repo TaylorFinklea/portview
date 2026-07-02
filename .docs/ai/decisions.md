@@ -2,6 +2,81 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-02] Fresh re-review confirmation + wire-decoder P0 hardening + 3 lead specs folded (PROPOSED)
+
+**Context**: Follow-up to the 2026-07-01 arch-review ADR below. A fresh, independent six-lens
+re-review (concurrency / protocol-wire / media / security / boundaries / prod-readiness) ran
+post-wave-2 to (a) re-test the morning findings against the current tree and (b) surface
+anything the first pass missed, ahead of decomposing the remaining roadmap into a
+fleet-dispatchable beads backlog. Two lead specs (CloudKit re-wake, QUIC lane-splitting) were
+authored and design-reviewed in the same arc; a third (mutual auth) was authored and carries
+one open enrollment decision. All file:line refs below were re-verified against source
+2026-07-02.
+
+**The re-review CONFIRMED the five 2026-07-01 findings** and surfaced **one net-new CRITICAL
+the morning review missed**, plus two confirmed DoS surfaces on the same wire path:
+
+1. **NET-NEW CRITICAL — unauthenticated ~10-byte pre-auth remote crash.** `Int(bodyLength)`
+   where `bodyLength: UInt64` comes from `reader.varUInt()` (full 0…2⁶⁴-1 range) traps
+   *uncatchably* on any value > `Int.max`. A peer sends a 10-byte length prefix encoding e.g.
+   `0xFFFFFFFFFFFFFFFF` and the whole host process aborts — Swift's overflow trap is a fatal
+   error, NOT a catchable `Error`, so `processIncoming`'s do/catch cannot save it. Reachable
+   **pre-authentication** (the SAS preamble uses an unpinned TOFU connection; the receive loop
+   starts on every accepted connection). Triple-confirmed shape: `FrameDecoder.swift:20` (also
+   :23, :29 in the same `push()`), `Frame.swift:54` (`Frame.decode`), and
+   `BinaryReader.swift:58` (`data()` → `readBytes(Int(n))`) plus `:51` (`offset + count`
+   Int-addition overflow in `readBytes`). No test feeds a length > `Int.max`; no ceiling
+   constant exists anywhere in `Sources/`.
+2. **Confirmed pre-auth memory-exhaustion DoS.** `FrameDecoder.buffer` (`:3`) grows unbounded
+   via `buffer.append(contentsOf:)` (`:8`); there is no cap on buffered bytes or on a single
+   declared `bodyLength`. A peer that never completes a frame (or declares a huge body below
+   2⁶³) grows host memory until OOM-kill; combined with the 16-slot serve cap a few peers
+   suffice.
+3. **Confirmed no-backpressure inbound stream.** The per-connection inbound
+   `AsyncStream<AnyMessage>` is `.unbounded` (`PortholeConnection.swift:32`, `makeStream()`
+   default) and `receiveNext()` re-arms immediately, so QUIC flow control never engages and a
+   stalled consumer buffers full copies of 60fps HEVC frames without bound (no drop-to-latest).
+
+**Decision — harden the wire decoder (P0), extending epic `screenshare-1n6` (wire-safety):**
+Introduce a `MAX_FRAME_LENGTH` ceiling checked in **UInt64 space BEFORE any `Int(...)`
+conversion** (throw `WireError.malformed`, the existing case; mirror the
+`skipsUnknownTagWithoutWedging` test pattern in `FrameDecoderTests`); bound the
+`FrameDecoder` buffer + per-frame body (close the connection past the cap); and give the
+inbound path a bounded/newest-N policy for the video lane (mirror `CaptureEngine`'s
+`.bufferingNewest(2)`). Fix `readBytes` to compare `count <= storage.count - offset`
+(subtraction, no addition overflow). This is a **P0 hardening cluster** — the crash is a
+pre-auth remote DoS on the current wire, above all M6 feature work.
+
+**The two new specs are SOUND-WITH-FIXES** after folding the design-review must-fixes
+(2026-07-02): `docs/superpowers/specs/2026-07-01-cloudkit-rewake.md` (epoch must be wall-clock
+not host-uptime — the `HostRunner.swift:534` uptime idiom regresses on reboot and silently
+eats wakes; full iOS silent-push plumbing enumerated — none exists today; host owns
+`PortviewSignals` zone creation; per-host `lastHandledEpochs` map) and
+`docs/superpowers/specs/2026-07-01-quic-lane-splitting.md` (host-minted token rides
+`ServerHello` not client→host `StartSession`; lane streams must be bidirectional; explicit
+first-byte stream classifier; per-tunnel stream cap; forced keyframe on lane flip; `Lane`
+gains a `stats` case; `VideoFrame` already carries `sequence`). Both fold-sets are plain
+platform/protocol/Network.framework work.
+
+**Mutual-auth spec** (`docs/superpowers/specs/2026-07-01-revocable-pairing-mutual-auth.md`,
+gating `screenshare-7jl`) is authored and its signed-challenge core reviewed sound, but **one
+load-bearing enrollment-trust decision remains OPEN** (whether SAS-match alone may enroll a
+device key, or the host must one-tap confirm / bind the pubkey into the SAS transcript). That
+decision is deferred to a dedicated security-review pass and captured in the spec's "Open
+review pass" section; `screenshare-7jl` stays OPEN and `t-authgate` blocked on it — NOT
+resolved here.
+
+**Backlog**: this ADR is implemented by a new P0 wire-hardening cluster under `screenshare-1n6`
+plus concurrency/media/client beads across `screenshare-523`/`ja1`/`jfj` and a NEW
+"prod/open-source release readiness" epic (hardcoded `DEVELOPMENT_TEAM` K7CBQW6MPG + `dev.finklea`
+bundle IDs, no notarization/install path, no versioning/TestFlight readiness, `print()`-only
+logging on the host, missing `SECURITY.md`/privacy-manifest/build-prereqs). All findings are
+code-cited and were verified against source before filing.
+
+**Why PROPOSED**: same reasoning as 2026-07-01 — the P0 wire-hardening beads are safe to start
+immediately (pure decoder robustness, TDD, no protocol reshape); the spec-gated epics await the
+user's review of the specs.
+
 ## [2026-07-01] Architecture review — five decision clusters + fleet backlog (PROPOSED)
 
 **Context**: Fable 5 ran a six-lens adversarial architecture review (concurrency / wire-protocol / media / security / module-boundaries / roadmap-fit) to break the roadmap into work cheaper fleet models (Sonnet 5, GPT-5.5, open-source) can execute. Full synthesis: `.docs/ai/phases/arch-review-2026-07-01-report.md`. Findings are code-cited; every critical/high was independently refuted before acceptance.
