@@ -6,6 +6,16 @@
 
 `main`
 
+## Latest Session (2026-07-08 — Fable planning day: queue triaged for Conductor + next waves filed)
+
+- NO code (per user: populate beads/roadmap so Opus/GPT take over). ADR: decisions.md (2026-07-08).
+- **Conductor triage**: audit found ZERO beads carried bd metadata — all triage fields were description prose, invisible to Conductor (whole queue silently Untriaged; past fleets worked because Fable ran them in-session). Swept 12 dispatchables with tier_floor/complexity/verify_cmd metadata. DELIBERATE untriage = the dispatch gate: device-verify beads, security track (1nt/7jl/5yw/9m2), 10p, cqv.2, l4y, 2ws carry no verify_cmd — do NOT add it. `bd remember` key: conductor-triage-metadata.
+- **Filed**: EPIC `8n1` CloudKit re-wake (8n1.1 core junior/S → 8n1.2 host senior/M + 8n1.3 client senior/L → 8n1.4 device-verify) from spec cloudkit-rewake. EPIC `w6n` QUIC lanes phase 1 (w6n.1 spike M + w6n.2 proto junior/S → w6n.3 transport L → w6n.4 host M + w6n.5 client M → w6n.6 Tailscale A/B), all gated on vs9; `10p` rewritten = phase 2 behind w6n.6, needs own spec. `l4y` = settings/first-run definition (lead + USER decisions — not dispatchable). `90p` enriched (vzf landed → live setter exists, bead is cheap now).
+- **Hygiene**: `1n6` closed (7/7 landed). `ux7` rewritten index-only. Roadmap Now/Next/Later rewritten (old content archived in place); prose Backlog retired → bd.
+- **Ref-verification**: 4-agent workflow re-checked all 29 file:line/symbol claims in new beads vs live tree — 25 confirmed, 4 corrected (uptime idiom HostRunner:602 not :534; double-delivery PortholeConnection:52-54; 42r streamSession cases 457-545 + frameViewport is a @Published prop in the videoFrame case, not a message case; 8bm clipboard Task :505). Both specs got 2026-07-08 addenda (incl.: 523.5 landed → per-stream buffering now bounded; per-tunnel stream-COUNT cap still required).
+- **Device-verify**: one-sitting script for all 12 human-gated beads: `.docs/ai/phases/device-verify-plan-2026-07-08.md` (5 legs, prep notes, pass criteria, close commands; 89q→2ee, pkb→2ws unblocks).
+- Only this session's doc commit is unpushed (the 2026-07-02 fleet commits turned out to be already pushed — branch was even with origin at session start). User reviews + pushes. NEXT: fleet works `bd ready` (chain root = vs9, senior/S); user answers l4y + runs the device session; DEDICATED security session for 1nt/7jl (keep out of fleet).
+
 ## Latest Session (2026-07-02 #2 — fleet execution: 23 beads landed, 229→304 tests)
 
 - Fable 5 executed the fleet backlog per handoff (security/crypto track SKIPPED per scope rule — 1nt/5yw/7jl/9m2 untouched). 23 beads closed, ~15 commits (7c5042e..a789867), NOT pushed. User asked to stop after this fleet finished.

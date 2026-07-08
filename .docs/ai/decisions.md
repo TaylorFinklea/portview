@@ -2,6 +2,32 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-08] bd metadata is the canonical triage home + deliberate-untriage convention + next waves filed (ACCEPTED)
+
+**Context**: Fable planning day (no code). Audit finding: **zero** beads in the database carried
+Conductor-readable triage fields — every `tier_floor`/`complexity`/`verify_cmd` lived in
+description prose, which Conductor never parses (per AGENTS.md: description ⇒ Untriaged, fail
+closed). Past fleet sessions worked only because Fable ran them in-session. Decisions:
+
+1. **bd `--set-metadata` is now the canonical home** for `tier_floor`/`complexity`/`verify_cmd`
+   on every dispatchable bead (12 swept this session; all new beads filed with it). Description
+   prose keeps a human-readable copy but is no longer load-bearing.
+2. **Deliberate untriage is the dispatch gate.** Conductor's fail-closed Untriaged behavior is
+   used ON PURPOSE to keep non-fleet work out of cycles: device-verify beads (human+hardware),
+   the security track (1nt/7jl/5yw/9m2 — dedicated security session only, standing rule),
+   `10p` (phase 2, needs its own spec), `cqv.2` (Apple-account-gated), `l4y` (needs user product
+   decisions), `2ws` (scope undefined until device feedback) carry **no `verify_cmd` metadata**.
+   Do not "helpfully" triage these; that would arm them for headless dispatch.
+3. **Next waves decomposed from the 2026-07-01 specs** (specs unchanged, faithfully transcribed):
+   CloudKit re-wake → epic `screenshare-8n1` (.1 pure core → .2 host + .3 client → .4 device-verify);
+   QUIC lane-splitting phase 1 → epic `screenshare-w6n` (.1 spike + .2 proto → .3 transport →
+   .4 host + .5 client → .6 Tailscale A/B), all gated on `vs9` per the spec (350 landed).
+   `screenshare-10p` demoted to the phase-2 per-frame-streams bead, blocked by `w6n.6`
+   measurements — the original monolith title promised phase-2 scope phase 1 never delivers.
+4. **Epic hygiene**: `1n6` closed (7/7 children landed); `ux7` rewritten as an index-only bead.
+   Every reference cited in new beads was adversarially re-verified against the live tree by a
+   4-agent workflow before this entry (corrections, if any, applied to the beads directly).
+
 ## [2026-07-02 #2] P0 wire hardening SHIPPED + inbound-backpressure design (ACCEPTED)
 
 **Context**: The fleet-execution session implemented the P0 cluster from the entry below

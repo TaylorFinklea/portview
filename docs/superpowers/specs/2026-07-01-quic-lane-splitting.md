@@ -249,3 +249,21 @@ measurements justify it.
    `tier_floor: senior`, `complexity: M` each. Verify: package suite + iOS suite.
 5. `lane-verify` — human Tailscale A/B: input latency under induced loss, phase-1 vs
    single-stream. Gates phase 2.
+
+## Addendum (2026-07-08 — beads filed + post-523.5 reality check)
+
+Filed as **epic `screenshare-w6n`** (.1 spike, .2 proto, .3 transport, .4 host, .5 client,
+.6 Tailscale A/B), all gated on `vs9`; phase 2 = `screenshare-10p`. Two source drifts since
+the 2026-07-02 against-source verification (re-verified 2026-07-08):
+
+- **Bead 523.5 (commit 7da1f3d) landed the two-lane `InboundBuffer`**: the per-connection
+  inbound stream is NO LONGER unbounded — `AsyncStream(unfolding:)` over `InboundBuffer`
+  with 4 MiB/1 MiB hysteresis pausing the receive loop. The per-tunnel **stream-count** cap
+  this spec demands is still required (each peer-opened stream gets its own
+  `PortviewConnection` + `InboundBuffer`, so N streams × per-stream bound is still linear
+  memory amplification), but the "unbounded per-stream inbound buffers" wording in the
+  cap section above is stale.
+- **Line refs drifted**: QUIC double-delivery comment now `PortholeConnection.swift:52-54`;
+  `newConnectionHandler` :260; `pumpVideo` `HostRunner.swift:685-784` (catch 775-781 —
+  sets `encoder = nil` + `needsKeyframe = true`); ping uptime idiom `HostRunner.swift:602`.
+  The class inside `PortholeConnection.swift` is named `PortviewConnection`.

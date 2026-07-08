@@ -16,9 +16,41 @@ Fable 5 six-lens review → decomposed the roadmap into a fleet-dispatchable bea
 
 A fresh re-review (ADR in `decisions.md` 2026-07-02) confirmed the 2026-07-01 findings and surfaced a **NET-NEW P0**: an unauthenticated ~10-byte pre-auth remote crash — `Int(bodyLength)` traps on a varint length > `Int.max` (`FrameDecoder`/`Frame`/`BinaryReader`), plus a pre-auth memory-DoS (unbounded decoder buffer) and a no-backpressure inbound stream. **Do the P0 wire-hardening first: `bd ready` roots `screenshare-1n6.1` (reject over-long frame lengths) + `screenshare-1n6.2` (bound the decoder buffer)** — pre-auth remote DoS on the current wire, above all feature work. Three lead specs authored + design-review-folded (`docs/superpowers/specs/2026-07-01-{cloudkit-rewake,quic-lane-splitting,revocable-pairing-mutual-auth}.md`); the mutual-auth spec carries one open enrollment-trust decision (deferred to a security-review pass; `screenshare-7jl` stays open). New epic **`screenshare-cqv` (prod / open-source release readiness)**: parameterize the hardcoded `DEVELOPMENT_TEAM`/bundle IDs, host notarization + install path, versioning + iOS TestFlight readiness, `os.Logger`, `SECURITY.md`. Concurrency/media/client beads filed under `523`/`ja1`/`jfj`.
 
+## Planning session (2026-07-08)
+
+Fable planning day (no code). The fleet had nearly drained the implementable queue, so the next
+waves were decomposed and the queue made Conductor-dispatchable. ADR: `decisions.md` (2026-07-08).
+(1) **bd metadata is now canonical** for `tier_floor`/`complexity`/`verify_cmd` — 12 dispatchable
+beads swept; device-verify / security-track / user-gated beads left Untriaged ON PURPOSE (Conductor's
+fail-closed behavior is the dispatch gate — don't "fix" them). (2) **Filed from the 2026-07-01
+specs**: EPIC `screenshare-8n1` CloudKit re-wake (pure core → host + client → device-verify);
+EPIC `screenshare-w6n` QUIC lane-splitting phase 1 (spike + proto → transport → host + client →
+Tailscale A/B), all gated on `vs9`; `screenshare-10p` demoted to the phase-2 per-frame-streams bead
+behind the A/B. (3) Wire-safety epic `screenshare-1n6` closed (7/7 landed). (4) `screenshare-l4y` =
+settings/first-run definition bead (needs user product decisions). (5) One-sitting device-verify
+script: `.docs/ai/phases/device-verify-plan-2026-07-08.md`.
+
 ## Now / Next / Later
 
 ### Now
+- [ ] **Consolidated device-verify session** (human + Roshar + Mac, ~1 hr) — one sitting clears all 12 human-gated beads; ordered script with pass criteria: `.docs/ai/phases/device-verify-plan-2026-07-08.md`. Closing `89q` unblocks `2ee`; `pkb` unblocks `2ws`; `11s` numbers feed `90p`/`480` tuning.
+- [ ] **Fleet: work `bd ready`** (Opus / GPT / Conductor cycles). Root of the biggest chain = `vs9` (latency harness, senior/S) → unlocks the whole `w6n` lane wave. Independent ready work: `480`, `42r`, `cqv.4`, `cqv.5`, `90p`, `627`, `b1l`, `8bm` (lead), and re-wake root `8n1.1` (junior/S). Every dispatchable carries `tier_floor`/`complexity`/`verify_cmd` in bd **metadata**. Sweeps `cqv.4`/`cqv.5` run last (repo-wide churn).
+- [ ] **User-present**: (a) review + push the unpushed commits on `main`; (b) answer the `l4y` settings/onboarding questions; (c) `cqv.2` notarization (Apple-account-gated).
+- [ ] **Dedicated security session** for the mutual-auth track — EPIC `screenshare-1nt`: `7jl` enrollment-trust decision → `5yw` PairingStore → `9m2` enforcement. Spec: `docs/superpowers/specs/2026-07-01-revocable-pairing-mutual-auth.md`. Deliberately kept out of fleet dispatch (standing rule).
+
+### Next
+- [ ] QUIC lane-splitting phase 1 lands (epic `w6n`) → Tailscale A/B (`w6n.6`) decides phase 2 (`10p`).
+- [ ] CloudKit re-wake lands (epic `8n1`) → device-verify (`8n1.4`).
+- [ ] Lip-sync completion: `b1l` (present-by-PTS) → `ins` (device umbrella).
+- [ ] Settings + first-run/TCC implementation beads (decomposed from `l4y` once answered).
+
+### Later
+- [ ] M6 polish umbrella `ux7` (index-only) — closes when `ja1`/`8n1`/`w6n`/`1nt`/`l4y` close.
+- [ ] Phase 2 per-frame video streams (`10p`) — needs its own lead spec first.
+
+### Archive — superseded 2026-07-08 (history only; the live queue is `bd ready`)
+
+#### Archived Now (pre-2026-07-08)
 - [x] **Keep the host awake while a client is connected + host-lock status** (the achievable slice of the "locked screen" ask) — DONE 2026-06-28 (build-green; **device-verify pending**). `KeepAwake` (keyed by session-id `Set`, injectable backend + ticker) holds a `kIOPMAssertionTypePreventUserIdleDisplaySleep` assertion AND a periodic `IOPMAssertionDeclareUserActivity` re-arm (the part that actually suppresses the idle screensaver-lock) while ≥1 client is connected, wired into `HostControl.register/deregister/disconnectAll` (id-keyed so `disconnectAll` can't strand it). `LockMonitor` detects lock/unlock (`DistributedNotificationCenter` + `CGSessionCopyCurrentDictionary` seed) and broadcasts a new `HostLockStatus(locked:)` message (tag 26); each client is also seeded the current state at handshake; client shows a "capture paused" overlay + pauses ALL input (`inputPaused` gates every send, not just the trackpad) and clears it per stream attempt (no stranding across reconnect). Built via ultracode (design workflow → TDD → adversarial review workflow: 16 findings, 7 real, all fixed incl. 2 functional bugs — input bypass + reconnect-stranding — plus a `.default`-QoS timer fix). Tests: HostLockStatus (4 pkg), KeepAwake (10 pkg), LockMonitor (3 pkg). `swift test` 183, macOS host BUILD SUCCEEDED, iOS 57. Host bundle updated at /Applications (running — quit+relaunch to load); client on Roshar. Decision: decisions.md (2026-06-28). CAVEAT (by design): cannot block a *manual* lock or "require password immediately" policy lock — only the idle path; does NOT unlock an already-locked Mac (see the feasibility report). <!-- device-verify: connect a client, leave the Mac idle past its display-sleep/screensaver timeout → screen stays awake + doesn't idle-lock; then manually lock the Mac → client shows "capture paused" overlay + input is disabled; unlock → overlay clears, control resumes. -->`tier_floor: senior`, `complexity: M`.
 - [x] **Locked-screen / login-window access + remote unlock — FEASIBILITY SPIKE, verdict: DON'T BUILD the daemon** (2026-06-28). Investigated per user ask. Full report: `.docs/ai/phases/locked-screen-feasibility-report.md`. **Remote unlock = hard-blocked** (secure event input drops synthetic CGEvents into the password field; no third-party API; ARD/Screen Sharing is first-party-only; FileVault pre-boot off-network). **Locked/login CAPTURE = technically partial but not worth it**: needs a root daemon + LoginWindow LaunchAgent split (SMAppService + notarization), and the Screen Recording TCC grant **can't be bootstrapped without a logged-in user approving once** → can't serve the cold-boot/locked headline case; also regressed on macOS 15 + commonly black on the lock screen; the real entitlement is VNC-only/Apple-gated. **Pivot**: build the keep-awake item above; use Apple's built-in **Screen Sharing/Remote Management** for true locked/login access; `fdesetup authrestart` / macOS 26 Tahoe pre-login SSH for FileVault reboots.
 - [x] **Host: refresh the display list at runtime (multi-monitor switcher disappears if a display was asleep at launch)** — DONE 2026-06-27 (build-green; **device-verify pending**). New `DisplaysUpdate` msg (tag 25); host polls `SCShareableContent.current` every 2s (`refreshDisplaysLoop`, runs alongside `serveConnections` in a `withTaskGroup`) and re-advertises via `HostControl.broadcast` when the display SET changes (`displaysChanged`, order-independent, dims-sensitive). `DisplayRegistry` (lock-guarded `@unchecked Sendable`) is the live source for the handshake `ServerHello` + `switchDisplay` lookup (replaced the launch-snapshot `SendableDisplays`). Client `.displaysUpdate` updates `session.displays` (switcher reappears, no relaunch); `resolvedActiveDisplay` keeps the streamed display or retargets the host (sends `switchDisplay`) if it vanished, and tracks a resolution change. Reviewed clean (native code-reviewer, no issues ≥80 — teardown, registry thread-safety, broadcast vs concurrent video sends, message ordering all verified). Tests: `DisplaysUpdateTests` (3, pkg), `DisplayRefreshTests` (5, pkg), `GlassMappingTests` +3 (iOS). `swift test` 166, macOS host BUILD SUCCEEDED, iOS `xcodebuild test` 57. Host reinstalled to /Applications; client reinstalled on Roshar. Decision: decisions.md (2026-06-27). <!-- device-verify: connect with one monitor → wake/plug a 2nd display mid-session → the switcher reappears within ~2s with no host relaunch, and switching to it works. -->
@@ -40,7 +72,7 @@ A fresh re-review (ADR in `decisions.md` 2026-07-02) confirmed the 2026-07-01 fi
 - [ ] **On-device video quality diagnosis with HUD** — screenshot #1 showed pure digital zoom into full 1710x1107 frame (`Crop/Frame w1.00`, ~0.06 Mbps actual). Follow-up #1 moved crop but only to `w0.93 h0.93`; screenshot #2 still encoded `1710x1107`, `~0.05 Mbps`, `810 B/f`, `bpp 0.0034`. The full-frame Retina attempt (`SCContentFilter.pointPixelScale` output + encoder quality hints) looked less smooth/jerky and was rolled back. Latest client patch debounces viewport/crop sends until 250 ms idle; latest host packaging adds `PortviewHost.app` so Screen Recording grants attach to Portview instead of Terminal (automated verify: SwiftPM tests 82/28, CLI build, XcodeGen, macOS app BUILD SUCCEEDED). Human device test pending: launch/grant `PortviewHost.app`, confirm movement smoothness first, then record HUD Mbps/B/f/bpp + Crop/Frame; if still soft but smooth, tune effective crop + bitrate/adaptive rate.
 - [ ] **On-device test of QUIC + zoom overhaul** — QUIC is now the default transport (only loopback-verified so far): confirm connect/stream/control/clipboard/audio/files all still work over QUIC, ideally over a real/Tailscale link to gauge the latency win. Confirm zoom behavior while collecting HUD data.
 
-### Next
+#### Archived Next (pre-2026-07-08)
 - [ ] QUIC lane-splitting (per-frame unidirectional video streams); validate QUIC latency over a real/Tailscale link.
 - [x] **Mac→iPhone file transfer** — DONE 2026-06-15 (host "Send a file" → streams to a per-transfer temp dir on the phone → `ShareLink`; sanitized filename). Completes M5 both directions.
 - [ ] Tight A/V lip-sync.
@@ -55,7 +87,7 @@ A fresh re-review (ADR in `decisions.md` 2026-07-02) confirmed the 2026-07-01 fi
 - [x] **Expose the resolved remote endpoint on `PortviewConnection`** — DONE 2026-06-15. `resolvedRemoteEndpoint` (`currentPath?.remoteEndpoint`) now drives unified remember-on-first-stream in `SessionViewModel`/`ContentView`: (a) a discovery-paired Mac persists with its concrete IP, and (b) a moved saved Mac's IP refreshes in place (name→host:port→pin upsert avoids duplicates). See decisions.md (2026-06-15).
 - [x] **Serialize all outbound input through one ordered consumer** (Glass-HUD review #3, hardening) — DONE (confirmed by the 2026-07-01 arch review; bead `screenshare-8ds` closed). `OutboundInputPump` is wired into `SessionViewModel` (field 71, bind 461, finish 466-467, enqueue 473) with `OutboundInputPumpTests`.
 
-### Later
+#### Archived Later (pre-2026-07-08)
 - [ ] M6 polish: adaptive bitrate/fps, reconnect + APNs re-wake, settings, TCC onboarding UI. Device keypairs + revocable PairingStore. *(Quality HUD now exists as dev diagnostics; product polish still TBD.)*
 
 ## Milestones
@@ -118,7 +150,7 @@ Adversarially reviewed (no geometry bugs found). **Tests 72/25; host + iOS build
 
 ## Backlog
 
-> (none open — see zoom follow-ups above)
+> The durable backlog lives in beads (`bd ready`). Prose backlog retired 2026-07-08.
 
 ## Constraints
 

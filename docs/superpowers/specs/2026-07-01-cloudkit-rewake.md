@@ -232,3 +232,11 @@ Placement: these are client-side but pure — put them in the SwiftPM package (n
 Dependency note: 1 → 2/3 (both consume the pure core); 4 last. Entitlement work
 (container + push provisioning) touches both xcodegen `project.yml` files and a new
 `.entitlements` file — signing changes are human-verified, not headless.
+
+## Addendum (2026-07-08 — beads filed)
+
+Filed as **epic `screenshare-8n1`** (.1 rewake-core, .2 rewake-host, .3 rewake-client,
+.4 device-verify), deps as the note above. `PortviewClientCore` has landed
+(`screenshare-1j0`), so the §3 pure types go there — the `PortviewRewakeCore` fallback is
+moot. Line drift since the 2026-07-02 verification: the systemUptime Ping/Pong idiom §1
+warns against copying is now at `HostRunner.swift:602` (was ~534).
