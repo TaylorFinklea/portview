@@ -16,16 +16,29 @@ import PortviewProtocol
         func snapshot() -> [HostRunnerEvent] { events }
     }
 
+    private actor SourceKeySink {
+        private(set) var keys: [String] = []
+        func add(_ k: String) { keys.append(k) }
+        func snapshot() -> [String] { keys }
+    }
+
     /// Serve every accepted connection's SAS preamble, mirroring the production peek→serveSASPreamble
     /// dispatch and tolerating QUIC's dead double-delivery connection (its peek returns nil → close).
     private func runHost(_ listener: PortviewListener, hostCert: [UInt8],
-                         sas: SASPairingControl, sink: EventSink) -> Task<Void, Never> {
+                         sas: SASPairingControl, sink: EventSink,
+                         sources: SourceKeySink? = nil) -> Task<Void, Never> {
         Task {
             await withTaskGroup(of: Void.self) { group in
                 for await conn in listener.connections {
                     group.addTask {
                         let inbound = HostRunner.MessageReader(conn.inbound)
                         guard case .sasClientCommit(let commit)? = await inbound.next() else { conn.close(); return }
+                        // Record the per-source limiter key at the same point production derives it
+                        // (serveSASPreamble entry) — the per-source scheme silently degrades to the
+                        // old shared-counter behavior if inbound QUIC endpoints don't resolve.
+                        if let sources {
+                            await sources.add(SASPairingControl.sourceKey(for: conn.resolvedRemoteEndpoint))
+                        }
                         await HostRunner.serveSASPreamble(
                             conn, clientCommit: commit, inbound: inbound, hostCertSHA256: hostCert,
                             sas: sas, emit: { e in Task { await sink.add(e) } })
@@ -63,7 +76,8 @@ import PortviewProtocol
         let port = try await listener.start()
         let sas = SASPairingControl(); await sas.openWindow()
         let sink = EventSink()
-        let host = runHost(listener, hostCert: hostCert, sas: sas, sink: sink)
+        let sources = SourceKeySink()
+        let host = runHost(listener, hostCert: hostCert, sas: sas, sink: sink, sources: sources)
         defer { host.cancel(); listener.cancel() }
 
         let (conn, captured) = try await PortviewConnection.connectCapturingCert(
@@ -85,6 +99,13 @@ import PortviewProtocol
             try? await Task.sleep(for: .milliseconds(10))
         }
         #expect(ok)  // host emitted .sasCode(matching) AND .sasConfirmed
+
+        // Per-source rate-limit key really resolves for an inbound QUIC connection — the first
+        // host-side consumer of `resolvedRemoteEndpoint`; a nil endpoint would silently collapse
+        // every source into one "unresolved" bucket (back to the shared-counter DoS).
+        let keys = await sources.snapshot()
+        #expect(!keys.isEmpty)
+        #expect(!keys.contains("unresolved"))
     }
 
     @Test func forgedConfirmEmitsCodeButNotConfirmed() async throws {
