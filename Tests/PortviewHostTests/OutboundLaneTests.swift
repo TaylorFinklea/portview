@@ -102,6 +102,81 @@ import PortviewProtocol
         #expect(await recorder.snapshot() == ["head", "cursor:\(expectedNX)", "middle"])
         lane.finish()
     }
+
+    @Test func sendSuspendsUntilTheSinkHasRun() async {
+        // The back-pressure primitive: send() must not return before the sink ran for its message
+        // (one chunk in flight at a time is what keeps file transfers from head-of-line blocking
+        // control messages).
+        let recorder = Recorder()
+        let (release, releaseContinuation) = AsyncStream<Void>.makeStream()
+        let gate = OneShotGate()
+        let lane = OutboundLane<AnyMessage>(sink: { message in
+            if await gate.first() {
+                var it = release.makeAsyncIterator()
+                _ = await it.next()
+            }
+            await recorder.append(Self.label(message))
+        })
+
+        let returned = Recorder()
+        Task {
+            await lane.send(.clipboardUpdate(ClipboardUpdate(text: "held")))
+            await returned.append("send-returned")
+        }
+
+        // While the sink is held, send() must still be suspended.
+        try? await Task.sleep(for: .milliseconds(150))
+        #expect(await returned.snapshot() == [])
+
+        releaseContinuation.yield(())
+        releaseContinuation.finish()
+        for _ in 0..<500 {
+            if await returned.count() == 1 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await returned.snapshot() == ["send-returned"])
+        #expect(await recorder.snapshot() == ["held"])
+        lane.finish()
+    }
+
+    @Test func finishReleasesAwaitingSendsWithoutDelivering() async {
+        // A sender awaiting back-pressure must never hang on a torn-down lane — finish() resumes
+        // it, and its message is dropped.
+        let recorder = Recorder()
+        let (release, releaseContinuation) = AsyncStream<Void>.makeStream()
+        let gate = OneShotGate()
+        let lane = OutboundLane<AnyMessage>(sink: { message in
+            await recorder.append(Self.label(message))
+            if await gate.first() {
+                var it = release.makeAsyncIterator()
+                _ = await it.next()
+            }
+        })
+
+        lane.enqueue(.clipboardUpdate(ClipboardUpdate(text: "holds-the-drain")))
+        for _ in 0..<500 {
+            if await recorder.count() == 1 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+
+        let returned = Recorder()
+        Task {
+            await lane.send(.clipboardUpdate(ClipboardUpdate(text: "never-delivered")))
+            await returned.append("released")
+        }
+        try? await Task.sleep(for: .milliseconds(100))  // let the send reach the queue
+
+        lane.finish()
+        releaseContinuation.yield(())
+        releaseContinuation.finish()
+
+        for _ in 0..<500 {
+            if await returned.count() == 1 { break }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        #expect(await returned.snapshot() == ["released"])
+        #expect(await recorder.snapshot() == ["holds-the-drain"])
+    }
 }
 
 /// Returns true exactly once — lets a test sink hold only the first drain iteration.

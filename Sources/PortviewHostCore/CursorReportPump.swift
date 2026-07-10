@@ -18,7 +18,10 @@ final class OutboundLane<Message: Sendable>: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private var queue: [(key: CoalesceKey?, message: Message)] = []
+    // `completion` is non-nil only for `send(_:)` entries (always keyless), resumed after the sink
+    // ran — or at `finish()`, so an awaiting sender can never hang on a torn-down lane. Coalescing
+    // replacement never has to resume one: keyed entries come only from `enqueue`.
+    private var queue: [(key: CoalesceKey?, message: Message, completion: CheckedContinuation<Void, Never>?)] = []
     private var finished = false
     private let wakeContinuation: AsyncStream<Void>.Continuation
     private var task: Task<Void, Never>?
@@ -34,7 +37,8 @@ final class OutboundLane<Message: Sendable>: @unchecked Sendable {
         self.task = Task { [weak self] in
             for await _ in wake {
                 while let next = self?.take() {
-                    await sink(next)
+                    await sink(next.message)
+                    next.completion?.resume()
                 }
             }
         }
@@ -49,29 +53,52 @@ final class OutboundLane<Message: Sendable>: @unchecked Sendable {
         if let key, let index = queue.firstIndex(where: { $0.key == key }) {
             queue[index].message = message
         } else {
-            queue.append((key, message))
+            queue.append((key, message, nil))
         }
         lock.unlock()
         wakeContinuation.yield(())
     }
 
-    /// Stop delivery: pending messages are dropped and later enqueues are ignored. Called from the
-    /// owning session's teardown `defer`.
+    /// Enqueue and suspend until the sink has run for this message (or the lane finished) — the
+    /// back-pressure primitive for bulk traffic: a file transfer awaits each chunk so at most one
+    /// sits in the queue, and control messages (lock status, clipboard, cursor) never wait behind
+    /// more than one chunk. Returns immediately if the lane is already finished.
+    func send(_ message: Message) async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            queue.append((nil, message, continuation))
+            lock.unlock()
+            wakeContinuation.yield(())
+        }
+    }
+
+    /// Stop delivery: pending messages are dropped (their awaiting senders resumed) and later
+    /// enqueues are ignored. Idempotent and safe against a concurrent caller — all state swaps
+    /// happen under the lock. Called from the owning session's teardown `defer`.
     func finish() {
         lock.lock()
         finished = true
+        let dropped = queue
         queue.removeAll()
-        lock.unlock()
-        wakeContinuation.finish()
-        task?.cancel()
+        let drain = task
         task = nil
+        lock.unlock()
+        for entry in dropped { entry.completion?.resume() }
+        wakeContinuation.finish()
+        drain?.cancel()
     }
 
-    private func take() -> Message? {
+    private func take() -> (message: Message, completion: CheckedContinuation<Void, Never>?)? {
         lock.lock()
         defer { lock.unlock() }
         guard !queue.isEmpty else { return nil }
-        return queue.removeFirst().message
+        let entry = queue.removeFirst()
+        return (entry.message, entry.completion)
     }
 }
 
@@ -93,13 +120,16 @@ final class CursorReportPump: @unchecked Sendable {
 
     /// Production: report through the session's shared lane, so cursor confirmations order with the
     /// session's other outbound messages and tear down with the lane's owner. (The wire type
-    /// quantizes to UInt16 — fine here, positions are already normalized 0…1.)
+    /// quantizes to UInt16 — fine here, positions are already normalized 0…1.) `finish()` is a
+    /// deliberate no-op in this mode: the pump does not own the shared lane, and finishing it here
+    /// would silently kill the session's clipboard/broadcast/file sends — serveSession's defer owns
+    /// that teardown.
     init(lane: OutboundLane<AnyMessage>) {
         submit = { nx, ny in
             lane.enqueue(.cursorPosition(CursorPosition(normalizedX: nx, normalizedY: ny)),
                          coalescing: .cursorPosition)
         }
-        teardown = { lane.finish() }
+        teardown = {}
     }
 
     /// Test seam: a private lane draining raw values into an injected sink — deliberately NOT

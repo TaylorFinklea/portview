@@ -49,17 +49,25 @@ public final class HostControl: @unchecked Sendable {
         let session = sessions[sessionID]
         lock.unlock()
         guard let session else { return }
-        let bytes = [UInt8](data)
         let transferID = UInt32.random(in: 1...UInt32.max)
-        session.outbound.enqueue(.fileOffer(FileOffer(transferID: transferID, name: name, size: UInt64(bytes.count))))
-        let chunkSize = 64 * 1024
-        var offset = 0
-        repeat {
-            let end = min(offset + chunkSize, bytes.count)
-            let isLast = end >= bytes.count
-            session.outbound.enqueue(.fileChunk(FileChunk(transferID: transferID, isLast: isLast, data: Array(bytes[offset..<end]))))
-            offset = end
-        } while offset < bytes.count
+        // Back-pressured feeding via the lane's awaitable send: at most ONE chunk sits in the
+        // queue at a time, so a large transfer can't head-of-line block control messages (lock
+        // status, clipboard, cursor) behind thousands of queued chunks, memory stays ~one chunk
+        // beyond the file bytes, and the byte slicing happens off the caller's (main) thread.
+        // The Task self-terminates when the session lane finishes: every awaited send resumes
+        // immediately and subsequent sends no-op.
+        Task {
+            let bytes = [UInt8](data)
+            await session.outbound.send(.fileOffer(FileOffer(transferID: transferID, name: name, size: UInt64(bytes.count))))
+            let chunkSize = 64 * 1024
+            var offset = 0
+            repeat {
+                let end = min(offset + chunkSize, bytes.count)
+                let isLast = end >= bytes.count
+                await session.outbound.send(.fileChunk(FileChunk(transferID: transferID, isLast: isLast, data: Array(bytes[offset..<end]))))
+                offset = end
+            } while offset < bytes.count
+        }
     }
 
     /// Send a message to every active client session (e.g. a `DisplaysUpdate` when the host's display
