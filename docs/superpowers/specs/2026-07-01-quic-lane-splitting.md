@@ -267,3 +267,108 @@ the 2026-07-02 against-source verification (re-verified 2026-07-08):
   `newConnectionHandler` :260; `pumpVideo` `HostRunner.swift:685-784` (catch 775-781 —
   sets `encoder = nil` + `needsKeyframe = true`); ping uptime idiom `HostRunner.swift:602`.
   The class inside `PortholeConnection.swift` is named `PortviewConnection`.
+
+## Phase 0 spike findings (2026-07-09)
+
+Artifact: `Tests/PortviewTransportTests/QUICMultiplexSpikeTests.swift` (6 tests, all green,
+whole suite ~3 s on loopback — stream opens on an established tunnel are fast; only the
+per-test handshake costs anything). All observations were stable across repeated runs on
+macOS 26 / Swift 6.2. Verify: `swift test --filter QUICMultiplexSpike`.
+
+### Q1 — group client → bare listener: do streams arrive, and can the host associate them?
+
+**Streams arrive: YES, unchanged.** A client `NWConnectionGroup(with: NWMultiplexGroup(to:),
+using: QUICParameters.client(...))` opens streams via `NWConnection(from: group)`; each one
+lands on the host's EXISTING `newConnectionHandler` (`PortholeConnection.swift:260`) as a
+fresh `PortviewConnection`, fully bidirectional and independently framed — a per-stream
+ServerHello reply comes back on the right stream (`groupOpenedStreamsArriveViaExistingListenerHandler`).
+
+**Association at the flat listener: NO.** Two mechanisms probed, both fail
+(`secProtocolMetadataAssociationAcrossTunnels`):
+
+- `sec_protocol_metadata_peers_are_equal` returned **true across two separate tunnels** from
+  the same client (no client cert until mutual auth lands) — it compares peer identity, not
+  tunnel identity.
+- `NWProtocolQUIC.Metadata.streamIdentifier` numbering is per-tunnel and collides across
+  tunnels (both tunnels' first app-opened bidi stream got id 4; ids were 4, 8, … — id 0 is
+  consumed internally, consistent with the dead "control" delivery).
+
+**Grouped delivery: YES — this works and is the native association mechanism.** Setting
+`NWListener.newConnectionGroupHandler` delivers each inbound tunnel as ONE
+`NWConnectionGroup`; that tunnel's streams then arrive via THAT group's
+`newConnectionHandler` (`bareListenerGroupHandlerDeliversTunnelAsGroup`). Two caveats,
+both load-bearing:
+
+- Setting `newConnectionHandler` AND `newConnectionGroupHandler` together makes the
+  listener **fail to start with EINVAL** — grouped delivery REPLACES flat delivery; there
+  is no dual-mode listener.
+- A legacy bare `NWConnection` dial (old primary, SAS preamble) into a group-handler
+  listener ALSO arrives via the group handler, as a single-stream group — old clients keep
+  working, but the host must classify that group's one stream down the existing frame path.
+
+**API gotchas (cost this spike real time; they will bite `lane-transport`):**
+
+- A client `NWConnectionGroup` NEVER leaves `.setup` — no state callback, no error — unless
+  `newConnectionHandler` is installed BEFORE `start(queue:)`. Symptom is a silent hang.
+- `NWConnection(from: group)` returns nil until the group is started.
+- On loopback the group passes a transient `.waiting(ENETDOWN)` before `.ready`; treat
+  `.waiting` as "keep waiting", never terminal.
+- `NWConnectionGroup` can deliver `.failed` then `.cancelled` back-to-back; a
+  one-shot-continuation guard is required (SWIFT TASK CONTINUATION MISUSE otherwise).
+
+### Q2 — cert pinning: once per tunnel or per stream?
+
+**Once per tunnel.** A counting copy of the pinning verify block ran exactly **1** time for
+a tunnel carrying 3 streams (`certPinningEvaluatesOncePerTunnelNotPerStream`). Stream opens
+never re-run verification — the "one handshake, one pinning evaluation" premise of option B
+holds.
+
+### Q3 — interplay with the double-delivery quirk
+
+**The quirk persists and scales with streams: 2 opened streams → 4 connections delivered**
+(consistently) at a flat `PortviewListener`; exactly the 2 opened streams carry data, the
+extras are dead connections that never produce a message
+(`doubleDeliveryQuirkWithGroupClient`). The existing serve-each-concurrently pattern
+already tolerates them, but each dead delivery burns a `PortviewConnection` + `InboundBuffer`
++ (post-classification) a serve slot for the 5 s first-message deadline — the per-tunnel
+stream cap must budget for ~2× the lane count at the flat listener. A group listener
+sidesteps this accounting per-tunnel (the tunnel arrives once, as a group).
+
+### Q4 — half-closure semantics
+
+**Works as hoped, with one trap.** (`halfClosureSemanticsForUnidirectionalAndHalfClosedBidiStreams`)
+
+- A client-opened **unidirectional** stream (id ≡ 2 mod 4 confirmed on the host) delivers
+  payload + `isComplete` after a final write (`.finalMessage` + `isComplete: true`).
+- Opening one requires passing the tunnel's OWN options object — found at
+  `group.parameters.defaultProtocolStack.transportProtocol` (NOT `applicationProtocols`) —
+  with `direction = .unidirectional` flipped for the open (direction is captured at open
+  time; restore it after). Passing a freshly constructed `NWProtocolQUIC.Options` (with or
+  without ALPN) fails the stream straight to `.failed(ENETDOWN)`.
+- A **bidi** stream half-closed by the client (preamble + final write) still carries
+  host→client bytes afterwards — exactly the phase-1 lane shape (client: preamble, FIN;
+  host: frames forever).
+- **Trap:** a host send on a client-opened uni stream reports SUCCESS (nil error) and the
+  bytes silently vanish. Direction misuse is invisible at the send site; enforce direction
+  by protocol, never by trusting send errors.
+
+### Recommendation — stream-association mechanism for `lane-transport` (w6n.3)
+
+**Adopt the group listener (`newConnectionGroupHandler`) as the association mechanism, and
+keep the preamble token as defense in depth** (per the design above: the token stays even
+when native association works).
+
+- Native grouped delivery is the only transport-level association that actually works:
+  peer metadata and stream ids cannot distinguish tunnels at a flat listener, so a
+  flat-listener design would lean ENTIRELY on the token — and unbindable garbage streams
+  (wrong/no token) could never be attributed to their tunnel for rate-limiting/teardown.
+- Because grouped delivery replaces flat delivery (EINVAL when both handlers are set),
+  `PortviewListener` grows a group-handler mode in which EVERY inbound tunnel arrives as a
+  group; legacy bare dials arrive as single-stream groups and route down the existing
+  frame/classifier path unchanged. The first-byte classifier from the design above is
+  unaffected (it operates on the stream's first bytes, not on how the stream was delivered).
+- Grouped delivery also gives the per-tunnel stream cap a natural home (count streams per
+  delivered group) and halves the dead-delivery bookkeeping (Q3).
+- Lane streams stay client-opened BIDI with client half-close after the preamble (Q4
+  confirms host→client flow survives the client FIN). Unidirectional streams work (phase-2
+  option confirmed viable) but stay out of phase 1 per the review fold.
