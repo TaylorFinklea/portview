@@ -25,7 +25,9 @@ let package = Package(
         ),
         .target(
             name: "PortviewHostCore",
-            dependencies: ["PortviewProtocol", "PortviewTransport", "PortviewMedia"]
+            // PortviewClientCore: the shared pure re-wake core (HostBeaconRecord codec) the host's
+            // beacon writer upserts through — one codec for both ends of the CloudKit record.
+            dependencies: ["PortviewProtocol", "PortviewTransport", "PortviewMedia", "PortviewClientCore"]
         ),
         .executableTarget(
             name: "portview-host",
@@ -33,7 +35,7 @@ let package = Package(
         ),
         .testTarget(
             name: "PortviewHostTests",
-            dependencies: ["PortviewHostCore", "PortviewProtocol"]
+            dependencies: ["PortviewHostCore", "PortviewProtocol", "PortviewClientCore"]
         ),
         .target(
             name: "PortviewClientCore",

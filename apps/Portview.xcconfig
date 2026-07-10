@@ -17,6 +17,16 @@
 PORTVIEW_DEVELOPMENT_TEAM = K7CBQW6MPG
 PORTVIEW_BUNDLE_ID_PREFIX = dev.finklea
 
+// CloudKit re-wake beacon (host): applying apps/PortviewHost/PortviewHost.entitlements
+// requires a provisioning profile carrying the iCloud.dev.finklea.portview container,
+// which automatic signing can only mint with an Apple ID signed into Xcode (Settings ▸
+// Accounts) — so it defaults OFF to keep zero-config dev builds green. The app fails
+// soft without it (beacon writes are skipped; hosting unaffected). Opt in via
+// Portview.local.xcconfig:
+//
+//   PORTVIEW_HOST_ENTITLEMENTS = PortviewHost.entitlements
+PORTVIEW_HOST_ENTITLEMENTS =
+
 // Version single-source: bump BOTH apps (host + client) here. The generated
 // Info.plists reference $(MARKETING_VERSION) / $(CURRENT_PROJECT_VERSION),
 // substituted at build time — no `xcodegen generate` re-run needed.

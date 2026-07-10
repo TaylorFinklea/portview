@@ -48,6 +48,10 @@ final class HostAppModel {
     @ObservationIgnored private let sasControl = SASPairingControl()
     @ObservationIgnored private var permissionsTask: Task<Void, Never>?
     @ObservationIgnored private var pairingTimeoutTask: Task<Void, Never>?
+    /// CloudKit re-wake beacon (fire-and-forget; each trigger runs in its own task so an iCloud stall
+    /// can never touch hosting). Writes only on explicit triggers — hosting ready + the menu-bar
+    /// "Ask iPhone to reconnect" nudge — never on a timer.
+    @ObservationIgnored private let beaconWriter = HostBeaconWriter(store: CloudKitBeaconStore())
 
     /// True while a user-opened SAS pairing window is live (gates the preamble + the displayed code).
     private(set) var isPairing = false
@@ -134,6 +138,15 @@ final class HostAppModel {
         control.disconnectAll()
     }
 
+    /// Menu-bar nudge: write a `wantsReconnect` beacon so the paired iPhone gets a silent push and
+    /// offers tap-to-resume. Only meaningful while hosting (the menu row is hidden otherwise).
+    func askIPhoneToReconnect() {
+        guard isRunning else { return }
+        let writer = beaconWriter
+        Task { await writer.requestReconnect() }
+        messages.append("asked iPhone to reconnect (via iCloud)")
+    }
+
     /// Pick a file and send it to the connected iPhone (Mac→iPhone transfer).
     func sendFileToClient() {
         guard let target = sessions.devices.first?.id else { return }
@@ -191,6 +204,14 @@ final class HostAppModel {
         switch event {
         case .ready(let details):
             state = .ready(details)
+            // Hosting-start (and, across restarts, port-change) beacon trigger. Reuses the pin
+            // fingerprint hex the runner computed for the pairing payload as the record name. Own
+            // task: a CloudKit outage must never block event handling or the serve path.
+            let writer = beaconWriter
+            Task {
+                await writer.hostingStarted(pinHex: details.pinHex, hostName: details.serviceName,
+                                            port: details.port)
+            }
         case .message(let message):
             messages.append(message)
         case .accessibilityWarning(let warning):

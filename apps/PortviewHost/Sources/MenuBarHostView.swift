@@ -124,6 +124,15 @@ struct MenuBarHostView: View {
 
     private var footer: some View {
         VStack(spacing: 8) {
+            // CloudKit re-wake nudge: writes a wantsReconnect beacon so a backgrounded iPhone gets a
+            // silent push and offers tap-to-resume. Visible only while hosting.
+            if model.isRunning {
+                Button { model.askIPhoneToReconnect() } label: {
+                    Label("Ask iPhone to reconnect", systemImage: "iphone.and.arrow.forward")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(NeutralButtonStyle())
+            }
             HStack {
                 // "Stop" stops hosting but keeps the app resident in the menu bar; "Quit" below exits.
                 if model.isRunning {

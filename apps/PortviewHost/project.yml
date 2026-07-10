@@ -25,6 +25,9 @@ targets:
     dependencies:
       - package: Portview
         product: PortviewHostCore
+      # HostBeaconRecord (the shared CK record codec) for CloudKitBeaconStore.
+      - package: Portview
+        product: PortviewClientCore
     info:
       path: PortviewHost-Info.plist
       properties:
@@ -42,6 +45,13 @@ targets:
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: $(PORTVIEW_DEVELOPMENT_TEAM)
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        # iCloud/CloudKit container entitlement for the re-wake beacon (CloudKitBeaconStore).
+        # Gated on PORTVIEW_HOST_ENTITLEMENTS (default EMPTY in ../Portview.xcconfig): container
+        # provisioning is account-gated — automatic signing can only mint a profile carrying the
+        # iCloud capability with an Apple ID signed into Xcode — and the dev build must stay green
+        # without one. Opt in via Portview.local.xcconfig once the account is set up; the app
+        # fails soft (CloudKitBeaconStore checks the entitlement) when built without it.
+        CODE_SIGN_ENTITLEMENTS: $(PORTVIEW_HOST_ENTITLEMENTS)
 schemes:
   PortviewHost:
     build:

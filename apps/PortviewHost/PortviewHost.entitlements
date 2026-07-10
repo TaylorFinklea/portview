@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- CloudKit re-wake beacon (docs/superpowers/specs/2026-07-01-cloudkit-rewake.md §0): the host
+	     writes HostBeacon records into the PortviewSignals zone of this shared container's private
+	     database. The iOS client subscribes to the same container. Container provisioning is
+	     account-gated (needs the signing team's iCloud capability); no aps-environment here — the
+	     host only WRITES records, push receiving is client-side. -->
+	<key>com.apple.developer.icloud-container-identifiers</key>
+	<array>
+		<string>iCloud.dev.finklea.portview</string>
+	</array>
+	<key>com.apple.developer.icloud-services</key>
+	<array>
+		<string>CloudKit</string>
+	</array>
+</dict>
+</plist>
