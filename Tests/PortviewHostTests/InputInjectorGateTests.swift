@@ -7,6 +7,10 @@ import PortviewProtocol
 /// Host-side authority over input injection: while `paused`, `handle(_:)` must be a no-op for
 /// every input message type regardless of what a client sends — this is the ONLY gate that can't
 /// be bypassed by a modified/hostile client (the existing client-side gate is UX only).
+///
+/// Asserted at the `postEvent` boundary with real posting stubbed out. A test must NEVER let the
+/// default posting run: under an Accessibility-granted parent process, real CGEvents land in
+/// whatever app has focus on the dev machine (this suite once typed "hi"+Return into a live app).
 @Suite struct InputInjectorGateTests {
     private final class Counter: @unchecked Sendable {
         private let lock = NSLock()
@@ -26,14 +30,17 @@ import PortviewProtocol
     @Test func pausedDropsAllMessageKindsThenUnpausedInjectsAll() {
         let injector = InputInjector(displayBounds: CGRect(x: 0, y: 0, width: 1000, height: 1000))
         let counter = Counter()
-        injector.didInject = { counter.increment() }
+        injector.postEvent = { _ in counter.increment() }
 
         injector.paused = true
         for message in Self.messages { injector.handle(message) }
         #expect(counter.count == 0)
 
         injector.paused = false
-        for message in Self.messages { injector.handle(message) }
-        #expect(counter.count == Self.messages.count)
+        for message in Self.messages {
+            let before = counter.count
+            injector.handle(message)
+            #expect(counter.count > before, "expected \(message) to post at least one event")
+        }
     }
 }

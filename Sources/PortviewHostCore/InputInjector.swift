@@ -27,10 +27,11 @@ final class InputInjector: @unchecked Sendable {
         set { pauseLock.lock(); isPaused = newValue; pauseLock.unlock() }
     }
 
-    /// Test seam: called once per message that actually reaches injection (i.e. `handle(_:)` was
-    /// NOT paused). CGEvent posting has no observable effect without Accessibility permission, so
-    /// tests assert on this instead of on real system side effects.
-    var didInject: (() -> Void)?
+    /// Posting boundary: every synthesized event leaves through this closure; the default posts
+    /// to the real HID event tap. Tests MUST replace it — under an Accessibility-granted parent
+    /// process (a terminal running `swift test`) real posts type/click into whatever app has
+    /// focus on the dev machine.
+    var postEvent: (CGEvent) -> Void = { $0.post(tap: .cghidEventTap) }
 
     /// Called with the normalized (0…1) cursor position after it moves (throttled).
     var onCursorMoved: ((Double, Double) -> Void)?
@@ -48,7 +49,6 @@ final class InputInjector: @unchecked Sendable {
 
     func handle(_ message: AnyMessage) {
         guard !paused else { return }
-        didInject?()
         switch message {
         case .pointerMove(let m): movePointer(dx: CGFloat(m.dx), dy: CGFloat(m.dy))
         case .pointerButton(let m): button(m.button, down: m.isDown)
@@ -72,8 +72,9 @@ final class InputInjector: @unchecked Sendable {
             to: bounds
         )
         let type: CGEventType = leftButtonDown ? .leftMouseDragged : .mouseMoved
-        CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: position, mouseButton: .left)?
-            .post(tap: .cghidEventTap)
+        if let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: position, mouseButton: .left) {
+            postEvent(event)
+        }
         reportCursorIfMoved()
     }
 
@@ -101,13 +102,15 @@ final class InputInjector: @unchecked Sendable {
             type = down ? .otherMouseDown : .otherMouseUp
             button = .center
         }
-        CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: position, mouseButton: button)?
-            .post(tap: .cghidEventTap)
+        if let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: position, mouseButton: button) {
+            postEvent(event)
+        }
     }
 
     private func scroll(dx: Int32, dy: Int32) {
-        CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0)?
-            .post(tap: .cghidEventTap)
+        if let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) {
+            postEvent(event)
+        }
     }
 
     private func typeText(_ text: String) {
@@ -117,8 +120,8 @@ final class InputInjector: @unchecked Sendable {
                   let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }
             down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
             up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
-            down.post(tap: .cghidEventTap)
-            up.post(tap: .cghidEventTap)
+            postEvent(down)
+            postEvent(up)
         }
     }
 
@@ -140,12 +143,14 @@ final class InputInjector: @unchecked Sendable {
 
     /// Post a key-down/key-up pair for a virtual keycode with modifier flags applied to both.
     private func postKey(_ code: CGKeyCode, flags: CGEventFlags) {
-        let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true)
-        down?.flags = flags
-        down?.post(tap: .cghidEventTap)
-        let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false)
-        up?.flags = flags
-        up?.post(tap: .cghidEventTap)
+        if let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true) {
+            down.flags = flags
+            postEvent(down)
+        }
+        if let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) {
+            up.flags = flags
+            postEvent(up)
+        }
     }
 
     static func cgFlags(_ modifiers: KeyModifiers) -> CGEventFlags {
