@@ -59,6 +59,8 @@ targets:
       - target: PortviewClient
       - package: Portview
         product: PortviewTransport
+      - package: Portview
+        product: PortviewClientCore
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PORTVIEW_BUNDLE_ID_PREFIX).portview.tests

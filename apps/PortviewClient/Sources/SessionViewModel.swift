@@ -432,6 +432,34 @@ final class SessionViewModel: ObservableObject {
         throw lastError ?? PortviewClientError.noReachableEndpoint
     }
 
+    /// Seed the pure reducer from the current @Published surface, fold `message` through it, and
+    /// write back the fields that changed. Each write-back is guarded so an unchanged value doesn't
+    /// fire `objectWillChange` — the reducer owns the semantic guards (the cursor's isClose epsilon,
+    /// the frame-region change guard, the displaysUpdate retarget). Seeding per message (instead of
+    /// keeping a long-lived reducer) keeps it in lockstep with out-of-band mutations like the local
+    /// cursor prediction and a user-initiated `switchDisplay`.
+    private func applyInbound(_ message: AnyMessage) {
+        var state = InboundSessionReducer(
+            isStreaming: status == .streaming,
+            displays: displays,
+            activeDisplayID: activeDisplayID,
+            displaySize: displaySize,
+            cursorNormalized: cursorNormalized,
+            frameViewport: frameViewport,
+            hostLocked: hostLocked)
+        state.apply(message)
+        if state.displays != displays { displays = state.displays }
+        if state.activeDisplayID != activeDisplayID { activeDisplayID = state.activeDisplayID }
+        if state.displaySize != displaySize { displaySize = state.displaySize }
+        if state.cursorNormalized != cursorNormalized {
+            cursorNormalized = state.cursorNormalized
+            updateMagnifierTarget()  // re-aim the eased cursor-follow window
+        }
+        if state.frameViewport != frameViewport { frameViewport = state.frameViewport }
+        if state.hostLocked != hostLocked { hostLocked = state.hostLocked }
+        if state.isStreaming, status != .streaming { status = .streaming }
+    }
+
     /// Run the handshake then the inbound loop for one connection. Returns when the connection
     /// closes (`.streamed`/`.notStreamed`) or the host reports a terminal error (`.hostError`).
     private func streamSession(_ connection: PortviewConnection) async throws -> SessionEnd {
@@ -456,9 +484,6 @@ final class SessionViewModel: ObservableObject {
             switch message {
             case .serverHello(let hello):
                 guard let display = hello.displays.first else { continue }
-                displays = hello.displays
-                activeDisplayID = display.id
-                displaySize = CGSize(width: max(1, Double(display.width)), height: max(1, Double(display.height)))
                 let prefs = ClientSettings.load()
                 let start = try client.handle(
                     hello, displayID: display.id,
@@ -473,20 +498,20 @@ final class SessionViewModel: ObservableObject {
                    let pinHex = sessionPinHex {
                     connectedHostToSave = PairingPayload(host: host, port: port, pinHex: pinHex, name: sessionName ?? host)
                 }
-                status = .streaming
+                applyInbound(message)  // folds displays/activeDisplayID/displaySize + status → .streaming
                 didStream = true
             case .videoFrame(let frame):
                 let decodeStart = ProcessInfo.processInfo.systemUptime
                 if let sample = try? rebuild(frame),
                    let pixelBuffer = try? await decoder.decode(sample) {
                     let decodeMs = (ProcessInfo.processInfo.systemUptime - decodeStart) * 1_000.0
-                    // The frame self-describes the region it shows; settle the residual zoom to it
-                    // (atomic with the pixels — no separate echo to race). Guard the assignment so an
-                    // unchanged region (steady state — the quantized value is bit-identical) doesn't
-                    // fire `objectWillChange` ~60×/s.
+                    // The frame self-describes the region it shows; the reducer settles the residual
+                    // zoom to it (atomic with the pixels — no separate echo to race), guarded so an
+                    // unchanged region (steady state) doesn't fire `objectWillChange` ~60×/s. Applied
+                    // only on a successful decode: a failed frame must not move the viewport.
                     let region = CGRect(x: frame.normalizedViewportX, y: frame.normalizedViewportY,
                                         width: frame.normalizedViewportW, height: frame.normalizedViewportH)
-                    if region != frameViewport { frameViewport = region }
+                    applyInbound(message)
                     // Hand the frame + its region to the renderer; the display-link `tick` draws it
                     // (easing the window toward the cursor target at display rate, so the pan is smooth
                     // even when frames arrive slower than the display refresh).
@@ -496,40 +521,41 @@ final class SessionViewModel: ObservableObject {
                         sendQualityFeedback(snapshot)
                     }
                 }
-            case .cursorPosition(let cursor):
-                // Guard like `frameViewport` above: a confirmation that matches the local prediction
-                // (the common case during a drag) must not re-write `cursorNormalized`, or it re-targets
-                // the cursor-follow spring every report for no visible motion → micro-stutter.
-                let p = CGPoint(x: cursor.normalizedX, y: cursor.normalizedY)
-                if !p.isClose(to: cursorNormalized) { cursorNormalized = p; updateMagnifierTarget() }
-            case .displaysUpdate(let update):
-                // The host re-advertised its displays (a monitor connected/woke/was removed). Refresh
-                // the list so the display switcher reappears without a reconnect.
-                displays = update.displays
-                let resolved = DisplaySelection.resolvedActiveDisplay(current: activeDisplayID, among: update.displays)
-                if resolved != activeDisplayID {
-                    // The streamed display went away — retarget the host to the fallback (switchDisplay
-                    // sends `.switchDisplay` and resets the viewport/cursor for the new display).
-                    switchDisplay(to: resolved)
-                } else if let active = update.displays.first(where: { $0.id == activeDisplayID }) {
-                    // Same active display; track a resolution change so the zoom geometry stays correct.
-                    let size = CGSize(width: max(1, Double(active.width)), height: max(1, Double(active.height)))
-                    if size != displaySize { displaySize = size }
+            case .cursorPosition:
+                // A confirmation that matches the local prediction (the common case during a drag)
+                // must not re-write `cursorNormalized`, or it re-targets the cursor-follow spring
+                // every report for no visible motion → micro-stutter. The reducer owns that guard
+                // (the isClose epsilon).
+                applyInbound(message)
+            case .displaysUpdate:
+                // The host re-advertised its displays (a monitor connected/woke/was removed). The
+                // reducer refreshes the list (so the display switcher reappears without a reconnect)
+                // and — when the streamed display went away — retargets to the fallback with a reset
+                // cursor/viewport.
+                let previousActive = activeDisplayID
+                applyInbound(message)
+                if activeDisplayID != previousActive {
+                    // Run the effects `switchDisplay` performs for a user-initiated switch: cut to
+                    // the new display's window instead of easing across, and tell the host.
+                    viewportRequests.reset()
+                    resetQualityDiagnostics()
+                    updateMagnifierTarget()
+                    renderer.snapWindow()
+                    send(.switchDisplay(SwitchDisplay(displayID: activeDisplayID)))
                 }
-            case .hostLockStatus(let lock):
+            case .hostLockStatus:
                 // The host's screen locked/unlocked. Pause/resume the live view (a locked Mac captures
-                // the secure desktop / blank, not the user's content). Guard so an unchanged state
-                // doesn't fire objectWillChange.
-                if lock.locked != hostLocked { hostLocked = lock.locked }
+                // the secure desktop / blank, not the user's content). The reducer guards so an
+                // unchanged state doesn't fire objectWillChange.
+                applyInbound(message)
             case .clipboardUpdate(let update):
                 UIPasteboard.general.string = update.text
             case .audioFrame(let audio):
                 audioPlayer.play(sampleRate: Double(audio.sampleRate), channels: UInt32(audio.channels), planarData: audio.data)
-            case .viewport(let v):
+            case .viewport:
                 // Defensive fallback: the host now embeds the region in every VideoFrame (see above),
                 // so it no longer sends standalone `.viewport` echoes — but honor one if it arrives.
-                let region = CGRect(x: v.normalizedX, y: v.normalizedY, width: v.normalizedW, height: v.normalizedH)
-                if region != frameViewport { frameViewport = region }
+                applyInbound(message)
             case .qualityStats(let stats):
                 qualityDiagnostics = qualityTracker.updateHostStats(stats)
             case .pong(let pong):
@@ -634,13 +660,4 @@ final class SessionViewModel: ObservableObject {
 
 private enum PortviewClientError: Error {
     case noReachableEndpoint
-}
-
-extension CGPoint {
-    /// Two normalized cursor positions are "the same" within sub-pixel epsilon. Used to skip a host
-    /// cursor confirmation that already matches the local prediction: applying it would re-target the
-    /// cursor-follow spring for no visible movement, so we drop it (the prediction already moved us).
-    func isClose(to other: CGPoint, epsilon: CGFloat = 0.001) -> Bool {
-        abs(x - other.x) < epsilon && abs(y - other.y) < epsilon
-    }
 }

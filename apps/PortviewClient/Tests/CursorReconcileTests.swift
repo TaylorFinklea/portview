@@ -1,4 +1,5 @@
 import CoreGraphics
+import PortviewClientCore
 import XCTest
 
 @testable import PortviewClient
