@@ -772,12 +772,13 @@ public struct HostRunner: Sendable {
                     viewportNormalizedX: viewport.minX, viewportNormalizedY: viewport.minY,
                     viewportNormalizedW: viewport.width, viewportNormalizedH: viewport.height
                 )))
+                let liveViewport = await capture.currentViewport()
                 if let quality = stats.snapshotIfDue(
                     displayID: UInt32(display.displayID),
                     encoderWidth: encoderWidth,
                     encoderHeight: encoderHeight,
                     configuredBitrate: activeEncoder.averageBitRate,
-                    viewport: await capture.currentViewport()
+                    viewport: liveViewport
                 ) {
                     try? await connection.send(.qualityStats(quality))
                     emit(.sessionStats(HostSessionStats(
@@ -787,10 +788,13 @@ public struct HostRunner: Sendable {
                         displayWidth: display.width,
                         displayHeight: display.height)))
                     // Steer next interval's bitrate + capture fps off the freshest client feedback
-                    // (Auto mode only — see AdaptiveRateController). The bitrate applies to the LIVE
-                    // VideoToolbox session (no rebuild); fps retargets via SCStream reconfigure.
+                    // plus the SNAPPED crop area (bead 90p: a tight crop boosts the setpoint so
+                    // zoomed text stays crisp; Auto mode only — see AdaptiveRateController). The
+                    // bitrate applies to the LIVE VideoToolbox session (no rebuild); fps retargets
+                    // via SCStream reconfigure.
                     if let targets = rateController?.evaluate(AdaptiveRateController.Inputs(
-                        feedback: feedback?.latest(), hostStats: quality)) {
+                        feedback: feedback?.latest(), hostStats: quality,
+                        cropFraction: liveViewport.width * liveViewport.height)) {
                         if targets.bitrate != activeEncoder.averageBitRate {
                             activeEncoder.setAverageBitRate(targets.bitrate)
                         }

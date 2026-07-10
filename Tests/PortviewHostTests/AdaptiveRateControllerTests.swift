@@ -4,7 +4,9 @@ import PortviewProtocol
 
 /// Pure adaptive bitrate/fps policy (bead 480): sustained bad client feedback steps bitrate DOWN
 /// within `StreamParameters` clamps, recovery steps UP slowly and bounded, a healthy steady state
-/// sits still, and an explicit user-pinned bitrate is never fought.
+/// sits still, and an explicit user-pinned bitrate is never fought. The crop boost (bead 90p)
+/// raises the setpoint by inverse area at high zoom — clamped, composed with congestion, and
+/// never applied to a pinned bitrate.
 @Suite struct AdaptiveRateControllerTests {
     private let setpoint = 40_000_000
 
@@ -188,5 +190,92 @@ import PortviewProtocol
                 hostStats: hostStats()))
             #expect(targets == AdaptiveRateController.Targets(bitrate: 8_000_000, fps: 60))
         }
+    }
+
+    // MARK: Crop boost (bead 90p)
+
+    @Test func bitrateRisesAsCropFractionFallsBoundedByClamps() {
+        var controller = autoController(setpoint: 20_000_000)
+        // The boost needs no fresh client feedback: zooming alone raises the target.
+        let zoomed = controller.evaluate(.init(feedback: nil, cropFraction: 0.64))
+        #expect(zoomed.bitrate == 31_250_000)  // 20 Mbps ÷ 0.64
+        let deeper = controller.evaluate(.init(feedback: nil, cropFraction: 0.25))
+        #expect(deeper.bitrate == 80_000_000)  // 20 Mbps ÷ 0.25
+        // Inverse-area is capped: an extreme crop holds at maxCropBoost, not 1/area (uncapped,
+        // 20 Mbps ÷ 0.05 would have hit the 120 Mbps clamp instead).
+        let extreme = controller.evaluate(.init(feedback: nil, cropFraction: 0.05))
+        #expect(extreme.bitrate == 20_000_000 * Int(AdaptiveRateController.maxCropBoost))
+        #expect(extreme.fps == 60)  // the boost never touches fps
+
+        // And the boosted target never leaves the StreamParameters clamps.
+        var wide = autoController()  // 40 Mbps setpoint × 4 would be 160 Mbps
+        let clamped = wide.evaluate(.init(feedback: nil, cropFraction: 0.1))
+        #expect(clamped.bitrate == StreamParameters.bitrateRange.upperBound)
+    }
+
+    @Test func fullFrameCropFractionLeavesBehaviorUnchanged() {
+        // Explicit fraction 1.0 must be byte-identical to the pre-90p healthy steady state.
+        var controller = autoController()
+        for tick in 1...10 {
+            let targets = controller.evaluate(.init(
+                feedback: feedback(tick: UInt32(tick)), hostStats: hostStats(), cropFraction: 1.0))
+            #expect(targets == AdaptiveRateController.Targets(bitrate: setpoint, fps: 60))
+        }
+    }
+
+    @Test func pinnedBitrateIsNeverBoosted() {
+        var controller = AdaptiveRateController(mode: .pinned, bitrateSetpoint: 8_000_000, fpsCeiling: 60)
+        for tick in 1...5 {
+            let targets = controller.evaluate(.init(
+                feedback: feedback(tick: UInt32(tick)), cropFraction: 0.1))
+            #expect(targets == AdaptiveRateController.Targets(bitrate: 8_000_000, fps: 60))
+        }
+    }
+
+    @Test func congestionStillStepsDownAtHighZoom() {
+        var controller = autoController(setpoint: 20_000_000)
+        let boosted = controller.evaluate(.init(feedback: nil, cropFraction: 0.25))
+        #expect(boosted.bitrate == 80_000_000)
+
+        // Sustained congestion at high zoom steps down from the BOOSTED operating point.
+        _ = controller.evaluate(.init(feedback: feedback(tick: 1, drops: 10), cropFraction: 0.25))
+        let stepped = controller.evaluate(.init(feedback: feedback(tick: 2, drops: 12), cropFraction: 0.25))
+        #expect(stepped.bitrate == Int(Double(boosted.bitrate) * AdaptiveRateController.downStepFactor))
+
+        // Unrelenting congestion drives all the way to the GLOBAL floor: the boost scales the
+        // setpoint, never the stepDown floor.
+        var last = stepped
+        for tick in 3...80 {
+            last = controller.evaluate(.init(
+                feedback: feedback(tick: UInt32(tick), drops: 10), cropFraction: 0.25))
+            #expect(StreamParameters.bitrateRange.contains(last.bitrate))
+        }
+        #expect(last.bitrate == StreamParameters.bitrateRange.lowerBound)
+    }
+
+    @Test func zoomDuringCongestionPreservesAttenuationAndRecoversToBoostedSetpoint() {
+        var controller = autoController(setpoint: 10_000_000)
+        _ = controller.evaluate(.init(feedback: feedback(tick: 1, drops: 10)))
+        let congested = controller.evaluate(.init(feedback: feedback(tick: 2, drops: 12)))
+        #expect(congested.bitrate == 7_000_000)  // one full-frame step down
+
+        // Zooming in mid-congestion scales the whole operating point: the attenuation (70% of
+        // the setpoint) carries across, so the boost never erases congestion state.
+        let zoomed = controller.evaluate(.init(feedback: nil, cropFraction: 0.25))
+        #expect(zoomed.bitrate == 28_000_000)  // 70% of the boosted 40 Mbps setpoint
+
+        // Sustained health then recovers up to the BOOSTED setpoint — and never past it.
+        var last = zoomed
+        for tick in 3...60 {
+            last = controller.evaluate(.init(feedback: feedback(tick: UInt32(tick)), cropFraction: 0.25))
+            #expect(last.bitrate <= 40_000_000)
+        }
+        #expect(last.bitrate == 40_000_000)
+    }
+
+    @Test func zoomBackOutReturnsToTheBaseSetpoint() {
+        var controller = autoController(setpoint: 20_000_000)
+        #expect(controller.evaluate(.init(feedback: nil, cropFraction: 0.25)).bitrate == 80_000_000)
+        #expect(controller.evaluate(.init(feedback: nil, cropFraction: 1.0)).bitrate == 20_000_000)
     }
 }

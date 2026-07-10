@@ -17,6 +17,11 @@ import PortviewProtocol
 /// longer healthy streak — fps restored first (undoing the most recent cut), then bitrate — and is
 /// bounded by the setpoint/ceiling, so a healthy steady state sits still instead of oscillating.
 /// Outputs never leave `StreamParameters`' ranges.
+///
+/// Crop boost (bead 90p): when the capture is cropped (high zoom), the setpoint scales by inverse
+/// crop area (capped) so the visible region's bits per pixel RISES with zoom instead of shrinking
+/// with the buffer — crisper zoomed text. Auto mode only, and composed with congestion: the boost
+/// moves the setpoint, never the step-down floor, so a congested link at high zoom still sheds.
 struct AdaptiveRateController {
     enum Mode: Equatable {
         /// Client requested Auto (`targetBitrate == 0`): the host steers within clamps.
@@ -25,17 +30,21 @@ struct AdaptiveRateController {
         case pinned
     }
 
-    /// One stats interval's signals, grouped so future inputs (e.g. the capture crop fraction,
-    /// bead 90p) can be added without churning `evaluate`'s signature.
+    /// One stats interval's signals, grouped so future inputs can be added without churning
+    /// `evaluate`'s signature.
     struct Inputs {
         /// Latest client receive-side snapshot; `nil` until the first `ClientFeedback` arrives.
         var feedback: ClientFeedback?
         /// The host's encode-side stats for the same interval.
         var hostStats: QualityStats?
+        /// The SNAPPED normalized area of the display the capture is cropped to
+        /// (`CaptureEngine.currentViewport()` width × height); 1.0 = full frame.
+        var cropFraction: Double
 
-        init(feedback: ClientFeedback?, hostStats: QualityStats? = nil) {
+        init(feedback: ClientFeedback?, hostStats: QualityStats? = nil, cropFraction: Double = 1.0) {
             self.feedback = feedback
             self.hostStats = hostStats
+            self.cropFraction = cropFraction
         }
     }
 
@@ -63,17 +72,30 @@ struct AdaptiveRateController {
     static let upStepFactor = 1.15
     static let upStepMinimum = 1_000_000
     static let fpsStep = 10
+    // Crop boost cap. Inverse area exactly cancels the width·height shrink of a rebuilt cropped
+    // encoder's bitrate heuristic — the visible region keeps the full-frame budget, so bits per
+    // pixel rises with zoom. The cap bounds the demand at extreme zoom: past ~4× the buffer has
+    // already shrunk far more than the boost, so bits per pixel is way up regardless, and an
+    // uncapped inverse would burn link headroom for no visible gain.
+    static let maxCropBoost = 4.0
 
     private let mode: Mode
-    /// Recovery ceiling for bitrate: the encoder's starting rate (heuristic in Auto), clamped.
+    /// Base recovery ceiling for bitrate: the encoder's starting rate (heuristic in Auto),
+    /// clamped. The crop boost scales this into `effectiveSetpoint`.
     private let bitrateSetpoint: Int
     /// Recovery ceiling for fps: the client's requested capture rate, clamped.
     private let fpsCeiling: Int
     private var bitrate: Int
     private var fps: Int
+    private var cropBoost = 1.0
     private var badStreak = 0
     private var goodStreak = 0
     private var lastFeedback: ClientFeedback?
+
+    /// Recovery/steady-state ceiling for bitrate with the crop boost applied, inside the clamps.
+    private var effectiveSetpoint: Int {
+        Self.clampBitrate(Int((Double(bitrateSetpoint) * cropBoost).rounded()))
+    }
 
     init(mode: Mode, bitrateSetpoint: Int, fpsCeiling: Int) {
         self.mode = mode
@@ -88,6 +110,9 @@ struct AdaptiveRateController {
     /// Fold one stats interval's signals into the streak state and return the next targets.
     mutating func evaluate(_ inputs: Inputs) -> Targets {
         guard mode == .auto else { return Targets(bitrate: bitrate, fps: fps) }
+        // The crop boost folds BEFORE the fresh-feedback gate: a zoom is a host-side event, so it
+        // must retarget even on an interval with no (or stale) client feedback.
+        applyCropBoost(inputs.cropFraction)
         // An unchanged snapshot is NOT a fresh signal (the holder re-serves the latest one when
         // the client goes quiet); re-counting it would turn one bad second into "sustained".
         guard let feedback = inputs.feedback, feedback != lastFeedback else {
@@ -145,13 +170,39 @@ struct AdaptiveRateController {
     }
 
     /// Recover in reverse: restore fps first (undoing the most recent cut), then grow bitrate
-    /// slowly back toward — never past — the setpoint.
+    /// slowly back toward — never past — the (crop-boosted) setpoint.
     private mutating func stepUp() {
         if fps < fpsCeiling {
             fps = min(fpsCeiling, fps + Self.fpsStep)
-        } else if bitrate < bitrateSetpoint {
-            bitrate = min(bitrateSetpoint,
+        } else if bitrate < effectiveSetpoint {
+            bitrate = min(effectiveSetpoint,
                           max(bitrate + Self.upStepMinimum, Int(Double(bitrate) * Self.upStepFactor)))
         }
+    }
+
+    /// Fold the capture crop fraction into the operating point. On a boost change the live
+    /// bitrate rescales PROPORTIONALLY — its attenuation as a fraction of the setpoint carries
+    /// across — so a healthy stream jumps straight to the boosted setpoint (crisp immediately,
+    /// no slow step-up) while a congested one stays equally attenuated: the boost moves the
+    /// setpoint, and congestion keeps stepping down to the unscaled `stepDown` floor.
+    private mutating func applyCropBoost(_ fraction: Double) {
+        let boost = Self.cropBoost(forFraction: fraction)
+        guard boost != cropBoost else { return }
+        let priorSetpoint = effectiveSetpoint
+        cropBoost = boost
+        bitrate = Self.clampBitrate(
+            Int((Double(bitrate) * Double(effectiveSetpoint) / Double(priorSetpoint)).rounded()))
+    }
+
+    /// Inverse-area boost for a cropped capture, capped by `maxCropBoost`. Degenerate fractions
+    /// (≤ 0, or ≥ 1 = full frame) mean no boost.
+    static func cropBoost(forFraction fraction: Double) -> Double {
+        guard fraction > 0, fraction < 1 else { return 1 }
+        return min(maxCropBoost, 1 / fraction)
+    }
+
+    private static func clampBitrate(_ bps: Int) -> Int {
+        min(StreamParameters.bitrateRange.upperBound,
+            max(StreamParameters.bitrateRange.lowerBound, bps))
     }
 }
