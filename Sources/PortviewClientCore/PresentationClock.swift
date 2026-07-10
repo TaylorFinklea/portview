@@ -36,6 +36,20 @@ public struct PresentationClock: Sendable, Equatable {
             .saturatingSubtracting(hostClockOffsetMicros)
             .saturatingAdding(presentationDelayMicros)
     }
+
+    /// Furthest ahead of "now" a schedule target may land, in microseconds (~10 s). Scheduling
+    /// media further ahead is meaningless, and a corrupt/hostile host PTS (e.g. `UInt64.max` after
+    /// a normal anchor) maps to a saturated far-future target whose downstream hostTime conversion
+    /// (µs → ns → timebase ticks) would overflow-trap the client.
+    public static var maxScheduleAheadMicros: Int64 { 10_000_000 }
+
+    /// Bounds a mapped target present time to the scheduling horizon: no further than
+    /// ``maxScheduleAheadMicros`` past `nowMicros`, so no remote PTS value can trap the conversion
+    /// to a playback host time. Past and near targets pass through unchanged (a past instant just
+    /// schedules immediately).
+    public static func clampedScheduleTargetMicros(_ targetMicros: Int64, now nowMicros: Int64) -> Int64 {
+        min(targetMicros, nowMicros.saturatingAdding(maxScheduleAheadMicros))
+    }
 }
 
 /// A bounded, PTS-keyed jitter buffer: media elements wait here until their
@@ -156,7 +170,14 @@ public struct PTSJitterBuffer<Element: Sendable>: Sendable {
 /// - **Capacity, oldest-first**: a wedged clock (targets never coming due) must not accumulate
 ///   frames — over `capacity` the lowest-target entry is evicted.
 /// - **Late budget**: a due frame *more than* ``lateBudgetMicros`` (~2 frame intervals, measured
-///   from enqueue spacing) past its target is dropped, not shown. Exactly at the budget is shown.
+///   from enqueue spacing) past its target is dropped ONLY when a newer frame is staged to replace
+///   it (truly obsoleted). The source delivers frames on content change, so a lone late frame may
+///   have no successor for minutes — it is shown anyway (late beats wrong). Exactly at the budget
+///   is shown.
+///
+/// **Liveness valve**: at capacity with nothing due (the anchor skewed late or the clock wedged, so
+/// targets never arrive), ``popDue(now:)`` yields the oldest staged frame anyway — bounding both
+/// freeze modes by construction while leaving normal below-capacity PTS pacing untouched.
 public struct PresentationFrameQueue<Frame> {
     /// Maximum number of staged frames; exceeding it evicts oldest-first.
     public let capacity: Int
@@ -192,16 +213,23 @@ public struct PresentationFrameQueue<Frame> {
 
     /// The frame to show at `nowMicros`: the NEWEST entry whose target has arrived
     /// (`target <= now`). Every older due entry is discarded — already passed, a display can't show
-    /// it anymore. Returns nil (keeping future frames staged) when nothing is due, or when the
-    /// newest due frame is itself more than ``lateBudgetMicros`` past its target (dropped, not shown).
+    /// it anymore. A due frame more than ``lateBudgetMicros`` past its target is dropped only when
+    /// a newer frame is staged behind it (obsoleted); with nothing newer staged it is shown anyway
+    /// (late beats wrong). Nothing due keeps future frames staged and returns nil — unless the
+    /// queue is AT capacity, where the oldest frame is yielded (liveness valve: a skewed/wedged
+    /// clock can't freeze video while frames keep arriving).
     public mutating func popDue(now nowMicros: Int64) -> Frame? {
         var dueCount = 0
         while dueCount < entries.count, entries[dueCount].targetMicros <= nowMicros { dueCount += 1 }
-        guard dueCount > 0 else { return nil }
+        guard dueCount > 0 else {
+            guard entries.count >= capacity else { return nil }
+            return entries.removeFirst().frame
+        }
         let newest = entries[dueCount - 1]
+        let hasNewerStaged = dueCount < entries.count
         entries.removeFirst(dueCount)
         let lateness = nowMicros.saturatingSubtracting(newest.targetMicros)
-        return lateness > lateBudgetMicros ? nil : newest.frame
+        return (lateness > lateBudgetMicros && hasNewerStaged) ? nil : newest.frame
     }
 
     /// Drop everything staged and forget the measured spacing (clock re-anchor / session teardown).

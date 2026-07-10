@@ -91,8 +91,13 @@ final class AudioPlayer {
         let clock = presentationClock
             ?? PresentationClock(hostClockOffsetMicros: Int64(clamping: ptsMicros) - nowMicros)
         presentationClock = clock
+        // Clamp to the schedule horizon (~10s past now): scheduling PCM further ahead is
+        // meaningless, and a corrupt/hostile PTS after a normal anchor would otherwise push the
+        // hostTime conversion below into an overflow trap.
+        let targetMicros = PresentationClock.clampedScheduleTargetMicros(
+            clock.targetPresentTimeMicros(forPTSMicros: ptsMicros), now: nowMicros)
         player.scheduleBuffer(buffer,
-                              at: Self.audioTime(forUptimeMicros: clock.targetPresentTimeMicros(forPTSMicros: ptsMicros)),
+                              at: Self.audioTime(forUptimeMicros: targetMicros),
                               options: [],
                               completionHandler: nil)
         if !player.isPlaying { player.play() }
@@ -100,7 +105,9 @@ final class AudioPlayer {
 
     /// Map a local-uptime instant (µs on the `ProcessInfo.systemUptime` timeline — the same mach
     /// clock `AVAudioTime` host time counts, in timebase ticks) to an `AVAudioTime`. A past instant
-    /// simply schedules the buffer to play as soon as the node can.
+    /// simply schedules the buffer to play as soon as the node can; callers bound the future side
+    /// (`PresentationClock.clampedScheduleTargetMicros`) so the µs → ns → ticks multiplications
+    /// cannot overflow on a remote-controlled value.
     private static func audioTime(forUptimeMicros micros: Int64) -> AVAudioTime {
         var timebase = mach_timebase_info_data_t()
         mach_timebase_info(&timebase)

@@ -52,6 +52,34 @@ import PortviewClientCore
         let t2 = clock.targetPresentTimeMicros(forPTSMicros: 2_000_000)
         #expect(t2 - t1 == 500_000)
     }
+
+    /// Wire hardening: a corrupt/hostile host PTS (e.g. `UInt64.max` after a normal anchor) maps to
+    /// a saturated far-future target; the schedule clamp bounds it to the horizon past `now` so the
+    /// downstream hostTime conversion (µs → ns → timebase ticks) can never overflow-trap the client.
+    @Test func hostilePTSTargetClampsToTheScheduleHorizon() {
+        let clock = PresentationClock(hostClockOffsetMicros: 1_000_000)  // a normal audio anchor
+        let now: Int64 = 2_000_000
+        let hostileTarget = clock.targetPresentTimeMicros(forPTSMicros: .max)
+        #expect(hostileTarget > Int64.max / 1_000)  // near-saturated — unclamped, ×1_000 would trap
+        #expect(PresentationClock.clampedScheduleTargetMicros(hostileTarget, now: now)
+                == now + PresentationClock.maxScheduleAheadMicros)
+    }
+
+    /// Sane targets pass through the clamp unchanged: jitter headroom ahead, past instants (they
+    /// just schedule immediately), and exactly the horizon. One microsecond past the horizon clamps.
+    @Test func nearbyTargetsPassThroughTheScheduleClampUnchanged() {
+        let now: Int64 = 5_000_000
+        #expect(PresentationClock.clampedScheduleTargetMicros(5_050_000, now: now) == 5_050_000)
+        #expect(PresentationClock.clampedScheduleTargetMicros(4_000_000, now: now) == 4_000_000)
+        let horizon = now + PresentationClock.maxScheduleAheadMicros
+        #expect(PresentationClock.clampedScheduleTargetMicros(horizon, now: now) == horizon)
+        #expect(PresentationClock.clampedScheduleTargetMicros(horizon + 1, now: now) == horizon)
+    }
+
+    /// The clamp itself must not trap on an adversarial-extreme `now` (saturating horizon add).
+    @Test func scheduleClampSaturatesAtExtremeNow() {
+        #expect(PresentationClock.clampedScheduleTargetMicros(.max, now: .max) == .max)
+    }
 }
 
 /// PTSJitterBuffer: bounded, PTS-ordered staging for media elements awaiting their target present
