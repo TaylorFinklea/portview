@@ -209,8 +209,8 @@ private func startListenerReady(_ listener: NWListener, queue: DispatchQueue) as
 private func countingPinnedClientParameters(pin: Data, evaluations: Bag<Int>) -> NWParameters {
     let q = NWProtocolQUIC.Options(alpn: [PortviewTransport.alpn])
     q.idleTimeout = 30_000
-    q.initialMaxStreamsBidirectional = 100
-    q.initialMaxStreamsUnidirectional = 1000
+    q.initialMaxStreamsBidirectional = 16
+    q.initialMaxStreamsUnidirectional = 4
     sec_protocol_options_set_verify_block(
         q.securityProtocolOptions,
         { _, secTrust, complete in

@@ -36,6 +36,22 @@ public final class PortviewConnection: @unchecked Sendable {
     /// refreshed after it moves. Nil until the path resolves.
     public var resolvedRemoteEndpoint: NWEndpoint? { connection.currentPath?.remoteEndpoint }
 
+    /// The QUIC tunnel this stream arrived on — set only for frame-path streams accepted by a
+    /// multiplexed (group-mode) `PortviewListener`; nil for flat/TLS accepts and the client side.
+    /// Weak: the listener's `TunnelAccepter` owns tunnel lifetime; once the tunnel tears down,
+    /// `acceptLanes` degrades to nil.
+    weak var tunnel: AcceptedTunnel?
+
+    /// Host side, multiplexed accepts only: authorize secondary lane streams on this connection's
+    /// tunnel using the session token minted at handshake, receiving each lane as it binds. Call
+    /// AFTER the primary handshake completes and BEFORE sending the `ServerHello` that carries
+    /// the token, so a well-behaved client can never race its lane opens past the authorization.
+    /// Nil when this connection has no tunnel (flat/TLS listener accept, client side, or the
+    /// tunnel already tore down) — callers fall back to single-stream operation.
+    public func acceptLanes(sessionToken: [UInt8]) -> AsyncStream<AcceptedLane>? {
+        tunnel?.authorize(sessionToken: sessionToken)
+    }
+
     init(connection: NWConnection, queue: DispatchQueue) {
         self.connection = connection
         self.queue = queue
@@ -93,7 +109,13 @@ public final class PortviewConnection: @unchecked Sendable {
 
     /// Send a message to the peer.
     public func send(_ message: AnyMessage) async throws {
-        let bytes = Frame.encodeAny(message)
+        try await sendRaw(Frame.encodeAny(message))
+    }
+
+    /// Send raw pre-framing bytes. The only raw payload on any stream is the `LanePreamble` a
+    /// client writes once at secondary-lane open (`PortviewTunnel.openLane`); everything else is
+    /// framed via `send(_:)`.
+    func sendRaw(_ bytes: [UInt8]) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             connection.send(content: Data(bytes), completion: .contentProcessed { error in
                 if let error { cont.resume(throwing: error) } else { cont.resume() }
@@ -113,8 +135,9 @@ public final class PortviewConnection: @unchecked Sendable {
     /// isn't `.ready` in time. `.waiting`/`.preparing` never resume `awaitReady()` on their own
     /// (an unreachable host parks in `.waiting`, retrying forever), so the deadline uses
     /// cancellation — `awaitReady()`'s designed escape hatch — to cancel the wedged connection
-    /// and bound every connect.
-    private func awaitReady(timeout: Duration) async throws {
+    /// and bound every connect. `internal` (not `private`) so `PortviewTunnel.openStream` can
+    /// await readiness of streams it opens on an established tunnel.
+    func awaitReady(timeout: Duration) async throws {
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask { try await self.awaitReady() }
             group.addTask {
@@ -157,6 +180,29 @@ public final class PortviewConnection: @unchecked Sendable {
     /// Begin the continuous receive loop, decoding frames into `inbound`.
     func startReceiveLoop() {
         receiveNext()
+    }
+
+    /// Group-mode accept seam: seed the raw bytes the stream classifier already consumed into
+    /// THIS stream's decoder (one `FrameDecoder` per stream — frames never straddle streams, see
+    /// `LanePreamble`), then continue with the normal receive loop. Mirrors one iteration of
+    /// `receiveNext`'s callback: fatal decode cancels, a FIN finishes, a high-water pause defers
+    /// re-arming to the buffer's resume hook.
+    func adoptClassifiedPrefix(_ bytes: [UInt8], isComplete: Bool) {
+        var pauseReceive = false
+        if !bytes.isEmpty {
+            switch ingest(bytes) {
+            case .fatal:
+                connection.cancel()
+                return
+            case .ok(let paused):
+                pauseReceive = paused
+            }
+        }
+        if isComplete {
+            inboundBuffer.finish()
+            return
+        }
+        if !pauseReceive { receiveNext() }
     }
 
     private func receiveNext() {
@@ -218,6 +264,8 @@ public final class PortviewListener: @unchecked Sendable {
     private let listener: NWListener
     private let queue: DispatchQueue
     private let connectionContinuation: AsyncStream<PortviewConnection>.Continuation
+    /// Group-mode (multiplexed) accept plumbing; nil in flat delivery mode.
+    private let tunnelAccepter: TunnelAccepter?
     /// Guards the cancel-before-start dead zone: `NWListener` delivers NO state callback (not
     /// even `.cancelled`) when `start(queue:)` follows `cancel()`, so `start()` must observe a
     /// prior cancel itself. The lock orders the flag against `listener.start(queue:)` so a
@@ -237,11 +285,24 @@ public final class PortviewListener: @unchecked Sendable {
 
     /// QUIC listener (additive/experimental). Each inbound QUIC stream arrives as a connection.
     /// `port` binds a specific port (stable host endpoint); `nil` = OS-assigned ephemeral port.
-    public convenience init(quicIdentity identity: TLSIdentity, serviceName: String? = nil, port: UInt16? = nil) throws {
-        try self.init(parameters: QUICParameters.server(identity: identity), serviceName: serviceName, port: port)
+    ///
+    /// `multiplexed: true` selects GROUPED delivery for QUIC lane-splitting: every inbound
+    /// tunnel arrives as an `NWConnectionGroup` (grouped delivery REPLACES flat delivery —
+    /// setting both handlers fails listener start with EINVAL, spike-verified), each of its
+    /// streams is classified by first byte (`StreamClassifier`), frame-path streams — including
+    /// legacy bare dials, which arrive as single-stream groups — flow into `connections` and the
+    /// existing serve path unchanged, and lane-preamble streams bind via
+    /// `PortviewConnection.acceptLanes`.
+    public convenience init(quicIdentity identity: TLSIdentity, serviceName: String? = nil, port: UInt16? = nil,
+                            multiplexed: Bool = false) throws {
+        try self.init(parameters: QUICParameters.server(identity: identity), serviceName: serviceName, port: port,
+                      multiplexed: multiplexed)
     }
 
-    private init(parameters: NWParameters, serviceName: String?, port: UInt16?) throws {
+    /// `internal` (not `private`) so tests can inject a short `lanePreambleDeadline` for the
+    /// stalled-preamble (slow-loris) path instead of waiting the production bound.
+    init(parameters: NWParameters, serviceName: String?, port: UInt16?,
+         multiplexed: Bool = false, lanePreambleDeadline: Duration = .seconds(5)) throws {
         let queue = DispatchQueue(label: "portview.listener")
         self.queue = queue
         let listener: NWListener
@@ -257,11 +318,21 @@ public final class PortviewListener: @unchecked Sendable {
         (self.connections, self.connectionContinuation) = AsyncStream<PortviewConnection>.makeStream()
 
         let continuation = connectionContinuation
-        listener.newConnectionHandler = { nw in
-            let connection = PortviewConnection(connection: nw, queue: queue)
-            nw.start(queue: queue)
-            connection.startReceiveLoop()
-            continuation.yield(connection)
+        if multiplexed {
+            let accepter = TunnelAccepter(queue: queue, connections: continuation,
+                                          preambleDeadline: lanePreambleDeadline)
+            self.tunnelAccepter = accepter
+            listener.newConnectionGroupHandler = { group in
+                accepter.accept(group)
+            }
+        } else {
+            self.tunnelAccepter = nil
+            listener.newConnectionHandler = { nw in
+                let connection = PortviewConnection(connection: nw, queue: queue)
+                nw.start(queue: queue)
+                connection.startReceiveLoop()
+                continuation.yield(connection)
+            }
         }
     }
 
@@ -323,6 +394,7 @@ public final class PortviewListener: @unchecked Sendable {
         cancelled = true
         listener.cancel()
         startLock.unlock()
+        tunnelAccepter?.cancelAll()
         connectionContinuation.finish()
     }
 }

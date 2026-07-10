@@ -7,8 +7,15 @@ public enum QUICParameters {
     private static func baseOptions() -> NWProtocolQUIC.Options {
         let q = NWProtocolQUIC.Options(alpn: [PortviewTransport.alpn])
         q.idleTimeout = 30_000
-        q.initialMaxStreamsBidirectional = 100
-        q.initialMaxStreamsUnidirectional = 1000
+        // Per-tunnel stream allowance, lowered from the old 100/1000 toward what lane-splitting
+        // actually needs (spec "Per-tunnel stream cap"): primary + 3 secondary lanes, ×2 for the
+        // spike-pinned double-delivery quirk (dead duplicate deliveries persist with group
+        // clients), ×2 headroom. This is the transport-level backstop against a stream flood
+        // into per-stream buffers; the tighter app-level bound is
+        // `AcceptedTunnel.maxLanePathStreams`. Phase 1 opens no unidirectional streams
+        // (client-opened lanes must be bidi to carry host→client frames).
+        q.initialMaxStreamsBidirectional = 16
+        q.initialMaxStreamsUnidirectional = 4
         return q
     }
 
