@@ -43,8 +43,9 @@ public enum BeaconStoreError: Error, Equatable {
 /// uptime (do not copy the `systemUptime` Ping idiom in HostRunner.swift): uptime resets to ~0 on
 /// reboot, so the client's `epoch <= lastHandled → ignore` dedupe would silently eat every legitimate
 /// wake for days after a restart — precisely the reboot scenario this feature exists for. Wall clock
-/// keeps a post-reboot write ordering above every pre-reboot write even though this actor's in-memory
-/// state is gone.
+/// restores sane ordering after a reboot without persisted state, modulo a backward clock step across
+/// the reboot (NTP/manual): routine beacons can then read stale client-side until the clock passes the
+/// old value, and an explicit nudge — which bypasses the client's epoch dedupe — is the backstop.
 public actor HostBeaconWriter {
     private struct Identity {
         var pinHex: String

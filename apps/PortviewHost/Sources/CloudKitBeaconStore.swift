@@ -25,6 +25,10 @@ final class CloudKitBeaconStore: BeaconStore, Sendable {
         case missingICloudEntitlement
     }
 
+    /// Whether beacon writes can work at all in this build — the UI gates the nudge row on this so
+    /// a default (entitlement-less) dev build never claims success for a dropped write.
+    static var isAvailable: Bool { entitled }
+
     /// Whether this process was signed with the CloudKit entitlement (read once via SecTask).
     private static let entitled: Bool = {
         guard let task = SecTaskCreateFromSelf(nil) else { return false }
@@ -55,7 +59,13 @@ final class CloudKitBeaconStore: BeaconStore, Sendable {
         let record = CKRecord(recordType: Self.recordType,
                               recordID: CKRecord.ID(recordName: beacon.recordName, zoneID: zoneID))
         for (key, value) in beacon.fields {
-            record[key] = value as? any CKRecordValueProtocol
+            guard let ckValue = value as? any CKRecordValueProtocol else {
+                // A silently-nil field would ship a dead beacon; every current field (String/Int64)
+                // conforms, so this only fires if a future codec field forgets to.
+                assertionFailure("HostBeaconRecord field \(key) is not a CKRecordValue")
+                continue
+            }
+            record[key] = ckValue
         }
         do {
             let results = try await database.modifyRecords(saving: [record], deleting: [],

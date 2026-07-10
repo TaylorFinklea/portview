@@ -138,10 +138,20 @@ final class HostAppModel {
         control.disconnectAll()
     }
 
+    /// The nudge is only offered when it can actually reach iCloud: the process carries the
+    /// CloudKit entitlement (default dev builds don't — `PORTVIEW_HOST_ENTITLEMENTS` is opt-in)
+    /// AND hosting reached `.ready` (before that the writer has no identity and drops the write).
+    /// Gating here keeps the fail-soft rule honest: no success message for a write that never
+    /// happened.
+    var canAskReconnect: Bool {
+        guard case .ready = state else { return false }
+        return CloudKitBeaconStore.isAvailable
+    }
+
     /// Menu-bar nudge: write a `wantsReconnect` beacon so the paired iPhone gets a silent push and
-    /// offers tap-to-resume. Only meaningful while hosting (the menu row is hidden otherwise).
+    /// offers tap-to-resume. Only meaningful once ready (the menu row is hidden otherwise).
     func askIPhoneToReconnect() {
-        guard isRunning else { return }
+        guard canAskReconnect else { return }
         let writer = beaconWriter
         Task { await writer.requestReconnect() }
         messages.append("asked iPhone to reconnect (via iCloud)")
@@ -204,9 +214,12 @@ final class HostAppModel {
         switch event {
         case .ready(let details):
             state = .ready(details)
-            // Hosting-start (and, across restarts, port-change) beacon trigger. Reuses the pin
-            // fingerprint hex the runner computed for the pairing payload as the record name. Own
-            // task: a CloudKit outage must never block event handling or the serve path.
+            // Hosting-start beacon trigger. This also subsumes the spec's port-change trigger: the
+            // persisted port can only change at a listener (re)bind, and every bind path re-emits
+            // `.ready` carrying the actual bound port — if a future change lets the port move
+            // MID-RUN, wire `beaconWriter.portChanged(_:)` there. Reuses the pin fingerprint hex
+            // the runner computed for the pairing payload as the record name. Own task: a CloudKit
+            // outage must never block event handling or the serve path.
             let writer = beaconWriter
             Task {
                 await writer.hostingStarted(pinHex: details.pinHex, hostName: details.serviceName,
