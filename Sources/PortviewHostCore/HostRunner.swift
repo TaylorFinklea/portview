@@ -620,7 +620,8 @@ public struct HostRunner: Sendable {
     /// Serve the SAS pairing PREAMBLE on an unpinned connection: two-sided commit-then-reveal, then
     /// derive + emit the 6-digit code for the host HUD. Builds NONE of the streaming scaffolding
     /// (no clipboard/injector/capture/file). Only engages while a user-opened pairing window is live;
-    /// each engagement counts against the window-scoped attempt cap. The connection carries only the
+    /// each engagement counts against its remote source's attempt cap (with a window-wide ceiling
+    /// bounding total guesses across sources). The connection carries only the
     /// SAS messages and is torn down here; the client compares the code and re-dials pinned.
     /// `internal` (not `private`) so the loopback integration test can drive it directly.
     static func serveSASPreamble(
@@ -632,9 +633,13 @@ public struct HostRunner: Sendable {
         emit: @escaping @Sendable (HostRunnerEvent) -> Void
     ) async {
         defer { connection.close() }
-        // Gate: only pair during a user-opened window, and cap attempts within it.
+        // Gate: only pair during a user-opened window, and cap attempts within it — per remote
+        // source, so a flooder exhausts only its own budget instead of closing the window for the
+        // legit device. The limiter itself closes the window when the window-wide ceiling is
+        // exhausted, so a rejected attempt just drops this connection.
         guard let sas, await sas.isOpen() else { return }
-        guard await sas.registerAttempt() else { await sas.closeWindow(); return }
+        let source = SASPairingControl.sourceKey(for: connection.resolvedRemoteEndpoint)
+        guard await sas.registerAttempt(source: source) else { return }
 
         // Host: fresh nonce + commit, sent before any reveal.
         let hostNonce = SASCode.randomNonce()
