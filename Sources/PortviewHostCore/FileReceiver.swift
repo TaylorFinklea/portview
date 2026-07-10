@@ -1,5 +1,8 @@
 import Foundation
 import PortviewProtocol
+import os
+
+private let logger = Logger(subsystem: "dev.finklea.portview", category: "files")
 
 /// Receives files pushed from the client (a `FileOffer` then ordered `FileChunk`s) and writes
 /// them into ~/Downloads, de-duplicating the filename. Tracks one in-flight transfer per id.
@@ -38,11 +41,11 @@ final class FileReceiver {
         let url = uniqueURL(for: offer.name)
         FileManager.default.createFile(atPath: url.path, contents: nil)
         guard let handle = try? FileHandle(forWritingTo: url) else {
-            print("file transfer: could not open \(url.path) for writing")
+            logger.error("file transfer: could not open \(url.path) for writing")
             return
         }
         transfers[offer.transferID] = Transfer(handle: handle, url: url, received: 0)
-        print("Receiving \"\(offer.name)\" (\(offer.size) bytes) → \(url.path)")
+        logger.info("Receiving \"\(offer.name)\" (\(offer.size, privacy: .public) bytes) → \(url.path)")
     }
 
     func chunk(_ chunk: FileChunk) {
@@ -61,7 +64,7 @@ final class FileReceiver {
         if chunk.isLast {
             try? transfer.handle.close()
             transfers[chunk.transferID] = nil
-            print("Saved \(transfer.url.lastPathComponent) (\(transfer.received) bytes).")
+            logger.info("Saved \(transfer.url.lastPathComponent) (\(transfer.received, privacy: .public) bytes).")
         }
     }
 
@@ -71,7 +74,7 @@ final class FileReceiver {
         try? transfer.handle.close()
         try? FileManager.default.removeItem(at: transfer.url)
         transfers[transferID] = nil
-        print("file transfer: \(transfer.url.lastPathComponent) exceeded size cap, dropped.")
+        logger.warning("file transfer: \(transfer.url.lastPathComponent) exceeded size cap, dropped.")
     }
 
     func cancelAll() {

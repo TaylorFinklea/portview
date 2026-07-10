@@ -3,6 +3,9 @@ import Foundation
 import AVFoundation
 import CoreMedia
 import CoreVideo
+import os
+
+private let logger = Logger(subsystem: "dev.finklea.portview", category: "capture")
 
 /// A captured screen frame. `@unchecked Sendable`: ScreenCaptureKit hands us a fresh
 /// pixel buffer per callback that we forward without concurrent mutation.
@@ -135,7 +138,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
         setStreamAndConfig(stream, config)
         stream.startCapture { error in
-            if let error { print("capture start error: \(error)") }
+            if let error { logger.error("capture start error: \(error, privacy: .public)") }
         }
     }
 
@@ -213,7 +216,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             config.sourceRect = priorRect
             config.width = priorWidth
             config.height = priorHeight
-            print("viewport update failed: \(error)")
+            logger.error("viewport update failed: \(error, privacy: .public)")
             return false
         }
     }
@@ -238,7 +241,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             return true
         } catch {
             config.minimumFrameInterval = prior
-            print("fps update failed: \(error)")
+            logger.error("fps update failed: \(error, privacy: .public)")
             return false
         }
     }
@@ -326,7 +329,7 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
-        print("capture stopped: \(error)")
+        logger.error("capture stopped: \(error, privacy: .public)")
         continuation.finish()
     }
 }

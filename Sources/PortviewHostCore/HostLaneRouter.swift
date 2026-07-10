@@ -1,6 +1,9 @@
 import Foundation
 import PortviewProtocol
 import PortviewTransport
+import os
+
+private let logger = Logger(subsystem: "dev.finklea.portview", category: "lanes")
 
 /// Send seam `HostLaneRouter` routes through: a live `PortviewConnection` in production, a
 /// scripted fake in tests.
@@ -119,7 +122,7 @@ final class HostLaneRouter: @unchecked Sendable {
         let missing = resolveLaneSet()
         if !missing.isEmpty {
             let names = missing.map { "\($0)" }.sorted().joined(separator: ", ")
-            print("lane stream(s) never opened by the client: \(names); staying on primary for them")
+            logger.notice("lane stream(s) never opened by the client: \(names, privacy: .public); staying on primary for them")
         }
     }
 
@@ -163,7 +166,7 @@ final class HostLaneRouter: @unchecked Sendable {
             // single harmless keyframe in a rare failure event, kept unconditional so the flip
             // contract stays one rule.
             guard let requestKeyframe = flip(lane) else { return }
-            print("lane \(lane) stream died; falling back to primary (no reconnect): \(error)")
+            logger.warning("lane \(String(describing: lane), privacy: .public) stream died; falling back to primary (no reconnect): \(error, privacy: .public)")
             await requestKeyframe()
         }
     }

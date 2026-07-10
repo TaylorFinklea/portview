@@ -7,6 +7,9 @@ import ApplicationServices
 import PortviewProtocol
 import PortviewTransport
 import PortviewMedia
+import os
+
+private let logger = Logger(subsystem: "dev.finklea.portview", category: "host")
 
 public struct HostReadyDetails: Equatable, Sendable {
     public let serviceName: String
@@ -210,7 +213,7 @@ public struct HostRunner: Sendable {
                     throw error
                 }
             } catch {
-                print("Preferred port \(preferredPort) unavailable (\(error)); using an OS-assigned port.")
+                logger.warning("Preferred port \(preferredPort, privacy: .public) unavailable (\(error, privacy: .public)); using an OS-assigned port.")
             }
         }
         let listener = try PortviewListener(quicIdentity: identity, serviceName: serviceName, multiplexed: true)
@@ -520,7 +523,7 @@ public struct HostRunner: Sendable {
             // client's decoder rejects (WireError.malformed), dropping the session. Skip it entirely
             // (never truncate — half a clipboard is worse than none).
             guard Frame.shouldSendClipboard(text) else {
-                print("clipboard: skipping \(text.utf8.count)-byte copy over \(Frame.maxClipboardBytes)-byte cap")
+                logger.notice("clipboard: skipping \(text.utf8.count, privacy: .public)-byte copy over \(Frame.maxClipboardBytes, privacy: .public)-byte cap")
                 return
             }
             outbound.enqueue(.clipboardUpdate(ClipboardUpdate(text: text)))
@@ -576,7 +579,7 @@ public struct HostRunner: Sendable {
             let fps = requestedFPS
             let bitrate = requestedBitrate
             videoTask = Task { await pumpVideo(router, display: display, capture: capture, fps: fps, bitrate: bitrate, feedback: clientFeedback, emit: emit) }
-            print("Streaming display \(display.displayID) source \(display.width)x\(display.height).")
+            logger.info("Streaming display \(display.displayID, privacy: .public) source \(display.width, privacy: .public)x\(display.height, privacy: .public).")
         }
 
         var pendingMessage: AnyMessage? = firstMessage
@@ -616,12 +619,12 @@ public struct HostRunner: Sendable {
                         }
                     }
                 } catch {
-                    print("handshake error: \(error)")
+                    logger.error("handshake error: \(error, privacy: .public)")
                     videoTask?.cancel()
                     return
                 }
             case .startSession(let start):
-                do { try server.handle(start) } catch { print("startSession error: \(error)"); return }
+                do { try server.handle(start) } catch { logger.error("startSession error: \(error, privacy: .public)"); return }
                 requestedFPS = StreamParameters.captureFPS(requested: start.maxFPS)
                 requestedBitrate = StreamParameters.encoderBitrate(requested: start.targetBitrate)
                 startVideo(on: await display(forID: start.displayID))
@@ -750,7 +753,7 @@ public struct HostRunner: Sendable {
         do {
             try capture.start(display: display, maxFPS: fps)
         } catch {
-            print("capture start error: \(error)")
+            logger.error("capture start error: \(error, privacy: .public)")
             return
         }
 
@@ -793,9 +796,9 @@ public struct HostRunner: Sendable {
                         mode: bitrate == nil ? .auto : .pinned,
                         bitrateSetpoint: rebuilt.averageBitRate,
                         fpsCeiling: fps)
-                    print("Encoder ready for \(bufferWidth)x\(bufferHeight) buffers.")
+                    logger.info("Encoder ready for \(bufferWidth, privacy: .public)x\(bufferHeight, privacy: .public) buffers.")
                 } catch {
-                    print("encoder create error: \(error)")
+                    logger.error("encoder create error: \(error, privacy: .public)")
                     continue
                 }
             }
@@ -867,7 +870,7 @@ public struct HostRunner: Sendable {
                 // (the startup path); keeping it would re-enter the same broken session every frame.
                 encoder = nil
                 needsKeyframe = true
-                if sequence == 0 { print("frame skipped (will rebuild encoder): \(error)") }
+                if sequence == 0 { logger.warning("frame skipped (will rebuild encoder): \(error, privacy: .public)") }
             }
         }
         capture.stop()

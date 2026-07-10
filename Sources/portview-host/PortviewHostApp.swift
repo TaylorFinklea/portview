@@ -1,16 +1,23 @@
 import PortviewHostCore
+import os
+
+private let logger = Logger(subsystem: "dev.finklea.portview", category: "host")
 
 @main
 struct PortviewHostApp {
     static func main() async {
         await HostRunner().run(identity: .terminal) { event in
             switch event {
-            case .message(let message), .accessibilityWarning(let message), .failed(let message):
-                print(message)
+            case .message(let message):
+                logger.info("\(message, privacy: .public)")
+            case .accessibilityWarning(let message):
+                logger.warning("\(message, privacy: .public)")
+            case .failed(let message):
+                logger.error("\(message, privacy: .public)")
             case .deviceConnected(_, let name):
-                print("device connected: \(name)")
+                logger.info("device connected: \(name)")
             case .deviceDisconnected:
-                print("device disconnected")
+                logger.info("device disconnected")
             case .ready, .sessionStats:
                 break
             case .sasCode, .sasConfirmed:
