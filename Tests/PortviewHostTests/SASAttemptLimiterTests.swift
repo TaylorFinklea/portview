@@ -160,4 +160,99 @@ import Network
         #expect(SASPairingControl.sourceKey(for: nil)
                 != SASPairingControl.sourceKey(for: .hostPort(host: "10.0.0.2", port: 50_001)))
     }
+
+    // MARK: - IPv6 /64 bucketing (one machine self-assigns many addresses inside its on-link /64
+    // via SLAAC/privacy addressing — no NAT — so per-address keys would mint a flooder a fresh
+    // budget per address; the /64 prefix is the per-machine-network key)
+
+    @Test func sourceKeyBucketsSameIPv6Slash64Together() {
+        let addr1 = NWEndpoint.hostPort(host: "fd12:3456:789a:1::42", port: 50_001)
+        let addr2 = NWEndpoint.hostPort(host: "fd12:3456:789a:1:d00d:beef:cafe:f00d", port: 50_002)
+        #expect(SASPairingControl.sourceKey(for: addr1) == SASPairingControl.sourceKey(for: addr2))
+    }
+
+    @Test func sourceKeyDistinguishesIPv6Slash64Prefixes() {
+        let netA = NWEndpoint.hostPort(host: "fd12:3456:789a:1::42", port: 50_001)
+        let netB = NWEndpoint.hostPort(host: "fd12:3456:789a:2::42", port: 50_001)
+        #expect(SASPairingControl.sourceKey(for: netA) != SASPairingControl.sourceKey(for: netB))
+    }
+
+    @Test func sameSlash64RotationSharesOnePerSourceBudget() {
+        // The attack this closes: a flooder rotating self-assigned addresses within its /64 must
+        // exhaust ONE per-source budget, not mint a fresh one per address.
+        var l = SASAttemptLimiter(windowDuration: 120, maxAttempts: 2, maxTotalAttempts: 20)
+        l.open(now: t0)
+        let addr1 = SASPairingControl.sourceKey(
+            for: .hostPort(host: "fd12:3456:789a:1::42", port: 50_001))
+        let addr2 = SASPairingControl.sourceKey(
+            for: .hostPort(host: "fd12:3456:789a:1:aaaa:bbbb:cccc:dddd", port: 50_002))
+        _ = l.registerAttempt(source: addr1, now: t0)
+        _ = l.registerAttempt(source: addr1, now: t0)           // shared budget hits the cap
+        let rotated = l.registerAttempt(source: addr2, now: t0)
+        #expect(rotated == false)    // fresh address, same /64 → still capped
+        #expect(l.isOpen(now: t0))   // and the over-cap rotation doesn't close the window
+    }
+
+    @Test func distinctSlash64PrefixesKeepIsolatedBudgets() {
+        var l = SASAttemptLimiter(windowDuration: 120, maxAttempts: 2, maxTotalAttempts: 20)
+        l.open(now: t0)
+        let netA = SASPairingControl.sourceKey(
+            for: .hostPort(host: "fd12:3456:789a:1::42", port: 50_001))
+        let netB = SASPairingControl.sourceKey(
+            for: .hostPort(host: "fd12:3456:789a:2::42", port: 50_001))
+        for _ in 0..<10 { _ = l.registerAttempt(source: netA, now: t0) }  // A's /64 floods past cap
+        let bFirst = l.registerAttempt(source: netB, now: t0)
+        #expect(bFirst)  // the other /64's budget is untouched
+    }
+
+    @Test func slash64RotationStillBoundedByGlobalCeiling() {
+        // The window-wide ceiling is unchanged: rotating across many distinct /64s stays bounded.
+        var l = SASAttemptLimiter(windowDuration: 120, maxAttempts: 5, maxTotalAttempts: 6)
+        l.open(now: t0)
+        var allowed = 0
+        for i in 0..<20 {
+            let key = SASPairingControl.sourceKey(
+                for: .hostPort(host: NWEndpoint.Host("fd12:3456:789a:\(String(i, radix: 16))::1"),
+                               port: 50_001))
+            if l.registerAttempt(source: key, now: t0) { allowed += 1 }
+        }
+        #expect(allowed == 6)        // rotating /64s never exceeds the window-wide ceiling
+        #expect(!l.isOpen(now: t0))  // exhausting the ceiling still closes the window
+    }
+
+    @Test func sourceKeyStripsIPv6ScopeIdentifier() {
+        // Zone/scope IDs live in `IPv6Address.interface`, not the address bytes; the key is taken
+        // from the bare bytes so it deliberately STRIPS them — two addresses differing only in
+        // scope must bucket together (varying the zone must not mint budgets).
+        let unscoped = NWEndpoint.hostPort(host: "fe80::1", port: 50_001)
+        let scoped = NWEndpoint.hostPort(host: "fe80::1%lo0", port: 50_002)  // lo0: on every mac
+        #expect(SASPairingControl.sourceKey(for: unscoped) == SASPairingControl.sourceKey(for: scoped))
+    }
+
+    @Test func ipv4MappedIPv6KeysAsItsEmbeddedIPv4() {
+        // Dual-stack listeners surface v4 peers as ::ffff:a.b.c.d, whose upper 64 bits are all
+        // zero. Those key as their embedded IPv4 address — matching the plain-IPv4 key, not
+        // collapsing every v4 client into one shared all-zeros /64 bucket.
+        let mappedA = NWEndpoint.hostPort(host: "::ffff:10.0.0.2", port: 50_001)
+        let mappedB = NWEndpoint.hostPort(host: "::ffff:10.0.0.3", port: 50_001)
+        let plainA = NWEndpoint.hostPort(host: "10.0.0.2", port: 50_002)
+        #expect(SASPairingControl.sourceKey(for: mappedA) == SASPairingControl.sourceKey(for: plainA))
+        #expect(SASPairingControl.sourceKey(for: mappedA) != SASPairingControl.sourceKey(for: mappedB))
+    }
+
+    @Test func ipv4BudgetsUnaffectedByBucketing() {
+        // IPv4 keys stay per-address: same IP (any port) shares one budget, distinct IPs stay
+        // isolated (the shared-NAT caveat is accepted as before).
+        var l = SASAttemptLimiter(windowDuration: 120, maxAttempts: 2, maxTotalAttempts: 20)
+        l.open(now: t0)
+        let a1 = SASPairingControl.sourceKey(for: .hostPort(host: "10.0.0.2", port: 50_001))
+        let a2 = SASPairingControl.sourceKey(for: .hostPort(host: "10.0.0.2", port: 50_002))
+        let b1 = SASPairingControl.sourceKey(for: .hostPort(host: "10.0.0.3", port: 50_001))
+        _ = l.registerAttempt(source: a1, now: t0)
+        _ = l.registerAttempt(source: a2, now: t0)          // same IP, new port → shared cap hit
+        let aCapped = l.registerAttempt(source: a1, now: t0)
+        let bFirst = l.registerAttempt(source: b1, now: t0)
+        #expect(aCapped == false)
+        #expect(bFirst)
+    }
 }

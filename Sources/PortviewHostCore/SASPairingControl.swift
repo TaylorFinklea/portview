@@ -75,9 +75,26 @@ public actor SASPairingControl {
     /// Per-source key for the attempt limiter: the connection's resolved remote HOST (IP), dropping
     /// the port — a client's source port rotates on every QUIC dial (keying on it would mint a
     /// flooder a fresh budget per connection), while the IP is the stablest pre-pairing per-device
-    /// key available. Unresolved/non-hostPort endpoints share a single bucket.
+    /// key available. IPv4 keys on the address itself (shared-NAT peers sharing a budget stays an
+    /// accepted caveat). IPv6 keys on the address's /64 prefix — the standard on-link subnet —
+    /// because one machine can self-assign many addresses within its /64 (SLAAC/privacy
+    /// addressing, no NAT), each of which would otherwise mint a fresh per-source budget.
+    /// Zone/scope identifiers are STRIPPED: the prefix is taken from the bare address bytes
+    /// (`IPv6Address.rawValue` carries no zone — it lives in `.interface`), so two addresses
+    /// differing only in scope bucket together. IPv4-mapped/compatible IPv6 (dual-stack listeners
+    /// surface v4 peers as ::ffff:a.b.c.d, whose upper 64 bits are all zero) keys as its embedded
+    /// IPv4 address rather than collapsing every v4 client into one all-zeros /64 bucket.
+    /// Unresolved/non-hostPort endpoints share a single bucket.
     static func sourceKey(for endpoint: NWEndpoint?) -> String {
         guard case .hostPort(let host, _) = endpoint else { return "unresolved" }
+        if case .ipv6(let address) = host {
+            if let v4 = address.asIPv4 { return String(describing: NWEndpoint.Host.ipv4(v4)) }
+            let prefix = [UInt8](address.rawValue.prefix(8))
+            let groups = stride(from: 0, to: 8, by: 2).map {
+                String(format: "%x", UInt16(prefix[$0]) << 8 | UInt16(prefix[$0 + 1]))
+            }
+            return groups.joined(separator: ":") + "::/64"
+        }
         return String(describing: host)
     }
 }
