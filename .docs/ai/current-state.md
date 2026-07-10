@@ -6,6 +6,12 @@
 
 `main`
 
+## Latest Session (2026-07-09 — fleet execution IN PROGRESS; live-input test incident fixed)
+
+- **INCIDENT (fixed, b50a903)**: `swift test` was typing "hi"+Return into the user's focused app — InputInjectorGateTests unpaused the injector and real CGEvents posted (terminal has Accessibility; the didInject seam fired before the switch and gated nothing). Fix: injectable `InputInjector.postEvent` seam (default = real HID post; tests stub it); gate test asserts at the posting boundary. Bead 57u closed; `bd remember` key: test-live-side-effects. 304/68 green, zero live events.
+- Fleet wave 1 IN FLIGHT (worktree agents off b50a903): vs9, 8n1.1, 627, 480, 42r (claimed). Planned: wave 2 = w6n.1/w6n.2 (post-vs9) + 90p (post-480) + b1l (post-42r); wave 3 = w6n.3 + 8bm (lead); wave 4 = w6n.4/w6n.5; cqv.4/cqv.5 sweeps last. If resuming cold: `bd ready`, unclaim or finish the claimed five.
+- NOT pushed. Session-end handoff update still pending (this entry is a mid-flight checkpoint).
+
 ## Latest Session (2026-07-08 — Fable planning day: queue triaged for Conductor + next waves filed)
 
 - NO code (per user: populate beads/roadmap so Opus/GPT take over). ADR: decisions.md (2026-07-08).
