@@ -491,6 +491,11 @@ public struct HostRunner: Sendable {
             return
         }
 
+        // One ordered outbound lane for this whole connection (survives display switches), owned
+        // here and finished in the teardown defer: clipboard pushes, cursor confirmations, and
+        // HostControl broadcast/file sends all enqueue onto it, so no fire-and-forget send can
+        // reorder under load or outlive the session.
+        let outbound = OutboundLane(connection: connection)
         var server = ServerHandshake(displays: Self.displayInfos(from: await registry.current()), supportedCodecs: [.hevc])
         let clipboard = ClipboardSync()
         clipboard.start { text in
@@ -501,7 +506,7 @@ public struct HostRunner: Sendable {
                 print("clipboard: skipping \(text.utf8.count)-byte copy over \(Frame.maxClipboardBytes)-byte cap")
                 return
             }
-            Task { try? await connection.send(.clipboardUpdate(ClipboardUpdate(text: text))) }
+            outbound.enqueue(.clipboardUpdate(ClipboardUpdate(text: text)))
         }
         let fileReceiver = FileReceiver()
         // Latest client-reported receive-side quality snapshot for THIS connection, read by the
@@ -517,9 +522,9 @@ public struct HostRunner: Sendable {
         // Injector, capture engine, and video pump are (re)bound to the active display; switching
         // re-targets all three. `currentCapture` lets viewport (magnifier) requests re-crop the
         // live stream. All of these are touched only from this inbound loop's task.
-        // One ordered, coalescing lane for cursor reports across this whole connection (survives display
-        // switches), so confirmations can't reorder/back-step the client's cursor-follow.
-        let cursorPump = CursorReportPump(connection: connection)
+        // Cursor reports ride the session's shared outbound lane (coalescing, last-wins), so
+        // confirmations can't reorder/back-step the client's cursor-follow.
+        let cursorPump = CursorReportPump(lane: outbound)
         var injector = makeInjector(for: firstDisplay, cursorPump: cursorPump)
         var currentCapture: CaptureEngine?
         var videoTask: Task<Void, Never>?
@@ -528,7 +533,7 @@ public struct HostRunner: Sendable {
             fileReceiver.cancelAll()
             videoTask?.cancel()
             currentCapture?.stop()
-            cursorPump.finish()
+            outbound.finish()
             connection.close()
             if let connectedDeviceID {
                 control?.deregister(connectedDeviceID)
@@ -561,7 +566,7 @@ public struct HostRunner: Sendable {
                         // reconnect the old session's disconnect must not evict the new one's entry.
                         let sessionID = UUID().uuidString
                         connectedDeviceID = sessionID
-                        control?.register(sessionID, connection)
+                        control?.register(sessionID, connection, outbound: outbound)
                         emit(.deviceConnected(id: sessionID, name: hello.deviceName))
                         // Seed this client with the current lock state (the live broadcast only reaches
                         // already-connected clients), so one that connects while locked pauses at once.
