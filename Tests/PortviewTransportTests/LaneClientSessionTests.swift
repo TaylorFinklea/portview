@@ -138,6 +138,11 @@ private final class GuardBox {
     func admit(_ sequence: UInt64, _ source: MergeSource) -> Bool {
         stale.admit(videoFrame(sequence), from: source)
     }
+
+    func admit(_ sequence: UInt64, pts: UInt64, _ source: MergeSource) -> Bool {
+        stale.admit(VideoFrame(sequence: sequence, ptsMicros: pts, isKeyframe: true,
+                               displayID: 1, width: 8, height: 8, data: [0xAA]), from: source)
+    }
 }
 
 /// Pins the merge-point ordering rule for video across the lane→primary flip: same-source frames
@@ -185,6 +190,25 @@ private final class GuardBox {
         // so later frames aren't compared against the pre-restart high-water sequence.
         #expect(g.admit(1, .primary))
         #expect(g.admit(2, .primary))
+    }
+
+    /// The blackhole case: a host pump restart landing INSIDE the flip window (no primary frame
+    /// admitted between the last lane frame and the restart) resets the sequence counter, but
+    /// capture PTS is host-clock monotonic across pump restarts — the guard must recover by PTS
+    /// instead of dropping every post-restart frame (video freeze with live audio).
+    @Test func pumpRestartLandingInsideTheFlipWindowRecoversByPTS() {
+        let g = GuardBox()
+        #expect(g.admit(500, pts: 1_000_000, .lane(.video)))
+        #expect(g.admit(1, pts: 1_016_666, .primary))
+        #expect(g.admit(2, pts: 1_033_333, .primary))
+    }
+
+    @Test func stragglerOlderOnBothAxesStillDrops() {
+        let g = GuardBox()
+        #expect(g.admit(500, pts: 1_000_000, .lane(.video)))
+        #expect(g.admit(501, pts: 1_016_666, .primary))
+        // Older sequence AND older PTS: a genuine pre-flip straggler, still dropped.
+        #expect(!g.admit(499, pts: 999_983, .lane(.video)))
     }
 }
 

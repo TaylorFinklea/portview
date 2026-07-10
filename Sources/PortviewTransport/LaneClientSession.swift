@@ -29,20 +29,26 @@ enum MergeSource: Equatable, Sendable {
 ///
 /// - A frame from the SAME source as the last accepted one is always current — its stream
 ///   delivers in order, so a sequence drop there is a legitimate pump restart, not staleness.
-/// - A frame from a DIFFERENT source must carry a NEWER sequence than the last accepted frame;
-///   otherwise it is a stale straggler from before the flip (or a cross-stream duplicate) and
-///   is dropped.
+/// - A frame from a DIFFERENT source must be newer on AT LEAST ONE axis — sequence, or capture
+///   PTS (`ptsMicros` rides the host clock, monotonic ACROSS pump restarts) — otherwise it is a
+///   stale straggler from before the flip (or a cross-stream duplicate) and is dropped. The PTS
+///   axis is what makes the guard recoverable when a pump restart lands INSIDE the flip window:
+///   sequence resets there, and a sequence-only rule would drop every post-restart frame until
+///   the new counter climbed past the old high-water (a video freeze with live audio).
 struct StaleVideoGuard {
     private var lastSource: MergeSource?
     private var lastSequence: UInt64 = 0
+    private var lastPtsMicros: UInt64 = 0
 
     /// True when `frame` is current (deliver it); false when it is a stale straggler (drop it).
     mutating func admit(_ frame: VideoFrame, from source: MergeSource) -> Bool {
-        if let lastSource, source != lastSource, frame.sequence <= lastSequence {
+        if let lastSource, source != lastSource,
+           frame.sequence <= lastSequence, frame.ptsMicros <= lastPtsMicros {
             return false
         }
         lastSource = source
         lastSequence = frame.sequence
+        lastPtsMicros = frame.ptsMicros
         return true
     }
 }

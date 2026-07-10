@@ -83,11 +83,13 @@ final class HostLaneRouter: @unchecked Sendable {
     }
 
     /// Bind one accepted lane stream. Ignored once the lane set resolved (a late-opening client
-    /// stays on primary) or after the lane flipped (no reconnect).
+    /// stays on primary), after the lane flipped (no reconnect), or for a lane the router never
+    /// routes (a client-opened .control/.input/etc stream must not be retained as an inert entry).
     func bind(_ lane: Lane, _ sender: any LaneStreamSender) {
         lock.lock()
         defer { lock.unlock() }
-        guard laneCapable, !resolved, !fallenBack.contains(lane), lanes[lane] == nil else { return }
+        guard Self.routedLanes.contains(lane),
+              laneCapable, !resolved, !fallenBack.contains(lane), lanes[lane] == nil else { return }
         lanes[lane] = sender
     }
 
