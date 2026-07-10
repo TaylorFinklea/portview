@@ -67,6 +67,12 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     // serve-session task (setViewport()/stop()). TODO: replace with a full actor conversion (the
     // target end state per decisions.md) — this lock is the minimal stopgap for now.
     private let configLock = NSLock()
+    // Serializes the mutate → `updateConfiguration` → rollback critical sections of `setViewport`
+    // and `setMaxFPS`: both mutate the SAME shared SCStreamConfiguration reference from different
+    // tasks (serve-session vs video pump), and `configLock` cannot be held across the `await`.
+    // Without it, an interleaved failure rollback can restore stale fields and desync the
+    // unchanged-check baseline from the live stream (the wedge the rollback exists to prevent).
+    private let configUpdateGate = AsyncGate()
     private let continuation: AsyncStream<SendableFrame>.Continuation
     let frames: AsyncStream<SendableFrame>
     private let audioContinuation: AsyncStream<SendableAudioFrame>.Continuation
@@ -142,6 +148,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     /// no-op change (same rect and output dims) returns `true` without reconfiguring.
     func setViewport(normalizedX nx: Double, normalizedY ny: Double,
                      normalizedW nw: Double, normalizedH nh: Double) async -> Bool {
+        await configUpdateGate.enter()
+        defer { configUpdateGate.leave() }
         let (streamOpt, configOpt) = currentStreamAndConfig()
         guard let stream = streamOpt, let config = configOpt else { return false }
         // Snap the captured region's SIZE to the discrete ladder (snapped up so it still covers the
@@ -217,6 +225,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     /// `setViewport`'s rollback).
     func setMaxFPS(_ maxFPS: Int) async -> Bool {
         guard maxFPS > 0 else { return false }
+        await configUpdateGate.enter()
+        defer { configUpdateGate.leave() }
         let (streamOpt, configOpt) = currentStreamAndConfig()
         guard let stream = streamOpt, let config = configOpt else { return false }
         let interval = CMTime(value: 1, timescale: CMTimeScale(maxFPS))
