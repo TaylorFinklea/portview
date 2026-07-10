@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Either side. Graceful session close with a human-readable reason.
 public struct Bye: WireMessage {
     public static let messageType = MessageType.bye

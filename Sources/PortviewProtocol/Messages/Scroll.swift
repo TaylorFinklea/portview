@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host. Scroll wheel delta (two-finger scroll).
 public struct Scroll: WireMessage {
     public static let messageType = MessageType.scroll

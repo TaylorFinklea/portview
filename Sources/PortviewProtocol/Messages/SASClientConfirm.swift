@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host (SAS pairing preamble, optional Guardrail E). A 32-byte HMAC the client sends after
 /// the user-typed code matched its derived code, so the host gets an authenticated "✓ a client
 /// confirmed" signal. Best-effort/defense-in-depth: a client that never sends it still pairs via the

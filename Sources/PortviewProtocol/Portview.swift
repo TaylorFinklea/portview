@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Portview wire protocol — shared contract between the Mac host and iPhone client.
 /// (Named `Portview`, not `PortviewProtocol`, to avoid a type sharing its module's name.)
 public enum Portview {

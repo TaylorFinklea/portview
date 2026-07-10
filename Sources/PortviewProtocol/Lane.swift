@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Logical lanes carried over the single QUIC connection. Raw values are the wire encoding —
 /// append-only: a case's raw value is the `LanePreamble` byte for that lane, frozen once shipped.
 public enum Lane: UInt8, Sendable, CaseIterable {

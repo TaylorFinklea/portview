@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Non-text keys that `TypeText` can't express. Raw values are the wire encoding.
 public enum SpecialKey: UInt8, Sendable, CaseIterable {
     case returnKey = 0

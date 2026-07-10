@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host. Unicode text to type (drives the on-screen keyboard); the host injects
 /// it as synthesized keyboard input.
 public struct TypeText: WireMessage {

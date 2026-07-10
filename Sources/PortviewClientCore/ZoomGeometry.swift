@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import CoreGraphics
 
 /// Pure geometry for the zoom/magnifier render. Maps the gesture (zoom + cursor) to a host crop

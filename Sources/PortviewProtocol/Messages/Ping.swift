@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host. Carries the client's send timestamp (microseconds, client clock) so the host can
 /// echo it back in a `Pong`, letting the client derive round-trip time and an approximate clock offset.
 public struct Ping: WireMessage, Equatable {

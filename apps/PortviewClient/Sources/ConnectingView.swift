@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import SwiftUI
 
 /// Screen 3 — secure-handshake feedback while `SessionViewModel.status == .connecting`. The

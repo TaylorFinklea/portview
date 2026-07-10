@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// One display the host can offer to stream. `scaleX100` is points-per-pixel × 100 (e.g. 200 = 2.0×).
 public struct DisplayInfo: Equatable, Sendable {
     public var id: UInt32

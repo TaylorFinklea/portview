@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Host → client (SAS pairing preamble). The host's nonce commitment (32 bytes, `SASCode.commit`),
 /// sent in response to the client commit and before either side reveals its nonce.
 public struct SASHostCommit: WireMessage {

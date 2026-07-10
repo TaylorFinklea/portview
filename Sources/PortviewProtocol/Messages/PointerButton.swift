@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Which pointer button an event refers to. Raw values are the wire encoding.
 public enum PointerButtonKind: UInt8, Sendable, CaseIterable {
     case left = 0

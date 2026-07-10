@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// A decoded message of any known type.
 public enum AnyMessage: Equatable, Sendable {
     case clientHello(ClientHello)

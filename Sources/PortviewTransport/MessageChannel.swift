@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import PortviewProtocol
 
 /// Frames outbound messages and reassembles inbound bytes for a single lane.

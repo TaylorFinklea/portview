@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Minimal FIFO async mutex: `enter()` suspends until the gate is free, `leave()` admits the next

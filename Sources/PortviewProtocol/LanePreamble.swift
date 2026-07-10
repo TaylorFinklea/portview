@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// The fixed preamble a client writes once, first, on every secondary QUIC lane stream it opens:
 /// `[uint8 laneRawValue][32B sessionToken]`. Pure codec — no I/O. The host reads this preamble to
 /// classify the stream (see `Lane`) and to bind it to the session via the token minted in

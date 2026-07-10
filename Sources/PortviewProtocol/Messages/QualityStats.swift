@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Host → client diagnostics summary. Scaled integer fields keep the wire format deterministic:
 /// Mbps/fps/ms values are encoded as value × 100.
 public struct QualityStats: WireMessage, Equatable, Sendable {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import PortviewProtocol
 
 /// Pure display-choice rules for the client session.

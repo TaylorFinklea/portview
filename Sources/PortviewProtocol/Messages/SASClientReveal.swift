@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host (SAS pairing preamble). The client's 16-byte nonce, revealed only after both
 /// commitments are exchanged. The host verifies it against the earlier `SASClientCommit` before use.
 public struct SASClientReveal: WireMessage {

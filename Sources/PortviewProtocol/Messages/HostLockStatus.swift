@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Host → client. The host's screen lock state. When `locked` is true the host's screen is locked
 /// (e.g. the screensaver engaged or the user locked it); the captured content is the secure desktop
 /// or blank, so the client pauses the live view and shows a "host locked — capture paused" overlay

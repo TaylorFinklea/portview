@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Errors raised while decoding the wire format.
 public enum WireError: Error, Equatable, Sendable {
     /// Not enough bytes remain to decode the requested value.

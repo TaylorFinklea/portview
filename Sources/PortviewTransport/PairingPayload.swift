@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Everything a client needs to connect to a host, encodable as a QR / deep-link URL:

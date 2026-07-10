@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Appends values to a byte buffer in Portview's wire format.
 public struct BinaryWriter: Sendable {
     public private(set) var bytes: [UInt8] = []

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host. Re-target the live video stream to a different display mid-session
 /// (without a full reconnect). The id matches a `DisplayInfo.id` from `ServerHello`.
 public struct SwitchDisplay: WireMessage, Equatable {

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Drives the host side of the control-lane handshake. I/O-free.
 public struct ServerHandshake {
     public enum State: Equatable, Sendable {

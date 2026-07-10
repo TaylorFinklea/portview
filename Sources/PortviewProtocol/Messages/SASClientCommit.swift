@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host (SAS pairing preamble). The client's nonce commitment (32 bytes,
 /// `SASCode.commit`), sent before any nonce is revealed. First message of the preamble — its arrival
 /// locks the connection to the SAS-preamble role (no streaming surface).

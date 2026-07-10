@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Maps media presentation timestamps from the host's timeline onto the client's local timeline.
 ///
 /// **Sign convention** — `hostClockOffsetMicros` is the host clock reading minus the local clock

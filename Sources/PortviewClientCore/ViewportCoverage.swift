@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import CoreGraphics
 
 /// Pure hysteresis predicate for the magnifier's re-crop decision (so the edge cases are testable).

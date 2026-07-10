@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// The 1-byte tag identifying a message inside a frame. Raw values are the wire encoding.
 ///
 /// Reserved tag ranges for future additions (lead-assigned; do not self-allocate):

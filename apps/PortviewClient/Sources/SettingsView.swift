@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import SwiftUI
 
 /// Glass-styled settings sheet: stream quality (applied to the next connection's handshake — the

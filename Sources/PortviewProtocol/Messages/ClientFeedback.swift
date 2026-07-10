@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host receive-side quality feedback, sent periodically off the client's 1s diagnostics
 /// snapshot so a host-side quality controller can adapt the stream. Scaled integer fields keep the
 /// wire format deterministic: fps/Mbps/ms values are encoded as value × 100. `rttMicros` is the

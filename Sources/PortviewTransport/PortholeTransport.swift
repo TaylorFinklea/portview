@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Transport-layer constants shared by host and client.
 public enum PortviewTransport {
     /// ALPN identifier negotiated on the QUIC/TLS handshake.

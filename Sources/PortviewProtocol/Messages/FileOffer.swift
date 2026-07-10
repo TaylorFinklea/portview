@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host. Announces an incoming file push; followed by `FileChunk`s sharing the
 /// same `transferID`. Chunking lets a large file interleave with live video on one connection.
 public struct FileOffer: WireMessage, Equatable {

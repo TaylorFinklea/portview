@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Self-delimiting framing: `[varint bodyLength][uint8 messageType][payload]`.
 /// `bodyLength` counts the type byte plus the payload.
 public enum Frame {

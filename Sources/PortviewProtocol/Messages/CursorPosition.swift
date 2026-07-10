@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Host → client. The current cursor position, normalized to the display as 0…65535
 /// (= 0.0…1.0) on each axis. Lets the client keep a zoomed viewport centered on the cursor
 /// without coupling to pixel/point coordinate spaces.

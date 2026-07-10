@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import SwiftUI
 
 /// The Glass HUD quality panel — four live telemetry stats over dark glass. All values are real

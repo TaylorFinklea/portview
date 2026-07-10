@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Pure derivation of the host's guided permission onboarding from the two real grant bools (Screen

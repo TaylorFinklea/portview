@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Accumulates a byte stream and yields complete messages as frames arrive.
 public struct FrameDecoder {
     /// Upper bound on bytes retained between pushes: one maximal frame

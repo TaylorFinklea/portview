@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Host → client (SAS pairing preamble). The host's 16-byte nonce, revealed only after the client
 /// reveal verifies. The client verifies it against the earlier `SASHostCommit`, then both derive the
 /// 6-digit code.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Wire-protocol version negotiation.
 ///
 /// Bump rules:

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Either side. A coded error; closes the session.
 public struct ProtocolError: WireMessage {
     public static let messageType = MessageType.error

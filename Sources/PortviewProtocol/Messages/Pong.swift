@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Host → client. Echoes the `Ping.sendMicros` the host received, plus the host's own monotonic
 /// uptime (microseconds) at reply time, so the client can compute RTT (from the echoed send time)
 /// and an approximate clock offset (from the host uptime reading).

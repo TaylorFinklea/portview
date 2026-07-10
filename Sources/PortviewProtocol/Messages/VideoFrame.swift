@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Host → client (video lane). One encoded access unit plus its metadata.
 public struct VideoFrame: WireMessage, Equatable {
     public static let messageType = MessageType.videoFrame

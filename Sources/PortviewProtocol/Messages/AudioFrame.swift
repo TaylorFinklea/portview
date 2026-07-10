@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Host → client. One slice of system audio as non-interleaved Float32 PCM (plane 0 then
 /// plane 1 …). `channels` planes of equal length make up `data`.
 public struct AudioFrame: WireMessage, Equatable {

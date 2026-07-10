@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host. Relative pointer movement (trackpad-style); the host applies the delta
 /// to the current cursor position and clamps to the display.
 public struct PointerMove: WireMessage {

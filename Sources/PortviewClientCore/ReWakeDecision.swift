@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Pure decode/encode of the CloudKit `HostBeacon` record's field VALUES (spec:

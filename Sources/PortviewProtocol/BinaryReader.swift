@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Reads values from a byte buffer in Portview's wire format. Bounds-checked.

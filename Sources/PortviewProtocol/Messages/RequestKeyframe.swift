@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host. Asks the host to emit a keyframe immediately so the client's delta chain can
 /// recover after a gap (returning from the background, or a decoder reset). No payload — the host
 /// forces a keyframe on the connection's active capture.

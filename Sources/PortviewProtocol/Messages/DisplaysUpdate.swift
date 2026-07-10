@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Host → client. Re-advertises the host's available displays mid-session when the display
 /// configuration changes (a monitor connected, woke, was removed, or changed resolution). The client
 /// refreshes its display list — and thus the display switcher — without a reconnect. Mirrors the

@@ -7,6 +7,15 @@ Portview is two apps over a shared, tested core (`PortviewProtocol`, `PortviewTr
 
 > **POC status.** The core pipeline (capture → HEVC encode → certificate-pinned QUIC → HEVC decode → display/control) is wired end to end. Bonjour discovery, QR pairing, clipboard, audio, file transfer, multi-monitor, Metal rendering, and the diagnostics HUD are implemented. The current manual test focus is device-side motion/quality tuning.
 
+## Prerequisites
+
+- **Xcode 26** on **macOS 26**, **Apple Silicon**. The Swift 6.2 toolchain comes with Xcode — no separate install.
+- [`xcodegen`](https://github.com/yonaskolb/XcodeGen), used to generate both apps' `.xcodeproj` from `project.yml`:
+
+  ```bash
+  brew install xcodegen
+  ```
+
 ## 1. Run the Mac host
 
 ```bash

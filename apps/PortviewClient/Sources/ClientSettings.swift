@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Persisted client stream-quality preferences, applied to the `StartSession` handshake. The host

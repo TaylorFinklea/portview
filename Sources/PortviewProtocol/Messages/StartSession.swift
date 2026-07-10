@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host. Chosen display + desired stream parameters; host starts the video lane.
 public struct StartSession: WireMessage {
     public static let messageType = MessageType.startSession

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Keyboard modifier flags carried by `KeyEvent`. Bitmask wire encoding (one `UInt8`).
 public struct KeyModifiers: OptionSet, Sendable, Equatable {
     public let rawValue: UInt8

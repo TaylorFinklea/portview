@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host. Opens a session and advertises supported codecs.
 public struct ClientHello: WireMessage {
     public static let messageType = MessageType.clientHello

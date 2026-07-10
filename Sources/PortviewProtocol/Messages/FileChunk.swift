@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// Client → host. One ordered slice of a file announced by `FileOffer`. `isLast` marks the
 /// final chunk (an empty last chunk terminates a zero-byte file).
 public struct FileChunk: WireMessage, Equatable {

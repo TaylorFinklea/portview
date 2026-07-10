@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 /// The visible crop of a display, normalized to 0…65535 (= 0.0…1.0) per axis. Used both ways:
 /// client → host requests the host crop its capture to this region (a "magnifier" — the region is
 /// then encoded at full resolution, so zoom is crisp instead of upscaled); host → client confirms

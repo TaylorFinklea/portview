@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 import Foundation
 
 /// Clamps the client's requested stream parameters (`StartSession`) into safe host ranges. The host
