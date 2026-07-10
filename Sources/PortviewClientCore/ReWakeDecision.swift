@@ -109,13 +109,21 @@ public enum ReWakeDecision {
     ///   - lastHandledEpochs: per-host map (keyed by `recordName`, i.e. the pin fingerprint hex) of
     ///     the epoch this host was last acted on for. MUST be per-host, never a scalar — a single
     ///     value would let the Mac with the largest epoch permanently suppress every other saved
-    ///     Mac's wakes. The caller persists this map and updates `lastHandledEpochs[beacon.recordName]
-    ///     = beacon.epoch` after acting on a beacon (not this function's job — it is pure/stateless).
+    ///     Mac's wakes. Used ONLY by the dedupe/replay guard — an epoch is the host's opaque
+    ///     ordering value (it may be a persisted counter, spec §1), never a client timestamp. The
+    ///     caller persists this map and updates `lastHandledEpochs[beacon.recordName] = beacon.epoch`
+    ///     after acting on a beacon (not this function's job — it is pure/stateless).
+    ///   - lastActedAt: per-host map (same key) of when THIS client last acted for the host, on the
+    ///     client's own wall clock — the caller records `now` into it whenever it acts, alongside
+    ///     the epoch map. Drives the rate limit, and is deliberately separate state: deriving
+    ///     act-times from stored epochs breaks for counter epochs (the limit would never fire) and
+    ///     conflates the host's beacon-WRITE time with the client's ACT time under delayed pushes.
     ///   - now: wall-clock time of this evaluation, used for the rate limit below.
     public static func evaluate(
         beacon: HostBeaconRecord,
         savedHosts: [SavedHost],
         lastHandledEpochs: [String: Int64],
+        lastActedAt: [String: Date],
         now: Date
     ) -> Action {
         guard let saved = savedHosts.first(where: { $0.pinHex == beacon.recordName }) else {
@@ -132,13 +140,11 @@ public enum ReWakeDecision {
             return .ignore
         }
 
-        // Per-host rate limit: real wall-clock spacing since we last acted for THIS host, independent
-        // of the epoch dedupe above.
-        if let previousEpoch {
-            let previousHandled = Date(timeIntervalSince1970: Double(previousEpoch) / 1_000_000)
-            if now.timeIntervalSince(previousHandled) < minActInterval {
-                return .ignore
-            }
+        // Per-host rate limit: real wall-clock spacing since this client last ACTED for THIS host,
+        // independent of the epoch dedupe above (epochs are the host's opaque ordering values, not
+        // client timestamps). At exactly `minActInterval` elapsed, acting is allowed again (strict <).
+        if let acted = lastActedAt[beacon.recordName], now.timeIntervalSince(acted) < minActInterval {
+            return .ignore
         }
 
         return .reachabilityProbe(endpoint: Endpoint(host: saved.host, port: beacon.port), pin: saved.pinHex)
