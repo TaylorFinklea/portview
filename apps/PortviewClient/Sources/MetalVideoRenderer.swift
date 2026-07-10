@@ -2,6 +2,7 @@ import UIKit
 import Metal
 import CoreVideo
 import QuartzCore
+import PortviewClientCore
 
 /// Renders decoded BGRA `CVPixelBuffer`s to a `CAMetalLayer`, applying the magnifier zoom IN the
 /// shader (sampling a sub-rect of the frame into the full-res drawable) rather than as a Core
@@ -35,6 +36,17 @@ final class MetalVideoRenderer {
     private var latestFrameRegion = CGRect(x: 0, y: 0, width: 1, height: 1)
     private var pendingFrame = false
 
+    /// Shared A/V presentation clock, audio-anchored by the session (see `SessionViewModel`). While
+    /// set, submitted frames stage in the PTS queue and `tick` presents the one due at the clock
+    /// time; nil (no audio anchor yet) keeps the present-immediately behavior so audio-less streams
+    /// never freeze. Clearing it drops any staged frames.
+    var presentationClock: PresentationClock? {
+        didSet { if presentationClock == nil { pendingByPTS.removeAll() } }
+    }
+    /// PTS-staged frames awaiting their target present time. Small and drop-oldest so a wedged
+    /// clock can't pool decoded pixel buffers (each holds an IOSurface from the decoder).
+    private var pendingByPTS = PresentationFrameQueue<(buffer: CVPixelBuffer, region: CGRect)>(capacity: 4)
+
     init() {
         let device = MTLCreateSystemDefaultDevice()
         self.device = device
@@ -61,17 +73,33 @@ final class MetalVideoRenderer {
         self.layer = layer
     }
 
-    /// Store the newest decoded frame + the display region it shows. Drawing happens in `tick`.
-    func submit(_ pixelBuffer: CVPixelBuffer, region: CGRect) {
-        lastPixelBuffer = pixelBuffer
-        latestFrameRegion = (region.width > 0 && region.height > 0) ? region : CGRect(x: 0, y: 0, width: 1, height: 1)
-        pendingFrame = true
+    /// Stage the newest decoded frame + the display region it shows. Drawing happens in `tick`:
+    /// with a presentation clock the frame waits in the PTS queue for its target present time;
+    /// without one (no audio anchor yet) it replaces the pending frame and shows next tick, as before.
+    func submit(_ pixelBuffer: CVPixelBuffer, region: CGRect, ptsMicros: UInt64) {
+        let safeRegion = (region.width > 0 && region.height > 0) ? region : CGRect(x: 0, y: 0, width: 1, height: 1)
+        if let clock = presentationClock {
+            pendingByPTS.enqueue((pixelBuffer, safeRegion),
+                                 targetMicros: clock.targetPresentTimeMicros(forPTSMicros: ptsMicros))
+        } else {
+            lastPixelBuffer = pixelBuffer
+            latestFrameRegion = safeRegion
+            pendingFrame = true
+        }
     }
 
-    /// One display-link step: ease the window toward the target and redraw the latest frame if the
-    /// window moved or a new frame arrived. Idle (settled + no new frame) → no work. `frameDuration`
-    /// time-normalizes the easing so the follow feels the same at 60 and 120 Hz.
+    /// One display-link step: promote the PTS-staged frame due at the current clock time (if any),
+    /// then ease the window toward the target and redraw the latest frame if the window moved or a
+    /// new frame arrived. Idle (settled + no new frame) → no work. `frameDuration` time-normalizes
+    /// the easing so the follow feels the same at 60 and 120 Hz — the window easing runs at display
+    /// rate regardless of which frame is presented.
     func tick(frameDuration: CFTimeInterval) {
+        if presentationClock != nil,
+           let due = pendingByPTS.popDue(now: Int64(ProcessInfo.processInfo.systemUptime * 1_000_000)) {
+            lastPixelBuffer = due.buffer
+            latestFrameRegion = due.region
+            pendingFrame = true
+        }
         guard let buffer = lastPixelBuffer else { return }
         let factor = Self.perTickFactor(easingFactor, frameDuration: frameDuration)
         let next = Self.easedWindow(current: currentWindow, target: targetWindow, factor: factor)

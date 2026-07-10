@@ -142,6 +142,87 @@ public struct PTSJitterBuffer<Element: Sendable>: Sendable {
     }
 }
 
+/// Bounded, target-time-ordered staging for decoded video frames awaiting their moment on the
+/// local timeline. Unlike ``PTSJitterBuffer`` (which drains EVERY due element — right for audio,
+/// where all buffers must play), a display shows exactly ONE frame per tick: ``popDue(now:)``
+/// returns the NEWEST due frame and discards the older due ones it obsoletes ("already passed").
+///
+/// Elements are staged by pre-mapped target present time (see
+/// ``PresentationClock/targetPresentTimeMicros(forPTSMicros:)``) rather than raw PTS, so the type
+/// needs no clock of its own and its element needn't be `Sendable` (the renderer stages
+/// `CVPixelBuffer`s).
+///
+/// **Drop policies:**
+/// - **Capacity, oldest-first**: a wedged clock (targets never coming due) must not accumulate
+///   frames — over `capacity` the lowest-target entry is evicted.
+/// - **Late budget**: a due frame *more than* ``lateBudgetMicros`` (~2 frame intervals, measured
+///   from enqueue spacing) past its target is dropped, not shown. Exactly at the budget is shown.
+public struct PresentationFrameQueue<Frame> {
+    /// Maximum number of staged frames; exceeding it evicts oldest-first.
+    public let capacity: Int
+    /// Assumed frame spacing (30 fps) until two enqueues establish a measured one.
+    public static var defaultFrameIntervalMicros: Int64 { 33_333 }
+    /// Spacing between the last two enqueued targets (kept when sane: 1ms…1s), driving the budget.
+    public private(set) var frameIntervalMicros: Int64 = defaultFrameIntervalMicros
+    /// How far past its target a due frame may be and still be shown (~2 frame intervals).
+    public var lateBudgetMicros: Int64 { frameIntervalMicros * 2 }
+
+    /// Entries kept sorted by target ascending (insertion order preserved among equal targets).
+    private var entries: [(targetMicros: Int64, frame: Frame)] = []
+    private var lastEnqueuedTargetMicros: Int64?
+
+    public init(capacity: Int) {
+        precondition(capacity >= 1, "a frame queue needs room for at least one frame")
+        self.capacity = capacity
+    }
+
+    public var count: Int { entries.count }
+    public var isEmpty: Bool { entries.isEmpty }
+
+    /// Stage a frame for its target present time; over capacity the oldest entry is evicted.
+    public mutating func enqueue(_ frame: Frame, targetMicros: Int64) {
+        if let last = lastEnqueuedTargetMicros {
+            let delta = targetMicros.saturatingSubtracting(last)
+            if (1_000...1_000_000).contains(delta) { frameIntervalMicros = delta }
+        }
+        lastEnqueuedTargetMicros = targetMicros
+        entries.insert((targetMicros, frame), at: insertionIndex(forTarget: targetMicros))
+        if entries.count > capacity { entries.removeFirst() }
+    }
+
+    /// The frame to show at `nowMicros`: the NEWEST entry whose target has arrived
+    /// (`target <= now`). Every older due entry is discarded — already passed, a display can't show
+    /// it anymore. Returns nil (keeping future frames staged) when nothing is due, or when the
+    /// newest due frame is itself more than ``lateBudgetMicros`` past its target (dropped, not shown).
+    public mutating func popDue(now nowMicros: Int64) -> Frame? {
+        var dueCount = 0
+        while dueCount < entries.count, entries[dueCount].targetMicros <= nowMicros { dueCount += 1 }
+        guard dueCount > 0 else { return nil }
+        let newest = entries[dueCount - 1]
+        entries.removeFirst(dueCount)
+        let lateness = nowMicros.saturatingSubtracting(newest.targetMicros)
+        return lateness > lateBudgetMicros ? nil : newest.frame
+    }
+
+    /// Drop everything staged and forget the measured spacing (clock re-anchor / session teardown).
+    public mutating func removeAll() {
+        entries.removeAll()
+        lastEnqueuedTargetMicros = nil
+        frameIntervalMicros = Self.defaultFrameIntervalMicros
+    }
+
+    /// First position whose target exceeds `target` (upper bound), keeping equal-target order stable.
+    private func insertionIndex(forTarget target: Int64) -> Int {
+        var low = 0
+        var high = entries.count
+        while low < high {
+            let mid = (low + high) / 2
+            if entries[mid].targetMicros <= target { low = mid + 1 } else { high = mid }
+        }
+        return low
+    }
+}
+
 private extension Int64 {
     func saturatingAdding(_ other: Int64) -> Int64 {
         let (sum, overflow) = addingReportingOverflow(other)

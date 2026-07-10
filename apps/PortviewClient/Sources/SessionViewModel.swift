@@ -179,7 +179,15 @@ final class SessionViewModel: ObservableObject {
         hostLocked = false
         resetViewport()
         resetQualityDiagnostics()
+        stopSessionMedia()
+    }
+
+    /// Session-media teardown: stop audio and drop the audio-anchored A/V presentation clock — which
+    /// also releases any PTS-staged frames (decoded pixel buffers must not pool while idle). The next
+    /// session's first audio frame re-anchors a fresh clock.
+    private func stopSessionMedia() {
         audioPlayer.stop()
+        renderer.presentationClock = nil
     }
 
     /// Re-target the live stream to another of the host's displays (no reconnect).
@@ -392,7 +400,7 @@ final class SessionViewModel: ObservableObject {
             bindConnection(connection)
             let end = try await streamSession(connection)
             unbindConnection()
-            audioPlayer.stop()
+            stopSessionMedia()
             switch end {
             case .hostError, .evicted:
                 return // status already set (.failed / .idle); a host-initiated end is terminal
@@ -404,7 +412,7 @@ final class SessionViewModel: ObservableObject {
             }
         } catch {
             unbindConnection()
-            audioPlayer.stop()
+            stopSessionMedia()
             if Task.isCancelled { return }
             status = .failed("\(error)")
             return
@@ -512,10 +520,11 @@ final class SessionViewModel: ObservableObject {
                     let region = CGRect(x: frame.normalizedViewportX, y: frame.normalizedViewportY,
                                         width: frame.normalizedViewportW, height: frame.normalizedViewportH)
                     applyInbound(message)
-                    // Hand the frame + its region to the renderer; the display-link `tick` draws it
-                    // (easing the window toward the cursor target at display rate, so the pan is smooth
-                    // even when frames arrive slower than the display refresh).
-                    renderer.submit(pixelBuffer, region: region)
+                    // Hand the frame + its region + PTS to the renderer; the display-link `tick`
+                    // draws the frame due at the shared presentation clock's time (or immediately
+                    // while no audio has anchored the clock), easing the window toward the cursor
+                    // target at display rate regardless of which frame is presented.
+                    renderer.submit(pixelBuffer, region: region, ptsMicros: frame.ptsMicros)
                     if let snapshot = qualityTracker.recordDecodedFrame(frame, decodeMs: decodeMs) {
                         qualityDiagnostics = snapshot
                         sendQualityFeedback(snapshot)
@@ -551,7 +560,13 @@ final class SessionViewModel: ObservableObject {
             case .clipboardUpdate(let update):
                 UIPasteboard.general.string = update.text
             case .audioFrame(let audio):
-                audioPlayer.play(sampleRate: Double(audio.sampleRate), channels: UInt32(audio.channels), planarData: audio.data)
+                audioPlayer.play(sampleRate: Double(audio.sampleRate), channels: UInt32(audio.channels),
+                                 ptsMicros: audio.ptsMicros, planarData: audio.data)
+                // Mirror the audio-anchored clock into the video path (the first scheduled audio
+                // frame anchors it) so both streams present against one timeline.
+                if renderer.presentationClock != audioPlayer.presentationClock {
+                    renderer.presentationClock = audioPlayer.presentationClock
+                }
             case .viewport:
                 // Defensive fallback: the host now embeds the region in every VideoFrame (see above),
                 // so it no longer sends standalone `.viewport` echoes — but honor one if it arrives.
@@ -608,7 +623,7 @@ final class SessionViewModel: ObservableObject {
                 bindConnection(connection)
                 let end = (try? await streamSession(connection)) ?? .notStreamed
                 unbindConnection()
-                audioPlayer.stop()
+                stopSessionMedia()
                 if Task.isCancelled { return }
                 switch end {
                 case .hostError, .evicted:
