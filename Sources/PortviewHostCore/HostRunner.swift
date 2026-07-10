@@ -188,6 +188,11 @@ public struct HostRunner: Sendable {
     /// Start the QUIC listener, preferring `preferredPort` for a stable endpoint. If that port is
     /// unavailable, fall back to an OS-assigned one (so the host always starts). Returns the
     /// listener and the actually-bound port.
+    ///
+    /// Multiplexed (grouped) delivery is enabled for QUIC lane-splitting: every inbound tunnel
+    /// arrives as a connection group whose streams classify by first byte — legacy bare dials
+    /// arrive as single-stream groups and flow down the existing frame/serve path unchanged
+    /// (transport-verified by `LaneTransportTests`).
     static func startListener(
         identity: TLSIdentity,
         serviceName: String,
@@ -195,7 +200,8 @@ public struct HostRunner: Sendable {
     ) async throws -> (listener: PortviewListener, port: UInt16) {
         if let preferredPort {
             do {
-                let listener = try PortviewListener(quicIdentity: identity, serviceName: serviceName, port: preferredPort)
+                let listener = try PortviewListener(quicIdentity: identity, serviceName: serviceName, port: preferredPort,
+                                                    multiplexed: true)
                 do {
                     let port = try await listener.start()
                     return (listener, port.rawValue)
@@ -207,7 +213,7 @@ public struct HostRunner: Sendable {
                 print("Preferred port \(preferredPort) unavailable (\(error)); using an OS-assigned port.")
             }
         }
-        let listener = try PortviewListener(quicIdentity: identity, serviceName: serviceName)
+        let listener = try PortviewListener(quicIdentity: identity, serviceName: serviceName, multiplexed: true)
         let port = try await listener.start()
         return (listener, port.rawValue)
     }
@@ -496,7 +502,18 @@ public struct HostRunner: Sendable {
         // HostControl broadcast/file sends all enqueue onto it, so no fire-and-forget send can
         // reorder under load or outlive the session.
         let outbound = OutboundLane(connection: connection)
-        var server = ServerHandshake(displays: Self.displayInfos(from: await registry.current()), supportedCodecs: [.hevc])
+        // The token minter runs only for a lane-capable handshake (negotiated >= laneVersion) —
+        // an old client never gets a token minted or advertised (ServerHandshake stamps the
+        // negotiated version, and ServerHello carries the token iff that stamp >= laneVersion).
+        var server = ServerHandshake(displays: Self.displayInfos(from: await registry.current()), supportedCodecs: [.hevc],
+                                     mintSessionToken: LaneSessionToken.mint)
+        // Lane routing (QUIC lane-splitting, w6n.4): pumpVideo's video/audio/stats sends route
+        // onto the client's secondary lane streams once it binds them; legacy sessions — and any
+        // lane that dies or never opens — flow on primary. See HostLaneRouter for the
+        // flip/fallback rules. Video keeps its back-pressured direct drain through the router;
+        // it never rides the session's OutboundLane.
+        let router = HostLaneRouter(primary: connection)
+        var laneBindTask: Task<Void, Never>?
         let clipboard = ClipboardSync()
         clipboard.start { text in
             // Cap outbound clipboard at the sender: an over-cap copy would make an oversized frame the
@@ -532,6 +549,9 @@ public struct HostRunner: Sendable {
             clipboard.stop()
             fileReceiver.cancelAll()
             videoTask?.cancel()
+            // Stops consuming the accepted-lane stream, which revokes the token's authorization
+            // at the tunnel — a dead session's token can't bind new lanes.
+            laneBindTask?.cancel()
             currentCapture?.stop()
             outbound.finish()
             connection.close()
@@ -549,9 +569,13 @@ public struct HostRunner: Sendable {
             injector = makeInjector(for: display, cursorPump: cursorPump)
             let capture = CaptureEngine(width: display.width, height: display.height)
             currentCapture = capture
+            // A lane-death flip forces its keyframe through THIS capture's request path (the same
+            // consumeKeyframeRequest plumbing a client `.requestKeyframe` uses); re-pointed on
+            // every display switch so the request always reaches the live capture.
+            router.setKeyframeRequester { await capture.requestKeyframe() }
             let fps = requestedFPS
             let bitrate = requestedBitrate
-            videoTask = Task { await pumpVideo(connection, display: display, capture: capture, fps: fps, bitrate: bitrate, feedback: clientFeedback, emit: emit) }
+            videoTask = Task { await pumpVideo(router, display: display, capture: capture, fps: fps, bitrate: bitrate, feedback: clientFeedback, emit: emit) }
             print("Streaming display \(display.displayID) source \(display.width)x\(display.height).")
         }
 
@@ -560,7 +584,24 @@ public struct HostRunner: Sendable {
             switch message {
             case .clientHello(let hello):
                 do {
-                    try await connection.send(.serverHello(server.handle(hello)))
+                    let reply = try server.handle(hello)
+                    // Authorize secondary lane streams BEFORE the token-carrying ServerHello goes
+                    // out, so a well-behaved client can't race its lane opens past authorization.
+                    // HARD invariant (w6n.3 review): acceptLanes runs at most ONCE per primary
+                    // connection — re-authorizing on a repeat ClientHello would REPLACE the
+                    // token's authorization and reset its duplicate-lane protection.
+                    // `authorizeLanesOnce` refuses every call after the first, regardless of how
+                    // many hellos arrive; an old-version session mints no token and never enters
+                    // this branch.
+                    if let token = server.sessionToken,
+                       let lanes = router.authorizeLanesOnce({ connection.acceptLanes(sessionToken: token) }) {
+                        laneBindTask = Task {
+                            for await accepted in lanes {
+                                router.bind(accepted.lane, accepted.connection)
+                            }
+                        }
+                    }
+                    try await connection.send(.serverHello(reply))
                     if connectedDeviceID == nil {
                         // Identify the session per-connection (not by the device's stable id): on a
                         // reconnect the old session's disconnect must not evict the new one's entry.
@@ -688,11 +729,13 @@ public struct HostRunner: Sendable {
         return injector
     }
 
-    /// Capture → HEVC encode → serialize → send. The encoder is built to match the actual
-    /// pixel-buffer dimensions (points vs pixels differ on Retina), and a single bad frame is
-    /// skipped (re-requesting a keyframe) rather than aborting the whole stream.
+    /// Capture → HEVC encode → serialize → send, routed per-lane: video/audio/stats each ride
+    /// their secondary lane stream when the client bound one, and primary otherwise (see
+    /// `HostLaneRouter`). The encoder is built to match the actual pixel-buffer dimensions
+    /// (points vs pixels differ on Retina), and a single bad frame is skipped (re-requesting a
+    /// keyframe) rather than aborting the whole stream.
     static func pumpVideo(
-        _ connection: PortviewConnection,
+        _ router: HostLaneRouter,
         display: SCDisplay,
         capture: CaptureEngine,
         fps: Int = 60,
@@ -700,6 +743,10 @@ public struct HostRunner: Sendable {
         feedback: ClientFeedbackHolder? = nil,
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in }
     ) async {
+        // Bounded wait for a lane-capable client's lane streams (HostLaneRouter.laneBindWait):
+        // one that never opens them falls back to primary rather than stalling the session.
+        // Instant for legacy sessions and on re-entry (display switch).
+        await router.awaitLaneBindings()
         do {
             try capture.start(display: display, maxFPS: fps)
         } catch {
@@ -707,12 +754,12 @@ public struct HostRunner: Sendable {
             return
         }
 
-        // Forward system audio concurrently with video (same connection, separate messages).
+        // Forward system audio concurrently with video (audio lane when bound, else primary).
         let audioTask = Task {
             for await audio in capture.audioFrames {
-                try? await connection.send(.audioFrame(AudioFrame(
+                try? await router.send(.audioFrame(AudioFrame(
                     sampleRate: audio.sampleRate, channels: audio.channels,
-                    ptsMicros: audio.ptsMicros, data: audio.data)))
+                    ptsMicros: audio.ptsMicros, data: audio.data)), lane: .audio)
             }
         }
         defer { audioTask.cancel() }
@@ -769,7 +816,10 @@ public struct HostRunner: Sendable {
                 // re-cropped since this buffer was produced) so the client maps the zoom window into the
                 // region the pixels actually show — no wrong-content flash on re-crop.
                 let viewport = frame.region
-                try await connection.send(.videoFrame(VideoFrame(
+                // Primary-path errors still land in this loop's catch below (encoder rebuild +
+                // keyframe); a video-LANE error is absorbed by the router's flip, which forces
+                // the keyframe itself through the capture's request path.
+                try await router.send(.videoFrame(VideoFrame(
                     sequence: sequence,
                     ptsMicros: UInt64(max(0, CMTimeGetSeconds(frame.pts)) * 1_000_000),
                     isKeyframe: sample.isKeyframe,
@@ -778,7 +828,7 @@ public struct HostRunner: Sendable {
                     data: payload,
                     viewportNormalizedX: viewport.minX, viewportNormalizedY: viewport.minY,
                     viewportNormalizedW: viewport.width, viewportNormalizedH: viewport.height
-                )))
+                )), lane: .video)
                 let liveViewport = await capture.currentViewport()
                 if let quality = stats.snapshotIfDue(
                     displayID: UInt32(display.displayID),
@@ -787,7 +837,9 @@ public struct HostRunner: Sendable {
                     configuredBitrate: activeEncoder.averageBitRate,
                     viewport: liveViewport
                 ) {
-                    try? await connection.send(.qualityStats(quality))
+                    // Stats ride the stats lane for lane-capable clients (a video burst can't
+                    // delay the HUD); old-version sessions keep them on primary as today.
+                    try? await router.send(.qualityStats(quality), lane: .stats)
                     emit(.sessionStats(HostSessionStats(
                         throughputMbps: quality.encodedMbps,
                         fps: quality.fps,

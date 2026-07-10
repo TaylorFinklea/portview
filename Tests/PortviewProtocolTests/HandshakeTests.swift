@@ -78,11 +78,52 @@ import Testing
         if let expectedAgreed {
             let serverHello = try server.handle(hello)
             #expect(server.negotiatedVersion == expectedAgreed)
-            #expect(serverHello.protocolVersion == ProtocolVersion.current)
+            // The ServerHello is stamped with the NEGOTIATED version (not the host's own): the
+            // stamp is what version-gates the appended lane session token on the wire.
+            #expect(serverHello.protocolVersion == expectedAgreed)
         } else {
             #expect(throws: HandshakeError.versionMismatch) { _ = try server.handle(hello) }
             #expect(server.negotiatedVersion == nil)
         }
+    }
+
+    /// QUIC lane-splitting (w6n.4): a lane-capable pair (agreed version >= laneVersion) mints the
+    /// session token and both attaches it to the ServerHello and exposes it to the host wiring
+    /// (which authorizes lane streams with the SAME token).
+    @Test func laneCapableHandshakeMintsAndAttachesSessionToken() throws {
+        let token = Array(repeating: UInt8(0xC3), count: 32)
+        var server = ServerHandshake(displays: [], supportedCodecs: [.hevc],
+                                     localVersion: ProtocolVersion.laneVersion,
+                                     mintSessionToken: { token })
+        let hello = ClientHello(protocolVersion: ProtocolVersion.laneVersion,
+                                deviceID: "D", deviceName: "P", codecs: [.hevc])
+
+        let serverHello = try server.handle(hello)
+
+        #expect(server.negotiatedVersion == ProtocolVersion.laneVersion)
+        #expect(serverHello.protocolVersion == ProtocolVersion.laneVersion)
+        #expect(serverHello.sessionToken == token)
+        #expect(server.sessionToken == token)
+    }
+
+    /// Old-version passthrough (w6n.4): when a lane-capable HOST meets a pre-lane client, the
+    /// ServerHello is stamped with the negotiated (pre-lane) version and carries NO token — and
+    /// the host must not even MINT one for that session.
+    @Test func oldClientHandshakeStampsNegotiatedVersionWithoutMintingAToken() throws {
+        var server = ServerHandshake(displays: [], supportedCodecs: [.hevc],
+                                     localVersion: ProtocolVersion.laneVersion,
+                                     mintSessionToken: {
+                                         Issue.record("minted a lane session token for a pre-lane client")
+                                         return []
+                                     })
+        let hello = ClientHello(protocolVersion: 1, deviceID: "D", deviceName: "P", codecs: [.hevc])
+
+        let serverHello = try server.handle(hello)
+
+        #expect(server.negotiatedVersion == 1)
+        #expect(serverHello.protocolVersion == 1)
+        #expect(serverHello.sessionToken == nil)
+        #expect(server.sessionToken == nil)
     }
 
     /// The client handshake stores the agreed wire version (or nil on a below-minimum reject).
