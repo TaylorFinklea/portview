@@ -210,6 +210,29 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         }
     }
 
+    /// Retarget the live capture's max frame rate (the adaptive rate controller's fps output)
+    /// without rebuilding the stream. Returns `true` once the new rate is in effect; a no-op
+    /// change returns `true` without reconfiguring. Rolls the config field back on failure so the
+    /// unchanged-check baseline stays in sync with the live stream (same rationale as
+    /// `setViewport`'s rollback).
+    func setMaxFPS(_ maxFPS: Int) async -> Bool {
+        guard maxFPS > 0 else { return false }
+        let (streamOpt, configOpt) = currentStreamAndConfig()
+        guard let stream = streamOpt, let config = configOpt else { return false }
+        let interval = CMTime(value: 1, timescale: CMTimeScale(maxFPS))
+        guard config.minimumFrameInterval != interval else { return true }
+        let prior = config.minimumFrameInterval
+        config.minimumFrameInterval = interval
+        do {
+            try await stream.updateConfiguration(config)
+            return true
+        } catch {
+            config.minimumFrameInterval = prior
+            print("fps update failed: \(error)")
+            return false
+        }
+    }
+
     func stop() {
         let (stream, _) = currentStreamAndConfig()
         stream?.stopCapture { _ in }

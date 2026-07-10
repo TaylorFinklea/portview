@@ -1,0 +1,192 @@
+import Testing
+import PortviewProtocol
+@testable import PortviewHostCore
+
+/// Pure adaptive bitrate/fps policy (bead 480): sustained bad client feedback steps bitrate DOWN
+/// within `StreamParameters` clamps, recovery steps UP slowly and bounded, a healthy steady state
+/// sits still, and an explicit user-pinned bitrate is never fought.
+@Suite struct AdaptiveRateControllerTests {
+    private let setpoint = 40_000_000
+
+    private func autoController(setpoint: Int? = nil, fps: Int = 60) -> AdaptiveRateController {
+        AdaptiveRateController(mode: .auto, bitrateSetpoint: setpoint ?? self.setpoint, fpsCeiling: fps)
+    }
+
+    /// A per-interval client snapshot. `tick` perturbs `receivedFPSX100` so consecutive snapshots
+    /// are distinct, the way real 1s windows are (an unchanged snapshot means "no fresh signal").
+    private func feedback(tick: UInt32, drops: UInt32 = 0, rttMicros: UInt32 = 20_000,
+                          queueDepth: UInt16 = 0, receivedMbps: Double = 20) -> ClientFeedback {
+        ClientFeedback(
+            receivedFPSX100: 5_900 + tick,
+            receivedMbpsX100: UInt32((receivedMbps * 100).rounded()),
+            averageDecodeMsX100: 400,
+            decodeQueueDepth: queueDepth,
+            droppedFrames: drops,
+            rttMicros: rttMicros)
+    }
+
+    private func hostStats(encodedMbps: Double = 20) -> QualityStats {
+        QualityStats(
+            displayID: 1, encoderWidth: 1920, encoderHeight: 1080,
+            configuredBitrate: UInt32(setpoint),
+            encodedMbpsX100: UInt32((encodedMbps * 100).rounded()),
+            fpsX100: 6_000, averageFrameBytes: 40_000, keyframes: 1, averageEncodeMsX100: 300,
+            viewportX: 0, viewportY: 0, viewportW: 65_535, viewportH: 65_535)
+    }
+
+    @Test func holdsSetpointBeforeAnyFeedbackArrives() {
+        var controller = autoController()
+        for _ in 0..<5 {
+            let targets = controller.evaluate(AdaptiveRateController.Inputs(feedback: nil))
+            #expect(targets == AdaptiveRateController.Targets(bitrate: setpoint, fps: 60))
+        }
+    }
+
+    @Test func sustainedDropsStepBitrateDown() {
+        var controller = autoController()
+
+        // One bad interval alone is not "sustained" — no step yet (hysteresis).
+        let first = controller.evaluate(.init(feedback: feedback(tick: 1, drops: 10)))
+        #expect(first.bitrate == setpoint)
+
+        let second = controller.evaluate(.init(feedback: feedback(tick: 2, drops: 12)))
+        #expect(second.bitrate == Int(Double(setpoint) * AdaptiveRateController.downStepFactor))
+        #expect(second.bitrate >= StreamParameters.bitrateRange.lowerBound)
+        #expect(second.fps == 60)  // bitrate sheds first; fps only once bitrate is floored
+    }
+
+    @Test func sustainedHighRTTStepsBitrateDown() {
+        var controller = autoController()
+        _ = controller.evaluate(.init(feedback: feedback(tick: 1, rttMicros: 250_000)))
+        let targets = controller.evaluate(.init(feedback: feedback(tick: 2, rttMicros: 260_000)))
+        #expect(targets.bitrate < setpoint)
+    }
+
+    @Test func sustainedDeepDecodeQueueStepsBitrateDown() {
+        var controller = autoController()
+        _ = controller.evaluate(.init(feedback: feedback(tick: 1, queueDepth: 8)))
+        let targets = controller.evaluate(.init(feedback: feedback(tick: 2, queueDepth: 9)))
+        #expect(targets.bitrate < setpoint)
+    }
+
+    @Test func sustainedThroughputDeficitStepsBitrateDown() {
+        // Client receives well under what the host encoded → the network is queueing, even
+        // before drops surface.
+        var controller = autoController()
+        _ = controller.evaluate(.init(feedback: feedback(tick: 1, receivedMbps: 5), hostStats: hostStats(encodedMbps: 20)))
+        let targets = controller.evaluate(.init(feedback: feedback(tick: 2, receivedMbps: 5), hostStats: hostStats(encodedMbps: 21)))
+        #expect(targets.bitrate < setpoint)
+    }
+
+    @Test func staleFeedbackIsNotReCounted() {
+        // The holder re-serves the latest snapshot; an unchanged one must not accrue "sustained".
+        var controller = autoController()
+        let stale = feedback(tick: 1, drops: 10)
+        for _ in 0..<5 {
+            let targets = controller.evaluate(.init(feedback: stale))
+            #expect(targets.bitrate == setpoint)
+        }
+    }
+
+    @Test func intermittentBadSignalDoesNotStep() {
+        // Bad intervals separated by neutral ones (RTT between the good/bad bands) never step:
+        // the streak resets, so only genuinely sustained congestion reacts.
+        var controller = autoController()
+        for tick in 0..<8 {
+            let fb = tick.isMultiple(of: 2)
+                ? feedback(tick: UInt32(tick), drops: 10)
+                : feedback(tick: UInt32(tick), rttMicros: 150_000)
+            let targets = controller.evaluate(.init(feedback: fb))
+            #expect(targets.bitrate == setpoint)
+        }
+    }
+
+    @Test func healthySteadyStateIsStable() {
+        var controller = autoController()
+        for tick in 1...10 {
+            let targets = controller.evaluate(.init(feedback: feedback(tick: UInt32(tick)), hostStats: hostStats()))
+            #expect(targets == AdaptiveRateController.Targets(bitrate: setpoint, fps: 60))
+        }
+    }
+
+    @Test func recoveryStepsUpSlowlyBoundedBySetpoint() {
+        var controller = autoController()
+        for tick in 1...4 {  // two step-downs: 40 → 28 → 19.6 Mbps
+            _ = controller.evaluate(.init(feedback: feedback(tick: UInt32(tick), drops: 10)))
+        }
+        var previous = controller.evaluate(.init(feedback: feedback(tick: 5)))
+        #expect(previous.bitrate < setpoint)
+
+        for tick in 6...40 {
+            let targets = controller.evaluate(.init(feedback: feedback(tick: UInt32(tick))))
+            #expect(targets.bitrate >= previous.bitrate)  // recovery never dips
+            let allowed = max(Int(Double(previous.bitrate) * AdaptiveRateController.upStepFactor),
+                              previous.bitrate + AdaptiveRateController.upStepMinimum)
+            #expect(targets.bitrate <= allowed)  // each step is bounded
+            #expect(targets.bitrate <= setpoint)  // never overshoots the setpoint
+            #expect(targets.fps == 60)
+            previous = targets
+        }
+        #expect(previous.bitrate == setpoint)  // full recovery lands exactly back on the setpoint
+    }
+
+    @Test func flooredBitrateShedsFPSAndNeverLeavesClamps() {
+        var controller = autoController(setpoint: 4_000_000)
+        var last = AdaptiveRateController.Targets(bitrate: 4_000_000, fps: 60)
+        for tick in 1...60 {
+            last = controller.evaluate(.init(feedback: feedback(tick: UInt32(tick), drops: 10)))
+            #expect(StreamParameters.bitrateRange.contains(last.bitrate))
+            #expect(StreamParameters.fpsRange.contains(last.fps))
+        }
+        // Terminal state under unrelenting congestion: both floored, holding steady.
+        #expect(last == AdaptiveRateController.Targets(
+            bitrate: StreamParameters.bitrateRange.lowerBound,
+            fps: StreamParameters.fpsRange.lowerBound))
+    }
+
+    @Test func recoveryRestoresFPSFirstBoundedByCeiling() {
+        // Drive to the floor with a 30fps ceiling, then recover: fps is restored first (the most
+        // recent cut) and only up to the requested ceiling, never the global 60.
+        var controller = autoController(setpoint: 4_000_000, fps: 30)
+        for tick in 1...60 {
+            _ = controller.evaluate(.init(feedback: feedback(tick: UInt32(tick), drops: 10)))
+        }
+        var sawFPSRecoverFirst = false
+        var last = AdaptiveRateController.Targets(bitrate: 0, fps: 0)
+        for tick in 61...120 {
+            last = controller.evaluate(.init(feedback: feedback(tick: UInt32(tick))))
+            #expect(last.fps <= 30)
+            if last.fps < 30 {
+                // While fps is still recovering, bitrate must not move yet.
+                #expect(last.bitrate == StreamParameters.bitrateRange.lowerBound)
+                sawFPSRecoverFirst = true
+            }
+        }
+        #expect(sawFPSRecoverFirst)
+        #expect(last == AdaptiveRateController.Targets(bitrate: 4_000_000, fps: 30))
+    }
+
+    @Test func initClampsSetpointsToStreamParameterRanges() {
+        var high = AdaptiveRateController(mode: .auto, bitrateSetpoint: 500_000_000, fpsCeiling: 240)
+        #expect(high.evaluate(.init(feedback: nil)) == AdaptiveRateController.Targets(
+            bitrate: StreamParameters.bitrateRange.upperBound,
+            fps: StreamParameters.fpsRange.upperBound))
+
+        var low = AdaptiveRateController(mode: .auto, bitrateSetpoint: 1, fpsCeiling: 1)
+        #expect(low.evaluate(.init(feedback: nil)) == AdaptiveRateController.Targets(
+            bitrate: StreamParameters.bitrateRange.lowerBound,
+            fps: StreamParameters.fpsRange.lowerBound))
+    }
+
+    @Test func pinnedModeNeverTouchesBitrate() {
+        // The user pinned an explicit bitrate (bitrateMbps != 0 → targetBitrate != 0): the
+        // controller must not fight it, no matter how bad the feedback looks.
+        var controller = AdaptiveRateController(mode: .pinned, bitrateSetpoint: 8_000_000, fpsCeiling: 60)
+        for tick in 1...10 {
+            let targets = controller.evaluate(.init(
+                feedback: feedback(tick: UInt32(tick), drops: 50, rttMicros: 400_000, queueDepth: 10),
+                hostStats: hostStats()))
+            #expect(targets == AdaptiveRateController.Targets(bitrate: 8_000_000, fps: 60))
+        }
+    }
+}

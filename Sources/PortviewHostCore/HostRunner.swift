@@ -415,10 +415,9 @@ public struct HostRunner: Sendable {
         }
     }
 
-    /// Holds the latest `ClientFeedback` snapshot (tag 29) a connection's client reported, for a
-    /// future host-side quality controller to read (the control policy is a separate bead — this is
-    /// storage only). Lock-guarded (mirroring `HostControl`) so the inbound dispatch task can write
-    /// while the encode path reads.
+    /// Holds the latest `ClientFeedback` snapshot (tag 29) a connection's client reported, read by
+    /// the video pump's `AdaptiveRateController` on each stats interval. Lock-guarded (mirroring
+    /// `HostControl`) so the inbound dispatch task can write while the encode path reads.
     final class ClientFeedbackHolder: @unchecked Sendable {
         private let lock = NSLock()
         private var latestValue: ClientFeedback?
@@ -505,8 +504,8 @@ public struct HostRunner: Sendable {
             Task { try? await connection.send(.clipboardUpdate(ClipboardUpdate(text: text))) }
         }
         let fileReceiver = FileReceiver()
-        // Latest client-reported receive-side quality snapshot for THIS connection, held for a
-        // future quality controller (separate bead) to read.
+        // Latest client-reported receive-side quality snapshot for THIS connection, read by the
+        // video pump's adaptive rate controller each stats interval.
         let clientFeedback = ClientFeedbackHolder()
         // Identifies this session for the host UI; set once the client handshake names the device.
         var connectedDeviceID: String?
@@ -547,7 +546,7 @@ public struct HostRunner: Sendable {
             currentCapture = capture
             let fps = requestedFPS
             let bitrate = requestedBitrate
-            videoTask = Task { await pumpVideo(connection, display: display, capture: capture, fps: fps, bitrate: bitrate, emit: emit) }
+            videoTask = Task { await pumpVideo(connection, display: display, capture: capture, fps: fps, bitrate: bitrate, feedback: clientFeedback, emit: emit) }
             print("Streaming display \(display.displayID) source \(display.width)x\(display.height).")
         }
 
@@ -693,6 +692,7 @@ public struct HostRunner: Sendable {
         capture: CaptureEngine,
         fps: Int = 60,
         bitrate: Int? = nil,
+        feedback: ClientFeedbackHolder? = nil,
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in }
     ) async {
         do {
@@ -718,6 +718,8 @@ public struct HostRunner: Sendable {
         var sequence: UInt64 = 0
         var needsKeyframe = true
         var stats = QualityStatsAccumulator()
+        var rateController: AdaptiveRateController?
+        var captureFPS = fps  // the fps actually applied to the SCStream
 
         for await frame in capture.frames {
             if Task.isCancelled { break }  // display switch / disconnect — stop this capture promptly
@@ -725,10 +727,18 @@ public struct HostRunner: Sendable {
             let bufferHeight = CVPixelBufferGetHeight(frame.pixelBuffer)
             if encoder == nil || bufferWidth != encoderWidth || bufferHeight != encoderHeight {
                 do {
-                    encoder = try VideoEncoder(width: bufferWidth, height: bufferHeight, averageBitRate: bitrate)
+                    let rebuilt = try VideoEncoder(width: bufferWidth, height: bufferHeight, averageBitRate: bitrate)
+                    encoder = rebuilt
                     encoderWidth = bufferWidth
                     encoderHeight = bufferHeight
                     needsKeyframe = true
+                    // (Re)seed the adaptive controller from THIS encoder's starting bitrate (the
+                    // width·height heuristic in Auto, the pinned value otherwise): a rebuild is a
+                    // new stream size, so adaptation restarts from its setpoint.
+                    rateController = AdaptiveRateController(
+                        mode: bitrate == nil ? .auto : .pinned,
+                        bitrateSetpoint: rebuilt.averageBitRate,
+                        fpsCeiling: fps)
                     print("Encoder ready for \(bufferWidth)x\(bufferHeight) buffers.")
                 } catch {
                     print("encoder create error: \(error)")
@@ -776,6 +786,18 @@ public struct HostRunner: Sendable {
                         encodeMs: quality.averageEncodeMs,
                         displayWidth: display.width,
                         displayHeight: display.height)))
+                    // Steer next interval's bitrate + capture fps off the freshest client feedback
+                    // (Auto mode only — see AdaptiveRateController). The bitrate applies to the LIVE
+                    // VideoToolbox session (no rebuild); fps retargets via SCStream reconfigure.
+                    if let targets = rateController?.evaluate(AdaptiveRateController.Inputs(
+                        feedback: feedback?.latest(), hostStats: quality)) {
+                        if targets.bitrate != activeEncoder.averageBitRate {
+                            activeEncoder.setAverageBitRate(targets.bitrate)
+                        }
+                        if targets.fps != captureFPS, await capture.setMaxFPS(targets.fps) {
+                            captureFPS = targets.fps
+                        }
+                    }
                 }
             } catch {
                 // Drop the wedged encoder so the next frame rebuilds a fresh VideoToolbox session
