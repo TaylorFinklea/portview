@@ -5,9 +5,11 @@ public struct ServerHello: WireMessage {
     public var displays: [DisplayInfo]
     public var chosenCodec: Codec
     /// Host-minted per-session token secondary QUIC lane streams must present in their
-    /// `LanePreamble`. Append-only field placed AFTER `chosenCodec`; encoded only when non-nil,
-    /// and decoded only when `protocolVersion >= ProtocolVersion.laneVersion` — an old peer whose
-    /// decode stops after `chosenCodec` is unaffected.
+    /// `LanePreamble`. Append-only field placed AFTER `chosenCodec`. On the wire exactly when
+    /// `protocolVersion >= ProtocolVersion.laneVersion` — encode and decode share that one
+    /// predicate, so the codec is total: a lane-version hello always carries the token (nil is a
+    /// local construction bug), a pre-lane hello never does (a token set on one is not encoded),
+    /// and an old peer whose decode stops after `chosenCodec` is unaffected.
     public var sessionToken: [UInt8]?
 
     public init(protocolVersion: UInt16, displays: [DisplayInfo], chosenCodec: Codec, sessionToken: [UInt8]? = nil) {
@@ -20,7 +22,13 @@ public struct ServerHello: WireMessage {
         w.putVarUInt(UInt64(displays.count))
         for d in displays { d.encode(into: &w) }
         w.putUInt8(chosenCodec.rawValue)
-        if let sessionToken {
+        if protocolVersion >= ProtocolVersion.laneVersion {
+            // Same predicate as decode, so encode can never produce bytes its own decoder rejects.
+            // Never remote-reachable: the stamped version never exceeds the host's own
+            // ProtocolVersion.current, and a host that stamps a lane version mints the token first.
+            guard let sessionToken, sessionToken.count == LanePreamble.tokenLength else {
+                preconditionFailure("ServerHello at laneVersion requires a \(LanePreamble.tokenLength)-byte sessionToken")
+            }
             w.putBytes(sessionToken)
         }
     }

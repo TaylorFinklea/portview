@@ -525,6 +525,10 @@ private func countingPinnedClientParameters(pin: Data, evaluations: Bag<Int>) ->
         #expect(Set(helloIDs.snapshot) == ["DD-1", "DD-2"])
         let total = acceptedTotal.count
         #expect(total >= 2, "listener must deliver at least the data-carrying streams (saw \(total))")
+        // The quirk itself: the spec's per-tunnel cap budgeting ("~2x the lane count") rests on
+        // over-delivery persisting with a group client — pin it so an OS change that fixes the
+        // quirk fails this canary and the budget gets revisited.
+        #expect(total > 2, "double-delivery quirk no longer observed (saw \(total)) — revisit the per-tunnel cap budget in the lane-splitting spec")
 
         serverTask.cancel()
         laneA.close()

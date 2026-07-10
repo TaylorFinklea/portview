@@ -30,9 +30,10 @@ public struct LanePreamble: Equatable, Sendable {
     }
 
     /// Decode a preamble from raw stream bytes. Throws `WireError.unknownEnum` for a lane byte
-    /// outside `Lane`'s known cases (caller closes just that stream; session unaffected — see the
-    /// stream-classification rule at `Lane`) and `WireError.truncated` if fewer than
-    /// `tokenLength` token bytes are available.
+    /// outside `Lane`'s known cases (caller closes just that stream; session unaffected — the
+    /// first-byte classification rule lives in the "Stream classification" section of
+    /// `docs/superpowers/specs/2026-07-01-quic-lane-splitting.md`) and `WireError.truncated` if
+    /// fewer than `tokenLength` token bytes are available.
     public static func decode(_ bytes: [UInt8]) throws -> LanePreamble {
         var r = BinaryReader(bytes)
         let raw = try r.uint8()
