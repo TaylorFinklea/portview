@@ -734,7 +734,9 @@ public struct HostRunner: Sendable {
                     needsKeyframe = true
                     // (Re)seed the adaptive controller from THIS encoder's starting bitrate (the
                     // width·height heuristic in Auto, the pinned value otherwise): a rebuild is a
-                    // new stream size, so adaptation restarts from its setpoint.
+                    // new stream size, so adaptation restarts from its setpoint. The restart also
+                    // clears the crop boost until the next stats interval re-applies it, and
+                    // congestion attenuation does not survive a zoom-rung crossing.
                     rateController = AdaptiveRateController(
                         mode: bitrate == nil ? .auto : .pinned,
                         bitrateSetpoint: rebuilt.averageBitRate,
