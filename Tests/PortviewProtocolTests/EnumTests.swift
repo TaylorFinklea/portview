@@ -9,6 +9,26 @@ import Testing
         #expect(Lane.audio.rawValue == 3)
         #expect(Lane.clipboard.rawValue == 4)
         #expect(Lane.files.rawValue == 5)
+        #expect(Lane.stats.rawValue == 6)
+    }
+
+    /// Pins the exact SET of (case, rawValue) pairs in `Lane.allCases` — mirrors
+    /// `messageTypeAllCasesMatchesExpectedSet` below. `Lane`'s raw value is wire-frozen (it's
+    /// the first byte of every `LanePreamble`), so any future case must update this set
+    /// explicitly instead of silently colliding raw values.
+    @Test func laneAllCasesMatchesExpectedSet() {
+        let expected: Set<UInt8> = [
+            Lane.control.rawValue,
+            Lane.input.rawValue,
+            Lane.video.rawValue,
+            Lane.audio.rawValue,
+            Lane.clipboard.rawValue,
+            Lane.files.rawValue,
+            Lane.stats.rawValue,
+        ]
+        let actual = Set(Lane.allCases.map(\.rawValue))
+        #expect(actual == expected)
+        #expect(Lane.allCases.count == expected.count)
     }
 
     @Test func codecRawValuesAreStable() {

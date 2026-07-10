@@ -17,6 +17,12 @@ public enum ProtocolVersion {
     /// skip- or append-tolerated (see the type's bump rules).
     public static let minimum: UInt16 = 1
 
+    /// Wire version at which `ServerHello` gained its appended `sessionToken` field (QUIC lane
+    /// splitting, `screenshare-w6n`). A `ServerHello` whose `protocolVersion` is below this omits
+    /// the field entirely on the wire; decode leaves `sessionToken` `nil` in that case, so an old
+    /// peer that stops decoding after `chosenCodec` is unaffected.
+    public static let laneVersion: UInt16 = 2
+
     /// Returns the agreed version (the lower of the two), or `nil` if it falls below ``minimum``.
     public static func negotiate(local: UInt16, remote: UInt16) -> UInt16? {
         let agreed = Swift.min(local, remote)

@@ -42,4 +42,41 @@ private func roundTrip<M: WireMessage>(_ message: M) throws -> M {
             _ = try ClientHello(from: &r)
         }
     }
+
+    @Test func serverHelloWithSessionTokenRoundTrips() throws {
+        let m = ServerHello(
+            protocolVersion: ProtocolVersion.laneVersion,
+            displays: [DisplayInfo(id: 1, name: "Built-in", width: 3456, height: 2234, scaleX100: 200)],
+            chosenCodec: .hevc,
+            sessionToken: (0..<32).map { UInt8($0) }
+        )
+        #expect(try roundTrip(m) == m)
+        #expect(try roundTrip(m).sessionToken == m.sessionToken)
+    }
+
+    /// Old-version wire bytes (`protocolVersion` below `laneVersion`) never carry a trailing
+    /// token; decode leaves `sessionToken` `nil` — the "old client stops after chosenCodec"
+    /// tolerance the field's presence gate exists for.
+    @Test func oldVersionServerHelloDecodesWithNoSessionToken() throws {
+        let m = ServerHello(protocolVersion: 1, displays: [], chosenCodec: .hevc)
+        var w = BinaryWriter()
+        m.encode(into: &w)
+        var r = BinaryReader(w.bytes)
+        let decoded = try ServerHello(from: &r)
+        #expect(decoded.sessionToken == nil)
+        #expect(r.isAtEnd)
+    }
+
+    /// New-version wire bytes (`protocolVersion >= laneVersion`) carry the trailing token; decode
+    /// reads it back out.
+    @Test func newVersionServerHelloDecodesWithSessionToken() throws {
+        let token = (0..<32).map { UInt8($0) }
+        let m = ServerHello(protocolVersion: ProtocolVersion.laneVersion, displays: [], chosenCodec: .hevc, sessionToken: token)
+        var w = BinaryWriter()
+        m.encode(into: &w)
+        var r = BinaryReader(w.bytes)
+        let decoded = try ServerHello(from: &r)
+        #expect(decoded.sessionToken == token)
+        #expect(r.isAtEnd)
+    }
 }

@@ -4,9 +4,15 @@ public struct ServerHello: WireMessage {
     public var protocolVersion: UInt16
     public var displays: [DisplayInfo]
     public var chosenCodec: Codec
+    /// Host-minted per-session token secondary QUIC lane streams must present in their
+    /// `LanePreamble`. Append-only field placed AFTER `chosenCodec`; encoded only when non-nil,
+    /// and decoded only when `protocolVersion >= ProtocolVersion.laneVersion` — an old peer whose
+    /// decode stops after `chosenCodec` is unaffected.
+    public var sessionToken: [UInt8]?
 
-    public init(protocolVersion: UInt16, displays: [DisplayInfo], chosenCodec: Codec) {
+    public init(protocolVersion: UInt16, displays: [DisplayInfo], chosenCodec: Codec, sessionToken: [UInt8]? = nil) {
         self.protocolVersion = protocolVersion; self.displays = displays; self.chosenCodec = chosenCodec
+        self.sessionToken = sessionToken
     }
 
     public func encode(into w: inout BinaryWriter) {
@@ -14,6 +20,9 @@ public struct ServerHello: WireMessage {
         w.putVarUInt(UInt64(displays.count))
         for d in displays { d.encode(into: &w) }
         w.putUInt8(chosenCodec.rawValue)
+        if let sessionToken {
+            w.putBytes(sessionToken)
+        }
     }
 
     public init(from r: inout BinaryReader) throws {
@@ -25,5 +34,10 @@ public struct ServerHello: WireMessage {
         let raw = try r.uint8()
         guard let c = Codec(rawValue: raw) else { throw WireError.unknownEnum("Codec", UInt64(raw)) }
         chosenCodec = c
+        if protocolVersion >= ProtocolVersion.laneVersion {
+            sessionToken = try r.readBytes(LanePreamble.tokenLength)
+        } else {
+            sessionToken = nil
+        }
     }
 }

@@ -50,6 +50,21 @@ import Testing
         #expect(Frame.encodeAny(.serverHello(m)) == [24, 2, 0, 1, 1, 0, 0, 0, 1, 4, 77, 97, 105, 110, 0, 0, 7, 128, 0, 0, 4, 56, 0, 200, 1])
     }
 
+    /// New-version ServerHello (`protocolVersion >= ProtocolVersion.laneVersion`): the
+    /// append-only `sessionToken` field is present after `chosenCodec`. Complements
+    /// `serverHelloWireBytesArePinned` above, which pins the old-version (no token) vector.
+    @Test func serverHelloWithSessionTokenWireBytesArePinned() {
+        let token = Array(repeating: UInt8(0x99), count: 32)
+        let m = ServerHello(protocolVersion: ProtocolVersion.laneVersion,
+                             displays: [DisplayInfo(id: 1, name: "Main", width: 1920, height: 1080, scaleX100: 200)],
+                             chosenCodec: .hevc, sessionToken: token)
+        #expect(Frame.encodeAny(.serverHello(m)) == [
+            56, 2, 0, 2, 1, 0, 0, 0, 1, 4, 77, 97, 105, 110, 0, 0, 7, 128, 0, 0, 4, 56, 0, 200, 1,
+            153, 153, 153, 153, 153, 153, 153, 153, 153, 153, 153, 153, 153, 153, 153, 153,
+            153, 153, 153, 153, 153, 153, 153, 153, 153, 153, 153, 153, 153, 153, 153, 153,
+        ])
+    }
+
     @Test func startSessionWireBytesArePinned() {
         let m = StartSession(displayID: 1, codec: .h264, maxWidth: 1920, maxHeight: 1080, maxFPS: 60, targetBitrate: 8_000_000)
         #expect(Frame.encodeAny(.startSession(m)) == [20, 3, 0, 0, 0, 1, 0, 0, 0, 7, 128, 0, 0, 4, 56, 0, 60, 0, 122, 18, 0])
