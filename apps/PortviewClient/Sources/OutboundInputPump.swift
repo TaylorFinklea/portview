@@ -14,8 +14,8 @@ final class OutboundInputPump {
     private let wakeContinuation: AsyncStream<Void>.Continuation
     private var task: Task<Void, Never>?
 
-    /// Production: drain into a live connection.
-    convenience init(connection: PortviewConnection) {
+    /// Production: drain into a live session (sends ride the primary stream).
+    convenience init(connection: PortviewClientSession) {
         self.init(sink: { message in try? await connection.send(message) })
     }
 

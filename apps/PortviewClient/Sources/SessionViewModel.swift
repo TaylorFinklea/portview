@@ -62,7 +62,7 @@ final class SessionViewModel: ObservableObject {
     private let decoder = VideoDecoder()
     private let audioPlayer = AudioPlayer()
     private var task: Task<Void, Never>?
-    private var connection: PortviewConnection?
+    private var connection: PortviewClientSession?
     /// Ordered outbound input lane bound to `connection` (created/torn down with it via bind/unbind).
     private var outboundPump: OutboundInputPump?
     /// Mac display size in points (from ServerHello); used to predict the cursor locally and to
@@ -359,13 +359,13 @@ final class SessionViewModel: ObservableObject {
         }
     }
 
-    /// Closes the bound connection's transport. Captured at bind (production = the connection's
+    /// Closes the bound connection's transport. Captured at bind (production = the session's
     /// `close()`); a settable seam so tests can assert teardown closes the connection — a concrete
-    /// `PortviewConnection` can't be constructed without a live socket.
+    /// `PortviewClientSession` can't be constructed without a live socket.
     var closeConnection: (() -> Void)?
 
-    /// Bind the ordered outbound input lane to a freshly-connected connection.
-    private func bindConnection(_ connection: PortviewConnection) {
+    /// Bind the ordered outbound input lane to a freshly-connected session.
+    private func bindConnection(_ connection: PortviewClientSession) {
         self.connection = connection
         closeConnection = { connection.close() }
         outboundPump = OutboundInputPump(connection: connection)
@@ -426,12 +426,15 @@ final class SessionViewModel: ObservableObject {
     }
 
     /// Try each candidate endpoint in order; return the first whose pinned QUIC handshake succeeds.
-    private func connectFirst(_ endpoints: [NWEndpoint], pin: Data) async throws -> (PortviewConnection, NWEndpoint) {
+    /// Dials through a `PortviewTunnel` (one QUIC tunnel, primary stream opened on it) so a
+    /// lane-capable host can later carry video/audio/stats on secondary streams; against an old
+    /// host the tunnel's primary stream behaves exactly like today's bare connection.
+    private func connectFirst(_ endpoints: [NWEndpoint], pin: Data) async throws -> (PortviewClientSession, NWEndpoint) {
         var lastError: Error?
         for endpoint in endpoints {
             if Task.isCancelled { throw CancellationError() }
             do {
-                let connection = try await PortviewConnection.connectQUIC(to: endpoint, pinnedCertificateSHA256: pin)
+                let connection = try await PortviewClientSession.connectQUIC(to: endpoint, pinnedCertificateSHA256: pin)
                 return (connection, endpoint)
             } catch {
                 lastError = error
@@ -470,7 +473,7 @@ final class SessionViewModel: ObservableObject {
 
     /// Run the handshake then the inbound loop for one connection. Returns when the connection
     /// closes (`.streamed`/`.notStreamed`) or the host reports a terminal error (`.hostError`).
-    private func streamSession(_ connection: PortviewConnection) async throws -> SessionEnd {
+    private func streamSession(_ connection: PortviewClientSession) async throws -> SessionEnd {
         // Fresh inbound-transfer slate per attempt (incl. each reconnect): release any orphaned
         // partial transfer from a dropped session and clear its stale "Receiving…" status.
         incomingFiles.removeAll()
@@ -500,6 +503,14 @@ final class SessionViewModel: ObservableObject {
                 )
                 try await connection.send(.startSession(start))
                 client.didStartStreaming()
+                // Lane-capable host: the token on ServerHello (present iff its protocolVersion
+                // >= ProtocolVersion.laneVersion) authorizes the three secondary lane streams
+                // (video/audio/stats). Open them — any failure degrades silently back to
+                // primary (the host has a bounded fallback). Old hosts carry no token, so
+                // old-host sessions never attempt a lane open and behave exactly as today.
+                if let sessionToken = hello.sessionToken {
+                    connection.openLanes(sessionToken: sessionToken)
+                }
                 // Remember this host with the connection's RESOLVED concrete IP — this is what lets a
                 // discovered (Bonjour `.service`) pairing persist, and a moved saved Mac refresh.
                 if let (host, port) = ReconnectPlanning.hostPort(from: connection.resolvedRemoteEndpoint),

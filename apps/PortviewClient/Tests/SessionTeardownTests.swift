@@ -5,7 +5,7 @@ import XCTest
 /// Every session teardown must CLOSE the live transport, not just drop the reference: the
 /// non-user-initiated ends (stream end, error, reconnect drop) all funnel through the same
 /// unbind chokepoint as `disconnect()`, so asserting the chokepoint closes covers them all.
-/// (`closeConnection` is the seam captured at bind — a concrete `PortviewConnection` needs a
+/// (`closeConnection` is the seam captured at bind — a concrete `PortviewClientSession` needs a
 /// live socket, so tests inject the closure directly.)
 @MainActor
 final class SessionTeardownTests: XCTestCase {
