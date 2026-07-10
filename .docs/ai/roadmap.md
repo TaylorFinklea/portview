@@ -33,15 +33,15 @@ script: `.docs/ai/phases/device-verify-plan-2026-07-08.md`.
 ## Now / Next / Later
 
 ### Now
-- [ ] **Consolidated device-verify session** (human + Roshar + Mac, ~1 hr) — one sitting clears all 12 human-gated beads; ordered script with pass criteria: `.docs/ai/phases/device-verify-plan-2026-07-08.md`. Closing `89q` unblocks `2ee`; `pkb` unblocks `2ws`; `11s` numbers feed `90p`/`480` tuning.
-- [ ] **Fleet: work `bd ready`** (Opus / GPT / Conductor cycles). Root of the biggest chain = `vs9` (latency harness, senior/S) → unlocks the whole `w6n` lane wave. Independent ready work: `480`, `42r`, `cqv.4`, `cqv.5`, `90p`, `627`, `b1l`, `8bm` (lead), and re-wake root `8n1.1` (junior/S). Every dispatchable carries `tier_floor`/`complexity`/`verify_cmd` in bd **metadata**. Sweeps `cqv.4`/`cqv.5` run last (repo-wide churn).
-- [ ] **User-present**: (a) review + push the unpushed commits on `main`; (b) answer the `l4y` settings/onboarding questions; (c) `cqv.2` notarization (Apple-account-gated).
-- [ ] **Dedicated security session** for the mutual-auth track — EPIC `screenshare-1nt`: `7jl` enrollment-trust decision → `5yw` PairingStore → `9m2` enforcement. Spec: `docs/superpowers/specs/2026-07-01-revocable-pairing-mutual-auth.md`. Deliberately kept out of fleet dispatch (standing rule).
+- [ ] **Consolidated device-verify session** (human + Roshar + Mac, ~1 hr) — one sitting clears all 12 human-gated beads; ordered script with pass criteria: `.docs/ai/phases/device-verify-plan-2026-07-08.md`. Closing `89q` unblocks `2ee`; `pkb` unblocks `2ws`; `11s` numbers feed `90p`/`480` tuning. NEW since the plan was written: `w6n.6` lane A/B (activation lever documented on the bead — lanes are landed but DORMANT, do not bump `ProtocolVersion.current` before this A/B) and a listen-for-audio-ticks check under the `ins` umbrella (per-buffer hostTime scheduling, b1l review).
+- [x] **Fleet: work `bd ready`** — DONE 2026-07-09/10 (Fable in-session, 16 beads, 5 waves, every bead adversarially reviewed + findings fixed; ADR decisions.md 2026-07-10). Suite 304→~440 tests. Remaining fleet-ables: `s86` (boost-aware reseed), `jc3` (auto/pinned mapping pin); `8n1.2`/`8n1.3` (re-wake host+client) now unblocked by `8n1.1`.
+- [ ] **User-present**: (a) review + push the unpushed commits on `main` (~24 from the fleet session — incl. SECURITY.md, worth a read before the repo goes public); (b) answer the `l4y` settings/onboarding questions; (c) `cqv.2` notarization (Apple-account-gated).
+- [ ] **Dedicated security session** for the mutual-auth track — EPIC `screenshare-1nt`: `7jl` enrollment-trust decision → `5yw` PairingStore → `9m2` enforcement. Spec: `docs/superpowers/specs/2026-07-01-revocable-pairing-mutual-auth.md`. Deliberately kept out of fleet dispatch (standing rule). ADD to its agenda: lane session-token hygiene (constant-time compare + never-log — marker comment in `LaneMultiplex.swift`, per w6n.3 close).
 
 ### Next
-- [ ] QUIC lane-splitting phase 1 lands (epic `w6n`) → Tailscale A/B (`w6n.6`) decides phase 2 (`10p`).
-- [ ] CloudKit re-wake lands (epic `8n1`) → device-verify (`8n1.4`).
-- [ ] Lip-sync completion: `b1l` (present-by-PTS) → `ins` (device umbrella).
+- [x] QUIC lane-splitting phase 1 lands (epic `w6n`) — DONE 2026-07-10 (w6n.1–.5 closed; loopback-verified, DORMANT until the `w6n.6` A/B flips `ProtocolVersion.current`). → Tailscale A/B (`w6n.6`) decides phase 2 (`10p`).
+- [ ] CloudKit re-wake lands (epic `8n1`) — `8n1.1` core DONE 2026-07-10 (evaluate() contract in its close reason); `8n1.2` host + `8n1.3` client now unblocked → device-verify (`8n1.4`).
+- [x] Lip-sync foundation: `b1l` (present-by-PTS) DONE 2026-07-10 → `ins` (device umbrella) remains.
 - [ ] Settings + first-run/TCC implementation beads (decomposed from `l4y` once answered).
 
 ### Later

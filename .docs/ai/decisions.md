@@ -2,6 +2,56 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-10] Fleet session: injectable-seam test policy, outbound-lane ownership, lanes landed DORMANT (ACCEPTED)
+
+**Context**: Fable fleet session executed 16 beads (waves: vs9/627/8n1.1/480/42r → w6n.1/w6n.2/90p/b1l
+→ w6n.3/8bm → w6n.4/w6n.5 + xgy → cqv.4/cqv.5, plus the 57u live-input incident bead), every bead
+adversarially reviewed, all review findings fixed before close. Load-bearing decisions beyond
+commit messages:
+
+1. **Tests must never touch live system surfaces — injectable seams are policy, not preference.**
+   `InputInjectorGateTests` typed "hi"+Return into the user's focused app on every `swift test`
+   run: the dev terminal holds Accessibility, so CGEvent `.post()` from tests is LIVE — the
+   "posting is inert without permission" assumption was false, and the test's seam (`didInject`)
+   observed the effect instead of interposing it. All CGEvent posting now exits via
+   `InputInjector.postEvent` (default = real HID post; tests stub it), and the rule generalizes:
+   any live surface (CGEvent, NSPasteboard, audible audio, IOPM) gets a seam AT the effect
+   boundary (KeepAwake's backend was the precedent). `bd remember` key: test-live-side-effects.
+2. **One session-owned ordered outbound lane (bead 8bm)**: `OutboundLane` (ordered single-drain,
+   coalescing keys, injectable sink) owned by `serveSession`, finished in its teardown defer;
+   clipboard/broadcast/file sends ride it (no fire-and-forget `Task { send }` survives).
+   **Back-pressure over queuing for bulk**: `send(_:)` suspends until the sink ran, so file
+   transfers keep strict order while at most ONE 64 KiB chunk ever sits between two control
+   messages (the review showed order-vs-latency were re-coupled by naive serialization).
+   `disconnectAll` deliberately stays direct — the teardown path must sequence close after the
+   bye send, and the lane has no completion hook for its own owner's death.
+3. **ReWake state separation (bead 8n1.1 review)**: beacon epochs are the HOST's opaque ordering
+   values (dedupe/replay only — spec permits counters); "when did this client last act" is
+   separate client-clock state (`lastActedAt`). Deriving act-times from epochs made the rate
+   limit inert for counter epochs. Contract for 8n1.2/8n1.3:
+   `evaluate(beacon:savedHosts:lastHandledEpochs:lastActedAt:now:)` — caller persists both maps.
+4. **`AsyncGate` serializes CaptureEngine config updates (bead 480 review)**: `setViewport` and
+   `setMaxFPS` both run mutate→`await updateConfiguration`→rollback on the SAME config object;
+   `NSLock` can't span the await and actors are reentrant at suspension points, so a small FIFO
+   continuation-based mutex guards the critical sections. Interim until the planned full actor
+   conversion of CaptureEngine.
+5. **QUIC lanes landed end-to-end but DORMANT (epic w6n phase 1)**: stream-tunnel association via
+   `NWListener.newConnectionGroupHandler` (spike-proven: a flat listener cannot associate —
+   peer identities compare equal across tunnels, stream ids collide; grouped delivery REPLACES
+   flat, legacy dials arrive as single-stream groups); first-byte classifier with the invariant
+   "no legitimate first frame has bodyLength ≤ 6" (golden-guarded); per-tunnel allowance
+   16 bidi/4 uni budgeting 2× for the spike-pinned double-delivery quirk.
+   **`ProtocolVersion.current` deliberately stays 1**: activating lanes before ANY on-device
+   verification would put an unverified transport under all 12 pending device-verify beads. The
+   one-line bump (current → laneVersion) is the A/B lever for `w6n.6`, recorded on that bead.
+   **Flip contract**: a dead lane redirects sends within the SAME pumpVideo (keyframe via the
+   capture-request path) and must NEVER restart the pump — the client `StaleVideoGuard` depends
+   on it; its cross-source staleness is two-axis (sequence OR capture PTS, the PTS axis being
+   what recovers a pump restart landing inside a flip window).
+6. **Token-compare hygiene deferred**: lane session-token comparison is plain (marked in-code);
+   constant-time compare + never-log discipline belongs to the dedicated security session with
+   the 1nt track (standing rule).
+
 ## [2026-07-08] bd metadata is the canonical triage home + deliberate-untriage convention + next waves filed (ACCEPTED)
 
 **Context**: Fable planning day (no code). Audit finding: **zero** beads in the database carried
