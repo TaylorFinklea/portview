@@ -52,3 +52,23 @@ bd close screenshare-ed4 screenshare-36p screenshare-1wm screenshare-ve5 --reaso
 ```
 
 Then check what unblocked: `bd ready` (expect 2ee, 2ws to surface; tuning notes from 11s/89q go into 90p/2ws).
+
+## Addendum 2026-07-11 — staged builds + new checks from the fleet session
+
+Builds staged for this plan: host at `/Applications/PortviewHost.app` and client installed on
+Roshar, both from commit `5c033ed` (post-fleet: reducer, PTS A/V presentation, dormant lane
+client, per-source SAS limiter, os.Logger host).
+
+- **Leg 2 addition (PTS presentation, bead b1l)**: video now presents by PTS instead of
+  newest-wins — motion should feel the same or better; if panning feels LAGGIER than before,
+  note it (frame-selection tuning, not a re-crop issue).
+- **Leg 3 addition (audio ticks, b1l review)**: during several minutes of continuous host audio,
+  listen for PERIODIC clicks/ticks (per-buffer hostTime scheduling under clock drift). If heard →
+  note it; the fix direction is documented in the b1l close reason.
+- **Leg 5 extension (lane A/B, bead w6n.6)**: lanes are landed but DORMANT. The A/B lever is one
+  line — set `ProtocolVersion.current = ProtocolVersion.laneVersion`, rebuild host + client,
+  re-run the ve5 scenario under induced loss, compare input latency. Full instructions in
+  `bd show w6n.6` notes. Do NOT flip it for the rest of this plan.
+- **NOT in this sitting (bead 8n1.4, re-wake)**: needs the 8n1.3 client landed on the phone AND
+  entitlement activation with an Apple ID signed into Xcode (`PORTVIEW_HOST_ENTITLEMENTS` opt-in
+  via `Portview.local.xcconfig`, client aps-environment) — separate sitting.

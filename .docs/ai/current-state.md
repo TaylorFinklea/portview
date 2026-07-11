@@ -6,6 +6,15 @@
 
 `main`
 
+## Latest Session (2026-07-10/11 continuation — re-wake code-complete; device-test builds staged; PUSHED)
+
+- **CloudKit re-wake epic (8n1) code-complete**: 8n1.2 host (HostBeaconWriter behind injectable BeaconStore, CK edge with .changedKeys + zoneNotFound retry + SecTask entitlement guard; nudge row gated on .ready + isAvailable after review medium; reviewed SHIP_WITH_FIXES, all fixed) + 8n1.3 client (all five spec-2a plumbing items, pure ReWakeBackgroundHandler sim-tested, tap-to-resume via existing reconnect flow). **8n1.3's adversarial review was DEFERRED at machine handoff — bead djx (P2), do it before 8n1.4.** Entitlements wired but OPT-IN (`PORTVIEW_HOST_ENTITLEMENTS` via Portview.local.xcconfig + Apple ID in Xcode) — activation is 8n1.4 device-session work. Follow-ups: 8z9 (HostBeaconRecord → PortviewProtocol; HostCore currently depends on ClientCore for the codec), e00 (write chaining).
+- **Device-test builds STAGED from 5c033ed**: host at /Applications/PortviewHost.app (TCC persists), client installed on Roshar via devicectl. NOTE: Roshar's build predates 8n1.3 — reinstall before 8n1.4. Device-verify plan has a 2026-07-11 addendum (PTS-smoothness + audio-tick checks, w6n.6 lane lever, 8n1.4 exclusion).
+- iOS verification gap from the fleet session CLOSED (make test-ios TEST SUCCEEDED on 1a5d1e8; the earlier failure was a stale explicit-modules cache — xcodebuild clean / swift package clean fixes that class).
+- Verify at close: package 459/89 green integrated; host BUILD SUCCEEDED; client device build SUCCEEDED. Suite growth this arc: 304 → 459.
+- Everything PUSHED to origin/main (user-authorized). Machine handoff checklist delivered in-chat (beads db + ~/.claude memory + Keychain host identity do NOT travel via git).
+- NEXT: user device-verify sitting (plan + addendum); djx review before 8n1.4; 8n1.4 needs Apple ID entitlement activation; security session (1nt + lane-token hygiene); fleet-ables: 8z9, s86, jc3, e00.
+
 ## Latest Session (2026-07-09/10 — fleet execution: 16 beads landed, 304→~440 tests; QUIC lanes complete but DORMANT)
 
 - Fable ran the full `bd ready` fleet in 5 waves (worktree agents + adversarial review per bead, ALL review findings fixed pre-close). ADR: decisions.md (2026-07-10). Closed: vs9, 627, 8n1.1, 480, 42r → w6n.1, w6n.2, 90p, b1l → w6n.3, 8bm (lead) → w6n.4, w6n.5, xgy → cqv.4, cqv.5 (+ incident 57u). NOT pushed (~24 commits).

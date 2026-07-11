@@ -40,7 +40,7 @@ script: `.docs/ai/phases/device-verify-plan-2026-07-08.md`.
 
 ### Next
 - [x] QUIC lane-splitting phase 1 lands (epic `w6n`) — DONE 2026-07-10 (w6n.1–.5 closed; loopback-verified, DORMANT until the `w6n.6` A/B flips `ProtocolVersion.current`). → Tailscale A/B (`w6n.6`) decides phase 2 (`10p`).
-- [ ] CloudKit re-wake lands (epic `8n1`) — `8n1.1` core DONE 2026-07-10 (evaluate() contract in its close reason); `8n1.2` host + `8n1.3` client now unblocked → device-verify (`8n1.4`).
+- [x] CloudKit re-wake CODE-COMPLETE 2026-07-11 (`8n1.1`+`8n1.2`+`8n1.3` closed; `8n1.3` review deferred → bead `djx`, do before device-verify). Remaining: `8n1.4` device-verify — needs entitlement activation (Apple ID in Xcode, `PORTVIEW_HOST_ENTITLEMENTS` opt-in) + fresh client install on Roshar (staged build predates `8n1.3`).
 - [x] Lip-sync foundation: `b1l` (present-by-PTS) DONE 2026-07-10 → `ins` (device umbrella) remains.
 - [ ] Settings + first-run/TCC implementation beads (decomposed from `l4y` once answered).
 
