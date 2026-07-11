@@ -10,6 +10,7 @@ struct ContentView: View {
     @StateObject private var discovery = DiscoveryModel()
     @StateObject private var savedHosts = SavedHostsStore()
     @StateObject private var settings = ClientSettingsStore()
+    @ObservedObject private var reWake = ReWakeCenter.shared
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -56,6 +57,9 @@ struct ContentView: View {
                 // refreshes in place via SavedHostsStore's name-aware upsert).
                 if status == .streaming, let payload = session.connectedHostToSave {
                     savedHosts.remember(payload)
+                    // A paired Mac now exists, so re-wake can matter: request notification
+                    // authorization (once) and bootstrap the CloudKit subscription.
+                    Task { await reWake.refresh() }
                 }
             }
             .onChange(of: scenePhase) { _, newPhase in
@@ -63,6 +67,37 @@ struct ContentView: View {
                 // after the background gap (missed frames / a torn-down decode session).
                 if newPhase == .active { session.requestKeyframe() }
             }
+            .onChange(of: reWake.pendingReconnectPinHex, initial: true) { _, pinHex in
+                guard let pinHex else { return }
+                reWake.pendingReconnectPinHex = nil
+                guard let saved = ReWakeTapRouting.savedHost(forPinHex: pinHex, in: savedHosts.hosts) else { return }
+                reconnectFromReWake(saved)
+            }
+            .onAppear {
+                // Let a foreground push know whether kicking a reconnect would stomp a live session.
+                reWake.hasLiveSession = { [weak session] in
+                    switch session?.status {
+                    case .connecting, .streaming, .reconnecting: true
+                    case .idle, .failed, nil: false
+                    }
+                }
+            }
+    }
+
+    /// Re-wake entry (notification tap, or a push that arrived while foreground) into the normal
+    /// saved-Mac reconnect flow. Waits briefly for Bonjour to re-resolve the Mac when it isn't
+    /// discovered yet — a DHCP move after reboot is the common case, and
+    /// `SavedHost.reconnectEndpoints(among:)` can only prefer the live service endpoint over the
+    /// possibly-stale saved IP if discovery has seen it.
+    private func reconnectFromReWake(_ saved: SavedHost) {
+        Task {
+            discovery.start() // no-op if the Deck Home browse is already running
+            let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+            while ContinuousClock.now < deadline, !saved.isOnNetwork(among: discovery.hosts) {
+                try? await Task.sleep(for: .milliseconds(150))
+            }
+            session.reconnect(saved: saved, discovered: discovery.hosts)
+        }
     }
 
     @ViewBuilder
@@ -84,6 +119,7 @@ struct ContentView: View {
                 session: session,
                 discovery: discovery,
                 savedHosts: savedHosts,
+                showNotificationsHint: reWake.notificationsDeniedHint,
                 onReconnectSaved: { saved in
                     session.reconnect(saved: saved, discovered: discovery.hosts)
                 },

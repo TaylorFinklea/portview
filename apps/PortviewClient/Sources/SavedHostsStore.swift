@@ -42,7 +42,7 @@ struct SavedHost: Identifiable, Codable, Equatable {
 @MainActor
 final class SavedHostsStore: ObservableObject {
     @Published private(set) var hosts: [SavedHost] = []
-    private let defaultsKey = "portview.savedHosts"
+    nonisolated private static let defaultsKey = "portview.savedHosts"
     private let defaults = UserDefaults.standard
 
     init() { load() }
@@ -88,15 +88,23 @@ final class SavedHostsStore: ObservableObject {
         save()
     }
 
+    /// Decode the persisted hosts outside the MainActor store — the CloudKit re-wake background
+    /// handler runs while the UI (and this store) may not exist. Same key/decoder as `load()`.
+    nonisolated static func snapshot() -> [SavedHost] {
+        guard let data = UserDefaults.standard.data(forKey: defaultsKey),
+              let decoded = try? JSONDecoder().decode([SavedHost].self, from: data) else { return [] }
+        return decoded
+    }
+
     private func load() {
-        guard let data = defaults.data(forKey: defaultsKey),
+        guard let data = defaults.data(forKey: Self.defaultsKey),
               let decoded = try? JSONDecoder().decode([SavedHost].self, from: data) else { return }
         hosts = decoded
     }
 
     private func save() {
         if let data = try? JSONEncoder().encode(hosts) {
-            defaults.set(data, forKey: defaultsKey)
+            defaults.set(data, forKey: Self.defaultsKey)
         }
     }
 }

@@ -8,6 +8,9 @@ struct DeckHomeView: View {
     @ObservedObject var session: SessionViewModel
     @ObservedObject var discovery: DiscoveryModel
     @ObservedObject var savedHosts: SavedHostsStore
+    /// One-time passive hint: notifications are denied, so background "ready to resume" re-wake
+    /// alerts from a Mac can't appear. Informational only — nothing here is blocked.
+    let showNotificationsHint: Bool
     let onReconnectSaved: (SavedHost) -> Void
     let onPickDiscovered: (DiscoveredHost) -> Void
     let onScan: () -> Void
@@ -30,6 +33,13 @@ struct DeckHomeView: View {
                     header
                     scanStatus
                         .padding(.bottom, 8)
+
+                    if showNotificationsHint {
+                        Text("notifications are off — your Mac can't alert you when it's ready to resume")
+                            .font(.mono(10))
+                            .foregroundStyle(Glass.text3)
+                            .padding(.bottom, 8)
+                    }
 
                     ForEach(savedHosts.hosts) { saved in
                         let onNet = saved.isOnNetwork(among: discovery.hosts)

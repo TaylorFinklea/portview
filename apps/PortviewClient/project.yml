@@ -41,6 +41,10 @@ targets:
         NSCameraUsageDescription: "Portview uses the camera to scan the pairing QR code shown on your Mac."
         NSBonjourServices:
           - _portview._udp
+        # CloudKit re-wake (spec §2a.2): without this a content-available push cannot wake the
+        # suspended app.
+        UIBackgroundModes:
+          - remote-notification
         UILaunchScreen: {}
     settings:
       base:
@@ -48,6 +52,9 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
         CODE_SIGN_STYLE: Automatic
         DEVELOPMENT_TEAM: $(PORTVIEW_DEVELOPMENT_TEAM)
+        # CloudKit re-wake (spec §2a.1): aps-environment + iCloud/CloudKit container. Push delivery
+        # itself is device-gated and human-verified (bead 8n1.4).
+        CODE_SIGN_ENTITLEMENTS: PortviewClient.entitlements
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
   PortviewClientTests:
     type: bundle.unit-test

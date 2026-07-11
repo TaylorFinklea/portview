@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- CloudKit re-wake (spec §2a.1): a CKRecordZoneSubscription's content-available push rides
+	     APNs, so the push capability is required even with no server token exchange. Xcode's
+	     automatic signing flips development → production for distribution builds. -->
+	<key>aps-environment</key>
+	<string>development</string>
+	<!-- Shared private-database container both apps use for HostBeacon records (spec §0). -->
+	<key>com.apple.developer.icloud-container-identifiers</key>
+	<array>
+		<string>iCloud.dev.finklea.portview</string>
+	</array>
+	<key>com.apple.developer.icloud-services</key>
+	<array>
+		<string>CloudKit</string>
+	</array>
+</dict>
+</plist>
