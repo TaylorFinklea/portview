@@ -279,4 +279,48 @@ import PortviewProtocol
         #expect(controller.evaluate(.init(feedback: nil, cropFraction: 0.25)).bitrate == 80_000_000)
         #expect(controller.evaluate(.init(feedback: nil, cropFraction: 1.0)).bitrate == 20_000_000)
     }
+
+    // MARK: Boost-aware reseed (bead s86)
+
+    @Test func reseedWithCropFractionStartsAtTheBoostedSetpoint() {
+        // An encoder rebuild at a zoom-rung crossing recreates the controller. Seeding it with the
+        // frame's crop fraction must apply the boost IMMEDIATELY — not one stats interval later —
+        // so the cropped region never encodes at the unboosted heuristic while zoomed.
+        let controller = AdaptiveRateController(
+            mode: .auto, bitrateSetpoint: 20_000_000, fpsCeiling: 60, initialCropFraction: 0.25)
+        #expect(controller.currentTargets == AdaptiveRateController.Targets(bitrate: 80_000_000, fps: 60))
+    }
+
+    @Test func reseedBoostIsCappedAndClamped() {
+        let extreme = AdaptiveRateController(
+            mode: .auto, bitrateSetpoint: 20_000_000, fpsCeiling: 60, initialCropFraction: 0.05)
+        #expect(extreme.currentTargets.bitrate == 20_000_000 * Int(AdaptiveRateController.maxCropBoost))
+
+        let wide = AdaptiveRateController(
+            mode: .auto, bitrateSetpoint: 40_000_000, fpsCeiling: 60, initialCropFraction: 0.1)
+        #expect(wide.currentTargets.bitrate == StreamParameters.bitrateRange.upperBound)
+    }
+
+    @Test func reseedFullFrameAndDefaultAreUnchanged() {
+        // Full frame (1.0) and the defaulted parameter are byte-identical to the pre-s86 seed.
+        let full = AdaptiveRateController(
+            mode: .auto, bitrateSetpoint: setpoint, fpsCeiling: 60, initialCropFraction: 1.0)
+        #expect(full.currentTargets == AdaptiveRateController.Targets(bitrate: setpoint, fps: 60))
+        #expect(autoController().currentTargets == AdaptiveRateController.Targets(bitrate: setpoint, fps: 60))
+    }
+
+    @Test func reseedNeverBoostsAPinnedBitrate() {
+        let pinned = AdaptiveRateController(
+            mode: .pinned, bitrateSetpoint: 8_000_000, fpsCeiling: 60, initialCropFraction: 0.1)
+        #expect(pinned.currentTargets == AdaptiveRateController.Targets(bitrate: 8_000_000, fps: 60))
+    }
+
+    @Test func seededBoostComposesWithLaterEvaluate() {
+        // The seeded boost is the same state evaluate() maintains: staying at the same crop is a
+        // no-op, zooming back out returns to the base setpoint, congestion still sheds.
+        var controller = AdaptiveRateController(
+            mode: .auto, bitrateSetpoint: 20_000_000, fpsCeiling: 60, initialCropFraction: 0.25)
+        #expect(controller.evaluate(.init(feedback: nil, cropFraction: 0.25)).bitrate == 80_000_000)
+        #expect(controller.evaluate(.init(feedback: nil, cropFraction: 1.0)).bitrate == 20_000_000)
+    }
 }

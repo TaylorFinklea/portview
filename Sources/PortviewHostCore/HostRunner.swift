@@ -790,13 +790,19 @@ public struct HostRunner: Sendable {
                     needsKeyframe = true
                     // (Re)seed the adaptive controller from THIS encoder's starting bitrate (the
                     // width·height heuristic in Auto, the pinned value otherwise): a rebuild is a
-                    // new stream size, so adaptation restarts from its setpoint. The restart also
-                    // clears the crop boost until the next stats interval re-applies it, and
-                    // congestion attenuation does not survive a zoom-rung crossing.
-                    rateController = AdaptiveRateController(
+                    // new stream size, so adaptation restarts from its setpoint. Seeding with the
+                    // frame's own crop fraction applies the crop boost immediately (bead s86) —
+                    // the zoomed region never encodes a stats interval at the unboosted heuristic.
+                    // Congestion attenuation still does not survive a zoom-rung crossing.
+                    let seeded = AdaptiveRateController(
                         mode: bitrate == nil ? .auto : .pinned,
                         bitrateSetpoint: rebuilt.averageBitRate,
-                        fpsCeiling: fps)
+                        fpsCeiling: fps,
+                        initialCropFraction: frame.region.width * frame.region.height)
+                    rateController = seeded
+                    if seeded.currentTargets.bitrate != rebuilt.averageBitRate {
+                        rebuilt.setAverageBitRate(seeded.currentTargets.bitrate)
+                    }
                     logger.info("Encoder ready for \(bufferWidth, privacy: .public)x\(bufferHeight, privacy: .public) buffers.")
                 } catch {
                     logger.error("encoder create error: \(error, privacy: .public)")

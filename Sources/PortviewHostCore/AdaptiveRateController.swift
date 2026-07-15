@@ -98,7 +98,11 @@ struct AdaptiveRateController {
         Self.clampBitrate(Int((Double(bitrateSetpoint) * cropBoost).rounded()))
     }
 
-    init(mode: Mode, bitrateSetpoint: Int, fpsCeiling: Int) {
+    /// `initialCropFraction` seeds the crop boost at construction (bead s86): an encoder rebuild
+    /// at a zoom-rung crossing recreates the controller, and without the seed the cropped region
+    /// encodes at the unboosted heuristic until the next stats interval re-applies the boost.
+    /// Auto mode only, like every boost path; 1.0 (full frame) reproduces the unseeded behavior.
+    init(mode: Mode, bitrateSetpoint: Int, fpsCeiling: Int, initialCropFraction: Double = 1.0) {
         self.mode = mode
         self.bitrateSetpoint = min(StreamParameters.bitrateRange.upperBound,
                                    max(StreamParameters.bitrateRange.lowerBound, bitrateSetpoint))
@@ -106,7 +110,14 @@ struct AdaptiveRateController {
                               max(StreamParameters.fpsRange.lowerBound, fpsCeiling))
         bitrate = self.bitrateSetpoint
         fps = self.fpsCeiling
+        if mode == .auto {
+            applyCropBoost(initialCropFraction)
+        }
     }
+
+    /// The targets currently in force, without folding new signals — what a caller applies right
+    /// after (re)seeding, before the first stats interval reaches `evaluate`.
+    var currentTargets: Targets { Targets(bitrate: bitrate, fps: fps) }
 
     /// Fold one stats interval's signals into the streak state and return the next targets.
     mutating func evaluate(_ inputs: Inputs) -> Targets {
