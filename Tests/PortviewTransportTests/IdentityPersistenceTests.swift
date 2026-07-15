@@ -27,6 +27,16 @@ final class WriteFailingIdentityStore: IdentityRecordStore, @unchecked Sendable 
     func write(_ data: Data, service: String) throws { throw Failure() }
 }
 
+/// Reads throw but writes pass through — models a TRANSIENT keychain read failure (securityd
+/// hiccup) over an intact stored record. The record must survive such a load untouched.
+final class ReadFailingIdentityStore: IdentityRecordStore, @unchecked Sendable {
+    struct Failure: Error {}
+    private let backing: InMemoryIdentityStore
+    init(backing: InMemoryIdentityStore) { self.backing = backing }
+    func read(service: String) throws -> Data? { throw Failure() }
+    func write(_ data: Data, service: String) throws { try backing.write(data, service: service) }
+}
+
 @Suite struct IdentityPersistenceTests {
     /// The pin survives a "restart": load-or-create twice against the same store yields the same
     /// certificate fingerprint (the stored identity is re-imported, not regenerated).
@@ -69,6 +79,27 @@ final class WriteFailingIdentityStore: IdentityRecordStore, @unchecked Sendable 
             service: "test.identity", commonName: "Test", store: store, now: Date())
         #expect(loaded.port == nil)  // still unbound, not corrupted
         #expect(try loaded.identity.certificateSHA256() == original.identity.certificateSHA256())
+    }
+
+    /// A THROWN read is a transient keychain failure, not an absent record: the load degrades to
+    /// ephemeral for the session but must NOT overwrite the stored identity — otherwise one
+    /// securityd hiccup at host launch would silently rotate the pin and break every client's
+    /// saved pairing. The next (healthy) load recovers the original identity.
+    @Test func transientReadFailureNeverOverwritesTheStoredIdentity() throws {
+        let backing = InMemoryIdentityStore()
+        let original = try TLSIdentity.loadOrCreatePersistent(
+            service: "test.identity", commonName: "Test", store: backing, now: Date())
+        #expect(original.persistent)
+
+        let flaky = ReadFailingIdentityStore(backing: backing)
+        let degraded = try TLSIdentity.loadOrCreatePersistent(
+            service: "test.identity", commonName: "Test", store: flaky, now: Date())
+        #expect(!degraded.persistent)  // usable this session, but flagged ephemeral
+
+        let recovered = try TLSIdentity.loadOrCreatePersistent(
+            service: "test.identity", commonName: "Test", store: backing, now: Date())
+        #expect(recovered.persistent)
+        #expect(try recovered.identity.certificateSHA256() == original.identity.certificateSHA256())
     }
 
     /// A corrupted PKCS#12 blob triggers a re-mint (different pin), and the fresh record overwrites

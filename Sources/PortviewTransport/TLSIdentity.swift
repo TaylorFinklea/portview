@@ -114,12 +114,30 @@ public struct TLSIdentity {
         persistenceLock.lock()
         defer { persistenceLock.unlock() }
 
-        if let data = try? store.read(service: service),
-           let record = try? JSONDecoder().decode(StoredIdentityRecord.self, from: data),
-           record.notAfter.timeIntervalSince(now) > remintThreshold,
-           let identity = try? importPKCS12(record.pkcs12, passphrase: pkcs12Passphrase) {
-            return PersistentHostIdentity(
-                identity: identity, port: record.port == 0 ? nil : record.port, persistent: true)
+        let stored: Data?
+        do {
+            stored = try store.read(service: service)
+        } catch {
+            // A THROWN read is a transient keychain failure, distinct from an absent record (nil):
+            // overwriting here would discard a possibly-intact identity and silently rotate the
+            // pin — breaking every client's saved pairing over one securityd hiccup. Run this
+            // session ephemeral and leave the record for the next launch to re-read.
+            let minted = try mintSelfSigned(commonName: commonName, days: persistentValidityDays)
+            return PersistentHostIdentity(identity: minted.identity, port: nil, persistent: false)
+        }
+
+        if let stored,
+           let record = try? JSONDecoder().decode(StoredIdentityRecord.self, from: stored),
+           record.notAfter.timeIntervalSince(now) > remintThreshold {
+            // Retry the import once: SecPKCS12Import rides securityd and can fail transiently
+            // under load. A deterministically corrupt blob fails both attempts and falls through
+            // to the overwrite-mint below (the self-heal).
+            for _ in 0..<2 {
+                if let identity = try? importPKCS12(record.pkcs12, passphrase: pkcs12Passphrase) {
+                    return PersistentHostIdentity(
+                        identity: identity, port: record.port == 0 ? nil : record.port, persistent: true)
+                }
+            }
         }
 
         // Mint fresh and best-effort persist. A failed write (or a corrupted/expired prior record)
