@@ -61,6 +61,11 @@ public actor HostBeaconWriter {
     /// Last epoch handed out, so same-instant writes still increase strictly.
     private var lastEpoch: Int64 = 0
     private var identity: Identity?
+    /// The most recently enqueued write; each new write chains behind it (bead e00). The actor is
+    /// reentrant at `await store.save`, so without the chain two in-flight writes could complete in
+    /// either order and CloudKit's last-writer-wins upsert would keep the STALE beacon (old port,
+    /// swallowed nudge) until the next trigger.
+    private var lastWrite: Task<Void, Never>?
 
     /// - Parameter now: injectable wall clock (tests drive it manually; production uses `Date.init`).
     public init(store: BeaconStore, now: @escaping @Sendable () -> Date = Date.init) {
@@ -96,6 +101,10 @@ public actor HostBeaconWriter {
         return lastEpoch
     }
 
+    /// Builds the beacon — minting its epoch — SYNCHRONOUSLY, so trigger order fixes epoch order,
+    /// then chains the store write behind the previous one: writes land strictly in epoch order no
+    /// matter how CloudKit reorders completions (bead e00). Returns once THIS write has landed (or
+    /// been dropped), preserving the caller-awaits-its-own-trigger contract.
     private func write(wantsReconnect: Bool) async {
         guard let identity else { return }
         let beacon = HostBeaconRecord(
@@ -104,6 +113,16 @@ public actor HostBeaconWriter {
             port: Int64(identity.port),
             epoch: nextEpoch(),
             wantsReconnect: wantsReconnect ? 1 : 0)
+        let previous = lastWrite
+        let chained = Task {
+            await previous?.value
+            await self.performWrite(beacon)
+        }
+        lastWrite = chained
+        await chained.value
+    }
+
+    private func performWrite(_ beacon: HostBeaconRecord) async {
         if !zoneCreated {
             await createZoneLogged()
         }

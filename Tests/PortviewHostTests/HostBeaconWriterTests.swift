@@ -237,6 +237,69 @@ import PortviewClientCore
         #expect(saved[0].port == 5001)
     }
 
+    // MARK: Write chaining (bead e00)
+
+    /// A `BeaconStore` whose saves can be HELD in flight and released later — models a slow
+    /// CloudKit call so tests can interleave a second trigger while the first write is pending.
+    private actor GatedBeaconStore: BeaconStore {
+        private(set) var landed: [HostBeaconRecord] = []
+        private var holdSaves = false
+        private var waiting: [CheckedContinuation<Void, Never>] = []
+
+        func setHold(_ hold: Bool) { holdSaves = hold }
+        func createZone() throws {}
+        func save(_ beacon: HostBeaconRecord) async throws {
+            if holdSaves {
+                await withCheckedContinuation { waiting.append($0) }
+            }
+            landed.append(beacon)
+        }
+        /// Releases held saves in REVERSE arrival order — the CloudKit worst case (completion
+        /// order is not request order), which is exactly what un-chained writes get wrong.
+        func releaseAllReversed() {
+            waiting.reversed().forEach { $0.resume() }
+            waiting.removeAll()
+        }
+        var pendingCount: Int { waiting.count }
+    }
+
+    /// Two triggers while the store is slow: the second write must WAIT for the first (chained),
+    /// never sit in flight beside it — otherwise CloudKit completion reordering lands the older
+    /// epoch LAST and the beacon record regresses (stale port / lost nudge until the next write).
+    @Test func inFlightWriteChainsTheNextTriggerBehindIt() async throws {
+        let store = GatedBeaconStore()
+        let clock = ManualClock(Self.start)
+        let writer = HostBeaconWriter(store: store, now: clock.now)
+        await writer.hostingStarted(pinHex: "ab12cd", hostName: "Studio", port: 4242)
+
+        await store.setHold(true)
+        let portWrite = Task { await writer.portChanged(5001) }
+        for _ in 0..<10_000 where await store.pendingCount < 1 { await Task.yield() }
+        #expect(await store.pendingCount == 1) // the port write is in flight, held
+
+        clock.advance(by: 1)
+        let nudgeWrite = Task { await writer.requestReconnect() }
+        // The nudge's save must NOT join the in-flight set — it queues behind the chain. Give it
+        // ample chances to (wrongly) start before asserting it never did.
+        for _ in 0..<2_000 { await Task.yield() }
+        #expect(await store.pendingCount == 1)
+
+        await store.releaseAllReversed() // complete the port write; the nudge may start now
+        for _ in 0..<10_000 where await store.pendingCount < 1 { await Task.yield() }
+        #expect(await store.pendingCount == 1)
+        await store.releaseAllReversed()
+        _ = await portWrite.value
+        _ = await nudgeWrite.value
+
+        // Landing order == trigger order == epoch order: the record never regresses.
+        let landed = await store.landed
+        #expect(landed.count == 3)
+        #expect(landed[1].port == 5001)
+        #expect(landed[2].wantsReconnect == 1)
+        #expect(landed.map(\.epoch) == landed.map(\.epoch).sorted())
+        #expect(landed[2].epoch > landed[1].epoch)
+    }
+
     // MARK: No-timer invariant
 
     /// Spec §1: NEVER write on a timer — every write costs the phone silent-push budget. With hosting
