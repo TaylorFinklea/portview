@@ -2,7 +2,40 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
-## [2026-07-15] New-machine session: identity-degradation semantics, re-wake hardening architecture, beads reseed (ACCEPTED)
+## [2026-07-16] Blank-screen debugging: codec dims are a full-path invariant; never cancel a never-ready inbound QUIC stream (ACCEPTED)
+
+**Context**: first real product test on the new machine — phone connected but showed a black
+screen, then (after fix 1) video froze at ~7-10s. Systematic-debugging session; three distinct
+bugs, two fixed here, one localized to the phone.
+
+1. **Even encoder dims are a FULL-PATH invariant, not a crop-path nicety** (`dd805e2`). The crop
+   path (`cropOutputSize`) always clamped even "for the codec"; the full-display path passed the
+   display size through raw. First odd-height display this code ever met — the notch MacBook
+   built-in, logical 1800×1169 — made HEVC's BGRA→4:2:0 pixel transfer reject EVERY frame
+   (kVTPixelTransferNotSupportedErr, -12905); `pumpVideo` nil'd + rebuilt the encoder per frame
+   (~3000/20s), silently after seq 0 → the host sent ZERO video ever. Fix floors to even in
+   `outputSize` (never exceeds the display, mirrors the crop path's semantics). Proven by a
+   local VT repro (odd → -12905, even → OK) before the fix; device-verified 56fps after.
+   COROLLARY: yesterday's "audio starves video" fix (0a95fb6) was chasing THIS bug's symptom —
+   audio+control flowed while video was structurally absent. The starvation bug was real (its
+   tests stand) but was not yesterday's black screen.
+2. **The lane accept path must never cancel a never-ready inbound stream** (`e5d7f2f`). The
+   iPhone's QUIC tunnel carries an extra stream that never sends a byte (origin unidentified —
+   nw-internal artifact suspected; loopback macOS dials don't produce it). The 5s preamble
+   deadline cancelled it; Network.framework cascaded the cancel into "Socket is not connected"
+   across the whole shared tunnel ~1.3s later, killing the LIVE 56fps session (comment claimed
+   "closes THIS STREAM ONLY" — false in practice). Zero-byte streams are now PARKED (first
+   preamble byte awaited with no deadline): they cost nothing until bytes arrive, QUIC stream
+   caps bound the count, and they die with the tunnel. The deadline still bounds PARTIAL
+   preambles — the real slow-loris surface. Loopback regression test added; the cascade itself
+   is not loopback-reproducible, so the production nw-log signature (cancel at +5.08s ≈ the 5s
+   deadline → group failure) is the confirming evidence.
+3. **Host exonerated for the residual ~7-10s freeze** — a headless probe (scratch SwiftPM pkg
+   dialing `PortviewClientSession` like the phone: tunnel + primary, v1 hello, feedback piggyback)
+   streamed 90s / 5022 frames / 0 gaps from the live host. Phone runs the Jul 10-11 client (no
+   way to have installed anything newer — devicectl never paired to this Mac), which predates the
+   audio-starving fix; steady ~50 pkt/s audio (SCK emits silence buffers) rides its lossless
+   control lane ahead of video. Next step is a cable install + retest, NOT more host work.
 
 **Context**: first session on a new machine (beads DB / memory / Keychain identity did not travel);
 baseline re-verified green, then the remaining fleet queue was drained (djx review + fixes, 8z9,

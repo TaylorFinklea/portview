@@ -6,6 +6,14 @@
 
 `main`
 
+## Latest Session (2026-07-16 — blank-screen debugging: 2 host bugs fixed + device-verified; freeze localized to phone's stale build)
+
+- Continued Codex's blank-screen session. THREE bugs: (1) odd-height notch display (1800×1169) → HEVC -12905 every frame → host sent ZERO video (yesterday's "black screen"; `dd805e2`, even-clamp `outputSize`); (2) lane preamble deadline cancelled the iPhone tunnel's phantom zero-byte stream → nw cascade killed the live session at ~6.5s (`e5d7f2f`, park zero-byte streams); (3) residual ~7-10s freeze = PHONE-side. ADR: decisions.md (2026-07-16).
+- **Host EXONERATED for (3)**: headless probe (`scratchpad pvprobe`, PortviewClientSession dial) streamed 90s/5022 frames/0 gaps. Phone still runs the **Jul 10-11 client** (devicectl never paired to this Mac — last night's fixed build could not have been installed); predates the audio-starving-video fix; steady 50 pkt/s audio starves video on its old control lane.
+- Host observability added (pump heartbeat/errors/exits, feedback echo — 3rd commit). `/Applications/PortviewHost.app` runs all fixes. Sim client (iPhone 17 sim, F2F47D1F) reinstalled from HEAD; `portview://` URL scheme NOT registered (simctl openurl fails) — sim pairing needs manual/SAS UI.
+- Verify at close: package 472/89 green; host BUILD SUCCEEDED + redeployed.
+- NEXT (blocked on user): plug iPhone in via USB → build+install current client (signing worked 2026-07-15 21:59) → rerun 60s freeze test (bead portview-<new>). Then: review + push 3 unpushed commits; decide whether to demote the notice-level session diagnostics.
+
 ## Latest Session (2026-07-15 — NEW MACHINE: baseline re-verified, fleet queue drained, product test staged; NOT pushed)
 
 - **Machine handoff landed here**: beads DB / ~/.claude memory / Keychain host identity did NOT travel. Beads RESEEDED from these docs (new prefix `portview-*`, old ids in descriptions; `bd ready` works again). Host identity is FRESH → every saved pairing on the user's devices pins the OLD cert; first connect must re-pair (QR/SAS). `.beads/` excluded via `.git/info/exclude` (bd init auto-commit excised — ADR item 3). xcodeproj files are xcodegen-generated on fresh clones.
