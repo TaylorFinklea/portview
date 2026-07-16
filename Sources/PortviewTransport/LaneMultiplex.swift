@@ -294,13 +294,21 @@ final class TunnelAccepter: @unchecked Sendable {
         preambleDeadline: Duration
     ) async {
         let preambleLength = 1 + LanePreamble.tokenLength
-        let deadline = ContinuousClock().now.advanced(by: preambleDeadline)
         do {
             // Never buffer more than one preamble's worth of raw bytes here: classification
             // needs at most `preambleLength` bytes, and anything beyond stays in the transport's
             // (flow-controlled) receive buffer until the stream's own decoder takes over.
+            //
+            // The FIRST byte is awaited with NO deadline — parked, not policed. The iOS client's
+            // tunnel carries an extra stream that never sends a byte, and deadline-cancelling
+            // that never-ready stream cascaded "Socket is not connected" through the shared QUIC
+            // stack and killed the live session (device session 2026-07-16). A parked zero-byte
+            // stream costs nothing (classification is byte-driven, QUIC stream caps bound the
+            // count) and dies with its tunnel. The deadline starts at the first byte and bounds
+            // the REMAINDER of the preamble — the actual slow-loris surface.
             var (bytes, isComplete) = try await receiveRaw(
-                on: stream, minimum: 1, maximum: preambleLength, deadline: deadline)
+                on: stream, minimum: 1, maximum: preambleLength, deadline: nil)
+            let deadline = ContinuousClock().now.advanced(by: preambleDeadline)
             guard let firstByte = bytes.first else {
                 stream.cancel() // FIN or dead delivery with no bytes
                 return
@@ -357,8 +365,10 @@ final class TunnelAccepter: @unchecked Sendable {
     /// Raw pre-framing read with an absolute deadline — the transport-layer analogue of the
     /// decoded-message `next(deadline:)` (which cannot apply here: no `FrameDecoder` has seen
     /// this stream yet). On timeout the pending receive is unblocked by cancelling the stream.
+    /// `deadline: nil` parks the read indefinitely (the zero-byte first read — see
+    /// `classifyAndRoute`); the stream's tunnel dying errors the receive and releases it.
     private static func receiveRaw(
-        on stream: NWConnection, minimum: Int, maximum: Int, deadline: ContinuousClock.Instant
+        on stream: NWConnection, minimum: Int, maximum: Int, deadline: ContinuousClock.Instant?
     ) async throws -> (bytes: [UInt8], isComplete: Bool) {
         try await withThrowingTaskGroup(of: (bytes: [UInt8], isComplete: Bool).self) { race in
             race.addTask {
@@ -374,9 +384,11 @@ final class TunnelAccepter: @unchecked Sendable {
                     }
                 } onCancel: { stream.cancel() }
             }
-            race.addTask {
-                try await Task.sleep(until: deadline, clock: .continuous)
-                throw LanePreambleDeadlineError()
+            if let deadline {
+                race.addTask {
+                    try await Task.sleep(until: deadline, clock: .continuous)
+                    throw LanePreambleDeadlineError()
+                }
             }
             defer { race.cancelAll() }
             guard let first = try await race.next() else { throw LanePreambleDeadlineError() }

@@ -300,6 +300,71 @@ private func serveMultiplexedHost(_ listener: PortviewListener, token: [UInt8],
         listener.cancel()
     }
 
+    /// A ZERO-byte idle stream must not take the tunnel down when the preamble deadline passes.
+    /// In the wild (device session 2026-07-16) the iOS client's tunnel carries an extra stream
+    /// that never sends a byte; the accept path's deadline-cancel of that never-ready stream
+    /// cascaded "Socket is not connected" through the shared QUIC stack ~1.3s later, killing the
+    /// LIVE primary (56fps session died mid-stream, client saw a frozen frame). Zero-byte streams
+    /// are parked instead: they cost nothing until bytes arrive (classification is byte-driven)
+    /// and die with the tunnel. The deadline still bounds PARTIAL preambles (slow-loris — the
+    /// `stalledPreambleStreamIsClosedByTheRawReadDeadline` case above).
+    @Test func idleZeroByteStreamDoesNotKillTheTunnelWhenTheDeadlinePasses() async throws {
+        let identity = try TLSIdentity.makeEphemeralSelfSigned()
+        let pin = try identity.certificateSHA256()
+        let listener = try PortviewListener(parameters: QUICParameters.server(identity: identity),
+                                            serviceName: nil, port: nil, multiplexed: true,
+                                            lanePreambleDeadline: .milliseconds(300))
+        let port = try await withTimeout(.seconds(20)) { try await listener.start() }
+
+        let serverTask = Task {
+            for await connection in listener.connections {
+                Task {
+                    for await message in connection.inbound {
+                        switch message {
+                        case .clientHello:
+                            try? await connection.send(.serverHello(ServerHello(
+                                protocolVersion: 1, displays: [], chosenCodec: .hevc)))
+                        case .ping(let ping):
+                            try? await connection.send(.pong(Pong(sendMicros: ping.sendMicros,
+                                                                  hostUptimeMicros: 0)))
+                        default:
+                            break
+                        }
+                    }
+                }
+            }
+        }
+
+        // Production shape: a v1 client on a tunnel — primary stream only, lanes dormant.
+        let endpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: port)
+        let tunnel = try await PortviewTunnel.connectQUIC(to: endpoint, pinnedCertificateSHA256: pin)
+        let primary = try await tunnel.openPrimaryStream()
+        try await primary.send(.clientHello(ClientHello(
+            protocolVersion: 1, deviceID: "IDLE", deviceName: "IdleStream", codecs: [.hevc])))
+        let helloReply = try await nextMessage(on: primary)
+        guard case .serverHello = helloReply else {
+            Issue.record("expected ServerHello on primary, got \(helloReply)")
+            tunnel.cancel(); listener.cancel(); serverTask.cancel()
+            return
+        }
+
+        // The phantom: an extra stream that never sends a single byte.
+        let phantom = try await tunnel.openStream()
+
+        // Outlive the preamble deadline (300ms) plus the observed cancel→cascade gap (~1.3s).
+        try await Task.sleep(for: .seconds(2))
+
+        // The live session must still flow.
+        try await primary.send(.ping(Ping(sendMicros: 99)))
+        #expect(try await nextMessage(on: primary) == .pong(Pong(sendMicros: 99, hostUptimeMicros: 0)))
+
+        phantom.close()
+        serverTask.cancel()
+        primary.close()
+        tunnel.cancel()
+        listener.cancel()
+    }
+
     /// App-level per-tunnel cap: one tunnel gets `AcceptedTunnel.maxLanePathStreams` lane-path
     /// attempts; past that, even a VALID lane open is closed — a flood of garbage preambles
     /// burns only the flooding tunnel's own budget.
