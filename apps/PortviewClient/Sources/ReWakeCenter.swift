@@ -60,10 +60,19 @@ final class ReWakeCenter: ObservableObject {
     /// Installed by ContentView: whether a session is currently connecting/streaming/reconnecting,
     /// so a foreground push never stomps a live session with a kicked reconnect.
     var hasLiveSession: () -> Bool = { false }
+    /// Installed by ContentView: the pin fingerprint hex of the host the live session is connected
+    /// to (nil when unknown), so routing suppresses only that host's own wake.
+    var liveSessionPinHex: () -> String? = { nil }
 
     private let stateStore = ReWakeStateStore()
     private var bootstrapped = false
     private var bootstrapInFlight = false
+    private var authRequestInFlight = false
+    /// The most recent push handling; each new push chains behind it (same pattern as the host's
+    /// beacon-write chain): two overlapping silent pushes would otherwise interleave the handler's
+    /// load→await→save sections — double-probing the same beacon past the dedupe/rate limit,
+    /// double-notifying, and clobbering each other's persisted change token.
+    private var pushChain: Task<ReWakeBackgroundHandler.Outcome, Never>?
 
     /// Launch entry (from the app delegate): kick the auth request + zone/subscription bootstrap
     /// without blocking launch.
@@ -82,7 +91,12 @@ final class ReWakeCenter: ObservableObject {
     /// Handles one remote notification to completion. Total and non-throwing, and bounded by a
     /// hard deadline well inside the ~30 s background budget — the app delegate can therefore call
     /// the fetch completion handler unconditionally with the returned outcome on EVERY path.
-    func handlePush(isForeground: Bool) async -> ReWakeBackgroundHandler.Outcome {
+    ///
+    /// `isForeground` is a CLOSURE read at routing time, not a snapshot at push arrival: handling
+    /// spans a fetch plus a ≤5 s probe, and an app-state transition mid-handling would otherwise
+    /// mis-route (a background→foreground flip posts a notification the foreground delegate then
+    /// suppresses — the wake silently vanishes).
+    func handlePush(isForeground: @escaping @MainActor () -> Bool) async -> ReWakeBackgroundHandler.Outcome {
         let handler = ReWakeBackgroundHandler(
             loadState: { [stateStore] in stateStore.load() },
             saveState: { [stateStore] in stateStore.save($0) },
@@ -93,12 +107,23 @@ final class ReWakeCenter: ObservableObject {
             probe: { beacon, endpoint, pin in
                 await Self.probeReachability(beacon: beacon, endpoint: endpoint, pinHex: pin)
             },
-            isForeground: { isForeground },
+            isForeground: isForeground,
             hasLiveSession: { [weak self] in self?.hasLiveSession() ?? false },
+            liveSessionPinHex: { [weak self] in self?.liveSessionPinHex() },
             postNotification: { [weak self] beacon in await self?.postReadyNotification(for: beacon) },
             kickReconnect: { [weak self] pinHex in self?.pendingReconnectPinHex = pinHex })
+        // Chain this push behind the previous one so handler runs never interleave; the deadline
+        // covers the WAIT TOO (a stacked push must not inherit its predecessor's spent budget and
+        // starve its own completion handler). The chained run itself finishes on its own clock —
+        // its narrow state writes stay serialized even when the caller has already returned.
+        let previous = pushChain
+        let run = Task { () -> ReWakeBackgroundHandler.Outcome in
+            _ = await previous?.value
+            return await handler.run()
+        }
+        pushChain = run
         let outcome = await ReWakeDeadline.run(seconds: Self.pushBudget) { () -> ReWakeBackgroundHandler.Outcome? in
-            await handler.run()
+            await run.value
         }
         return outcome ?? .failed
     }
@@ -135,12 +160,21 @@ final class ReWakeCenter: ObservableObject {
     /// Requests notification authorization ONCE, and only once the feature can matter (a paired
     /// Mac exists) — never a cold-launch permission ambush, never a re-prompt.
     private func requestAuthorizationIfNeeded() async {
-        var state = stateStore.load()
+        let state = stateStore.load()
         guard !state.didRequestNotificationAuth else { return }
         guard !SavedHostsStore.snapshot().isEmpty else { return }
-        state.didRequestNotificationAuth = true
-        stateStore.save(state)
+        guard !authRequestInFlight else { return } // refresh() fires on every foreground return
+        authRequestInFlight = true
+        defer { authRequestInFlight = false }
         _ = try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+        // Burn the one-shot only once the request RESOLVED to an answer: persisting before it
+        // resolves (or when it errored out still .notDetermined) would — on one kill/interrupt
+        // mid-prompt — leave the feature inert forever with the user never actually asked.
+        let settings = await UNUserNotificationCenter.current().notificationSettings()
+        guard settings.authorizationStatus != .notDetermined else { return }
+        var fresh = stateStore.load()
+        fresh.didRequestNotificationAuth = true
+        stateStore.save(fresh)
     }
 
     /// Surfaces the one-time passive "notifications are off → re-wake is inert" hint when the user
@@ -168,13 +202,21 @@ final class ReWakeCenter: ObservableObject {
         let center = UNUserNotificationCenter.current()
         let settings = await center.notificationSettings()
         guard settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional else {
-            // Posting without authorization is silently dropped (spec §2a.5) — record the denied
-            // state so the passive hint can surface; the feature stays inert, never blocks.
-            markDeniedHint()
+            // Posting without authorization is silently dropped (spec §2a.5). The one-time hint
+            // is NOT burned here — this path usually runs backgrounded, where marking the hint
+            // "shown" loses it if the app is terminated before the user ever sees Deck Home; the
+            // next foreground `refreshDeniedHint()` detects the denied state and surfaces it.
             return
         }
         let content = UNMutableNotificationContent()
-        content.title = "\(beacon.hostName) is ready"
+        // The hostName is attacker-influenced CloudKit data (anyone with the user's iCloud access
+        // aside, a compromised host writes arbitrary text): strip control characters and cap the
+        // length so the lock-screen line can't be shaped into a fake system prompt.
+        let cleaned = beacon.hostName
+            .components(separatedBy: .controlCharacters).joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayName = cleaned.isEmpty ? "Your Mac" : String(cleaned.prefix(64))
+        content.title = "\(displayName) is ready"
         content.body = "Tap to resume your Portview session."
         content.userInfo = [Self.notificationPinHexKey: beacon.recordName]
         // One pending notification per host: a newer beacon replaces the older alert.
@@ -202,40 +244,48 @@ final class ReWakeCenter: ObservableObject {
         }
         let accumulated = Accumulator()
 
-        return await withCheckedContinuation { continuation in
-            let operation = CKFetchRecordZoneChangesOperation(
-                recordZoneIDs: [zoneID], configurationsByRecordZoneID: [zoneID: configuration])
-            operation.recordWasChangedBlock = { recordID, result in
-                guard case .success(let record) = result, record.recordType == beaconRecordType else { return }
-                var fields: [String: Any] = [:]
-                for key in record.allKeys() { fields[key] = record[key] }
-                guard let beacon = HostBeaconRecord(recordName: recordID.recordName, fields: fields) else { return }
-                accumulated.lock.withLock { accumulated.beacons.append(beacon) }
+        let operation = CKFetchRecordZoneChangesOperation(
+            recordZoneIDs: [zoneID], configurationsByRecordZoneID: [zoneID: configuration])
+        operation.recordWasChangedBlock = { recordID, result in
+            guard case .success(let record) = result, record.recordType == beaconRecordType else { return }
+            var fields: [String: Any] = [:]
+            for key in record.allKeys() { fields[key] = record[key] }
+            guard let beacon = HostBeaconRecord(recordName: recordID.recordName, fields: fields) else { return }
+            accumulated.lock.withLock { accumulated.beacons.append(beacon) }
+        }
+        operation.recordZoneFetchResultBlock = { _, result in
+            switch result {
+            case .success(let fetch):
+                let data = try? NSKeyedArchiver.archivedData(
+                    withRootObject: fetch.serverChangeToken, requiringSecureCoding: true)
+                accumulated.lock.withLock { accumulated.tokenData = data }
+            case .failure(let error):
+                accumulated.lock.withLock { accumulated.zoneStatus = fetchStatus(for: error) }
             }
-            operation.recordZoneFetchResultBlock = { _, result in
-                switch result {
-                case .success(let fetch):
-                    let data = try? NSKeyedArchiver.archivedData(
-                        withRootObject: fetch.serverChangeToken, requiringSecureCoding: true)
-                    accumulated.lock.withLock { accumulated.tokenData = data }
-                case .failure(let error):
-                    accumulated.lock.withLock { accumulated.zoneStatus = fetchStatus(for: error) }
+        }
+        operation.qualityOfService = .userInitiated
+        // Cancellation-cooperative (8n1.3 review): `CKOperation.cancel()` finishes the operation
+        // with `operationCancelled`, which fires the result block exactly once and resumes the
+        // continuation — so a deadline/cancel actually frees this call (and iOS's push budget)
+        // instead of riding CloudKit's own ~60 s timeout with a zombie fetch.
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                operation.fetchRecordZoneChangesResultBlock = { result in
+                    let (beacons, tokenData, zoneStatus) = accumulated.lock.withLock {
+                        (accumulated.beacons, accumulated.tokenData, accumulated.zoneStatus)
+                    }
+                    switch result {
+                    case .success:
+                        continuation.resume(returning: ReWakeFetchOutcome(
+                            status: zoneStatus ?? .ok, beacons: beacons, changeTokenData: tokenData))
+                    case .failure(let error):
+                        continuation.resume(returning: ReWakeFetchOutcome(status: zoneStatus ?? fetchStatus(for: error)))
+                    }
                 }
+                database.add(operation)
             }
-            operation.fetchRecordZoneChangesResultBlock = { result in
-                let (beacons, tokenData, zoneStatus) = accumulated.lock.withLock {
-                    (accumulated.beacons, accumulated.tokenData, accumulated.zoneStatus)
-                }
-                switch result {
-                case .success:
-                    continuation.resume(returning: ReWakeFetchOutcome(
-                        status: zoneStatus ?? .ok, beacons: beacons, changeTokenData: tokenData))
-                case .failure(let error):
-                    continuation.resume(returning: ReWakeFetchOutcome(status: zoneStatus ?? fetchStatus(for: error)))
-                }
-            }
-            operation.qualityOfService = .userInitiated
-            database.add(operation)
+        } onCancel: {
+            operation.cancel()
         }
     }
 

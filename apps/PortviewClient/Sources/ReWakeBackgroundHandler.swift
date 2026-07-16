@@ -46,33 +46,40 @@ struct ReWakeBackgroundHandler {
     var probe: (HostBeaconRecord, ReWakeDecision.Endpoint, String) async -> Bool
     var isForeground: () -> Bool
     var hasLiveSession: () -> Bool
+    /// The pin fingerprint hex of the host the live session is connected to (nil when unknown, e.g.
+    /// mid-connect) — lets routing suppress only the SAME host's wake instead of every wake.
+    var liveSessionPinHex: () -> String? = { nil }
     var postNotification: (HostBeaconRecord) async -> Void
     /// Foreground path: enter the existing in-app saved-Mac reconnect flow for this pin hex.
     var kickReconnect: (String) -> Void
     var now: () -> Date = { Date() }
 
     func run() async -> Outcome {
-        var state = loadState()
-        let fetched = await fetchChanges(state.changeTokenData)
+        var fetched = await fetchChanges(loadState().changeTokenData)
+        if fetched.status == .tokenExpired {
+            // Discard the expired token AND retry from scratch in the SAME run — returning here
+            // would drop the very wake that triggered this push (the system never redelivers it).
+            persist { $0.changeTokenData = nil }
+            fetched = await fetchChanges(nil)
+        }
         switch fetched.status {
         case .zoneNotReady:
             return .noData // host hasn't created the zone yet — silently not-ready, no state change
         case .tokenExpired:
-            state.changeTokenData = nil
-            saveState(state)
-            return .failed // next push refetches the zone from scratch
+            return .failed // expired again straight after a from-scratch fetch — give up this push
         case .failure:
             return .failed // token deliberately not advanced; the next push retries
         case .ok:
             break
         }
-        if let token = fetched.changeTokenData {
-            state.changeTokenData = token
-        }
 
         let hosts = savedHosts()
         var kicked = false
         for beacon in fetched.beacons {
+            // Fresh state each iteration: this run's own stamps AND any concurrent writer's
+            // updates (one-time flags from a foreground refresh) feed the next decision — a stale
+            // whole-struct copy would clobber them at save time.
+            let state = loadState()
             let action = ReWakeDecision.evaluate(
                 beacon: beacon,
                 savedHosts: hosts,
@@ -83,11 +90,15 @@ struct ReWakeBackgroundHandler {
             // Acting = probing: stamp BOTH per-host maps (epoch dedupe + rate-limit clock) before
             // the dial, and persist immediately, so a burst of pushes can't re-probe this beacon
             // even if the background window is killed mid-flight.
-            state.markActed(on: beacon, at: now())
-            saveState(state)
+            let actedAt = now()
+            persist { $0.markActed(on: beacon, at: actedAt) }
             let reachable = await probe(beacon, endpoint, pin)
             switch ReWakeRouting.resolve(
-                probeSucceeded: reachable, isForeground: isForeground(), hasLiveSession: hasLiveSession()) {
+                probeSucceeded: reachable,
+                isForeground: isForeground(),
+                hasLiveSession: hasLiveSession(),
+                liveSessionPinHex: liveSessionPinHex(),
+                beaconPinHex: beacon.recordName) {
             case .staySilent:
                 break
             case .reconnectInApp:
@@ -101,8 +112,22 @@ struct ReWakeBackgroundHandler {
                 await postNotification(beacon)
             }
         }
-        saveState(state) // persists the advanced change token (and any acted-on stamps)
+        // The advanced token is persisted only after the WHOLE batch was processed: a kill
+        // mid-batch then refetches the same changes, and the epoch dedupe skips the beacons
+        // already acted on — persisting it earlier would permanently drop the later hosts' wakes.
+        if let token = fetched.changeTokenData {
+            persist { $0.changeTokenData = token }
+        }
         return .newData
+    }
+
+    /// Narrow read-modify-write: reload, apply one delta, save — atomic on the MainActor (no
+    /// suspension inside), so this run's saves never clobber state written by a concurrent writer
+    /// (foreground refresh flags) or by its own earlier iterations.
+    private func persist(_ mutate: (inout ReWakeState) -> Void) {
+        var fresh = loadState()
+        mutate(&fresh)
+        saveState(fresh)
     }
 }
 
@@ -119,20 +144,43 @@ enum ReWakeTapRouting {
 /// Runs an async operation under a hard wall-clock deadline, returning nil if it doesn't finish in
 /// time. Guards the silent-push budget: the reachability dial and the whole push handler are both
 /// bounded so the fetch completion handler can never be starved by a hung network call.
+///
+/// The deadline is UNCONDITIONAL: the caller resumes at the deadline even when the operation is
+/// not cancellation-cooperative (a task-group race awaits ALL children, so one wedged CloudKit
+/// call would hold it past the budget — the 8n1.3 review's headline finding). The losing
+/// operation is cancelled best-effort and may still finish in the background; its effects must be
+/// (and are) idempotent narrow state writes.
 enum ReWakeDeadline {
+    /// First-resume-wins guard: exactly one of the two racers resumes the continuation.
+    private final class Once: @unchecked Sendable {
+        private let lock = NSLock()
+        private var fired = false
+        func claim() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            if fired { return false }
+            fired = true
+            return true
+        }
+    }
+
     static func run<T: Sendable>(
         seconds: TimeInterval,
         operation: @escaping @Sendable () async -> T?
     ) async -> T? {
-        await withTaskGroup(of: T?.self) { group in
-            group.addTask { await operation() }
-            group.addTask {
-                try? await Task.sleep(for: .seconds(seconds))
-                return nil
+        let once = Once()
+        return await withCheckedContinuation { continuation in
+            let work = Task {
+                let value = await operation()
+                if once.claim() { continuation.resume(returning: value) }
             }
-            let first = await group.next() ?? nil
-            group.cancelAll()
-            return first
+            Task {
+                try? await Task.sleep(for: .seconds(seconds))
+                if once.claim() {
+                    continuation.resume(returning: nil)
+                    work.cancel() // best-effort: a cooperative straggler stops early
+                }
+            }
         }
     }
 }

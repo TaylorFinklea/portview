@@ -81,6 +81,11 @@ struct ContentView: View {
                     case .idle, .failed, nil: false
                     }
                 }
+                // …and WHICH host that session is on (nil until streaming resolves it), so a
+                // different Mac's wake still surfaces as a banner instead of vanishing.
+                reWake.liveSessionPinHex = { [weak session] in
+                    session?.connectedHostToSave?.pinHex
+                }
             }
     }
 

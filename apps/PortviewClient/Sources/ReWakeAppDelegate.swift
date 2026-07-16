@@ -44,9 +44,11 @@ final class ReWakeAppDelegate: NSObject, UIApplicationDelegate {
         didReceiveRemoteNotification userInfo: [AnyHashable: Any],
         fetchCompletionHandler completionHandler: @escaping (UIBackgroundFetchResult) -> Void
     ) {
-        let isForeground = application.applicationState == .active
         Task { @MainActor in
-            let outcome = await ReWakeCenter.shared.handlePush(isForeground: isForeground)
+            // App state is read at ROUTING time (handling spans a fetch + probe, and a transition
+            // mid-handling would mis-route the wake) — not snapshotted here at arrival.
+            let outcome = await ReWakeCenter.shared.handlePush(
+                isForeground: { application.applicationState == .active })
             completionHandler(outcome.fetchResult)
         }
     }
@@ -85,8 +87,14 @@ extension ReWakeAppDelegate: UNUserNotificationCenterDelegate {
         willPresent notification: UNNotification,
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
-        // A push that arrives while foreground already routes straight into the in-app reconnect —
-        // never banner over live UI.
-        completionHandler([])
+        // A re-wake notification that lands while frontmost is deliberate: routing only posts in
+        // the foreground for a DIFFERENT Mac than the live session (the same-host case stays
+        // silent, and with no session the wake kicks the in-app reconnect instead). Suppressing it
+        // here would silently discard the only user-visible signal — show the banner.
+        if notification.request.identifier.hasPrefix("portview-rewake-") {
+            completionHandler([.banner, .list])
+        } else {
+            completionHandler([])
+        }
     }
 }

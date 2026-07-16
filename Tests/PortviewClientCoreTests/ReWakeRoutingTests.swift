@@ -36,4 +36,43 @@ import PortviewClientCore
         let resolution = ReWakeRouting.resolve(probeSucceeded: true, isForeground: true, hasLiveSession: true)
         #expect(resolution == .staySilent)
     }
+
+    // MARK: Per-host live-session suppression (8n1.3 review)
+
+    @Test func liveSessionSuppressesOnlyItsOwnHostsWake() {
+        // Streaming Mac A while Mac B reboots and nudges: B's wake must still surface — as a
+        // notification banner, never a kicked reconnect that would stomp the A session.
+        let sameHost = ReWakeRouting.resolve(
+            probeSucceeded: true, isForeground: true, hasLiveSession: true,
+            liveSessionPinHex: "aa", beaconPinHex: "aa")
+        #expect(sameHost == .staySilent)
+
+        let differentHost = ReWakeRouting.resolve(
+            probeSucceeded: true, isForeground: true, hasLiveSession: true,
+            liveSessionPinHex: "aa", beaconPinHex: "bb")
+        #expect(differentHost == .postNotification)
+    }
+
+    @Test func unknownSessionIdentityStaysConservativelySilent() {
+        // Mid-connect the session's pin may not be resolved yet: never risk bannering over (or
+        // stomping) what may be the same host — the pre-pin behavior is the safe default.
+        for (livePin, beaconPin) in [(nil, "bb"), ("aa", nil), (nil, nil)] as [(String?, String?)] {
+            let resolution = ReWakeRouting.resolve(
+                probeSucceeded: true, isForeground: true, hasLiveSession: true,
+                liveSessionPinHex: livePin, beaconPinHex: beaconPin)
+            #expect(resolution == .staySilent)
+        }
+    }
+
+    @Test func pinDistinctionNeverAffectsBackgroundOrNoSessionPaths() {
+        let background = ReWakeRouting.resolve(
+            probeSucceeded: true, isForeground: false, hasLiveSession: true,
+            liveSessionPinHex: "aa", beaconPinHex: "bb")
+        #expect(background == .postNotification)
+
+        let noSession = ReWakeRouting.resolve(
+            probeSucceeded: true, isForeground: true, hasLiveSession: false,
+            liveSessionPinHex: nil, beaconPinHex: "bb")
+        #expect(noSession == .reconnectInApp)
+    }
 }
