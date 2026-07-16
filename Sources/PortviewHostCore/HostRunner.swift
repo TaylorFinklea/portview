@@ -654,6 +654,7 @@ public struct HostRunner: Sendable {
                 break
             case .clientFeedback(let feedback):
                 clientFeedback.update(feedback)
+                logger.notice("client feedback fps=\(feedback.receivedFPS, privacy: .public) mbps=\(feedback.receivedMbps, privacy: .public) decodeMs=\(feedback.averageDecodeMs, privacy: .public) dropped=\(feedback.droppedFrames, privacy: .public)")
             case .requestKeyframe:
                 // Client asked for a fresh keyframe (e.g. it just returned to the foreground and its
                 // delta chain has a gap). Force the next encoded frame to a keyframe on the active
@@ -664,6 +665,7 @@ public struct HostRunner: Sendable {
             }
             pendingMessage = await inbound.next()
         }
+        logger.notice("session inbound drained — serve loop exiting")
     }
 
     /// Serve the SAS pairing PREAMBLE on an unpinned connection: two-sided commit-then-reveal, then
@@ -772,6 +774,7 @@ public struct HostRunner: Sendable {
         var encoderWidth = 0
         var encoderHeight = 0
         var sequence: UInt64 = 0
+        var pumpErrors = 0
         var needsKeyframe = true
         var stats = QualityStatsAccumulator()
         var rateController: AdaptiveRateController?
@@ -878,8 +881,16 @@ public struct HostRunner: Sendable {
                 encoder = nil
                 needsKeyframe = true
                 if sequence == 0 { logger.warning("frame skipped (will rebuild encoder): \(error, privacy: .public)") }
+                pumpErrors += 1
+                if pumpErrors % 60 == 1 {
+                    logger.notice("pump error #\(pumpErrors, privacy: .public) seq=\(sequence, privacy: .public): \(error, privacy: .public)")
+                }
+            }
+            if sequence > 0, sequence % 120 == 0 {
+                logger.notice("pump alive seq=\(sequence, privacy: .public) errors=\(pumpErrors, privacy: .public)")
             }
         }
+        logger.notice("pump exit seq=\(sequence, privacy: .public) cancelled=\(Task.isCancelled, privacy: .public)")
         capture.stop()
     }
 }
