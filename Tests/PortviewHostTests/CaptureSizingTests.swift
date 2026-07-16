@@ -6,12 +6,23 @@ import Testing
     @Test func pointPixelScaleDoesNotInflateInteractiveOutput() {
         let size = CaptureSizing.outputSize(width: 1710, height: 1107, pointPixelScale: 2.0)
 
-        #expect(size == CaptureSizing.Size(width: 1710, height: 1107))
+        #expect(size == CaptureSizing.Size(width: 1710, height: 1106))
     }
 
     @Test func invalidOrSubOneScaleDoesNotDownscale() {
-        #expect(CaptureSizing.outputSize(width: 1710, height: 1107, pointPixelScale: 0) == CaptureSizing.Size(width: 1710, height: 1107))
-        #expect(CaptureSizing.outputSize(width: 1710, height: 1107, pointPixelScale: 0.5) == CaptureSizing.Size(width: 1710, height: 1107))
+        #expect(CaptureSizing.outputSize(width: 1710, height: 1107, pointPixelScale: 0) == CaptureSizing.Size(width: 1710, height: 1106))
+        #expect(CaptureSizing.outputSize(width: 1710, height: 1107, pointPixelScale: 0.5) == CaptureSizing.Size(width: 1710, height: 1106))
+    }
+
+    @Test func fullDisplayOutputIsAlwaysEvenForTheCodec() {
+        // Notch MacBook built-in displays have ODD logical heights (e.g. 1800×1169). HEVC 4:2:0
+        // pixel transfer rejects odd dims on EVERY frame (kVTPixelTransferNotSupportedErr, -12905),
+        // and HostRunner nils + rebuilds the encoder per failure — zero video reaches the client.
+        // The crop path (`cropOutputSize`) already clamps even; the full-display path must too.
+        let size = CaptureSizing.outputSize(width: 1800, height: 1169, pointPixelScale: 2.0)
+        #expect(size == CaptureSizing.Size(width: 1800, height: 1168))
+        let odd = CaptureSizing.outputSize(width: 1801, height: 1169, pointPixelScale: 1.0)
+        #expect(odd.width % 2 == 0 && odd.height % 2 == 0)
     }
 
     // MARK: - Magnifier crop output sizing (discrete-ladder region streaming)

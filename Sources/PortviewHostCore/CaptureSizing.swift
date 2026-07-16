@@ -7,8 +7,12 @@ struct CaptureSizing {
         var height: Int
     }
 
+    /// Full-display encoder output size. Floored to EVEN dims for the codec: HEVC 4:2:0 pixel
+    /// transfer rejects odd-dimension buffers on every frame (kVTPixelTransferNotSupportedErr,
+    /// -12905) — and notch MacBook built-in displays have odd logical heights (e.g. 1800×1169),
+    /// so passing the display size through unrounded streams zero video from those displays.
     static func outputSize(width: Int, height: Int, pointPixelScale _: Float) -> Size {
-        Size(width: max(1, width), height: max(1, height))
+        Size(width: max(2, width - width % 2), height: max(2, height - height % 2))
     }
 
     /// Snap a normalized crop fraction (0…1) UP onto a coarse geometric ladder (`ratio` rungs). The
