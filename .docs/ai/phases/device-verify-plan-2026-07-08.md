@@ -72,3 +72,24 @@ client, per-source SAS limiter, os.Logger host).
 - **NOT in this sitting (bead 8n1.4, re-wake)**: needs the 8n1.3 client landed on the phone AND
   entitlement activation with an Apple ID signed into Xcode (`PORTVIEW_HOST_ENTITLEMENTS` opt-in
   via `Portview.local.xcconfig`, client aps-environment) — separate sitting.
+
+## Addendum 2026-07-15 — NEW MACHINE: re-pair required, staging redone, sim smoke leg
+
+The dev machine changed 2026-07-15; the Keychain host identity did NOT travel.
+
+- **Every leg's first connect requires a RE-PAIR**: the host mints a fresh identity/pin on this
+  machine, so every saved pairing on Roshar/Sel pins the OLD cert and will (correctly) refuse.
+  Pair via QR or SAS once; the old Saved Mac entry upserts in place. TCC grants are fresh too
+  (Screen Recording, Accessibility — expect the onboarding banner on first host launch).
+- **Builds staged from today's HEAD** (post djx/8z9/e00/s86 + identity fix): host at
+  `/Applications/PortviewHost.app`; client installed in the booted iPhone 17 Pro SIMULATOR.
+  No device build yet — this machine has no Apple ID in Xcode (only SimmerSmith profiles on
+  disk); sign in (Xcode ▸ Settings ▸ Accounts), then:
+  `xcodebuild build -project apps/PortviewClient/PortviewClient.xcodeproj -scheme PortviewClient -destination 'platform=iOS,id=<device>' -allowProvisioningUpdates -allowProvisioningDeviceRegistration`
+  and `xcrun devicectl device install app --device <device> <built>.app`. Sel (iPad,
+  3212F155-8037-5310-B333-F59018F2AD78) is connected; Roshar was unavailable at staging.
+- **Leg 0 (NEW, no hardware needed) — simulator smoke test**: launch the staged host (grant
+  TCC), open Portview in the booted sim, pair via the 6-digit SAS or manual host:port (the sim
+  camera cannot scan the QR), then confirm stream + trackpad control + keyboard + clipboard +
+  zoom basics. This exercises the full product loop on one machine; the hardware legs above
+  remain for feel/perf/camera checks (ProMotion pan, pinch on glass, QR scan).

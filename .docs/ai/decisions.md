@@ -2,6 +2,40 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-15] New-machine session: identity-degradation semantics, re-wake hardening architecture, beads reseed (ACCEPTED)
+
+**Context**: first session on a new machine (beads DB / memory / Keychain identity did not travel);
+baseline re-verified green, then the remaining fleet queue was drained (djx review + fixes, 8z9,
+e00, s86) — 6 commits. Load-bearing decisions:
+
+1. **A transient keychain failure must never rotate the persistent host identity.** Chasing a
+   test flake exposed that `TLSIdentity.loadOrCreatePersistent` collapsed "record absent" and
+   "read THREW" into one `try?` — one securityd hiccup at launch minted a fresh identity AND
+   overwrote the stored record, breaking every client's saved pin. Semantics now: thrown read →
+   ephemeral session identity, store untouched (next launch recovers); decode-corrupt/expired →
+   overwrite-mint (the self-heal, unchanged); import gets one retry before self-heal. The
+   real-keychain test skips the degraded outcome rather than flaking.
+2. **Re-wake hardening architecture (8n1.3 adversarial review, bead djx)**: (a) `ReWakeDeadline`
+   resumes AT the deadline via a first-resume-wins continuation race — a task-group race awaits
+   all children, so one non-cancellation-cooperative CloudKit call starved the silent-push
+   completion handler past the ~30 s watchdog (the review's headline; CK fetch is now also
+   cancellation-cooperative via `operation.cancel()`). (b) Pushes are CHAINED (the e00/beacon
+   pattern client-side) and every handler save is a narrow read-modify-write; the change token
+   persists only after the whole batch (mid-batch kill → refetch + epoch dedupe). (c) One-shot
+   flags burn only after their effect RESOLVES (auth prompt) or is actually visible (denied
+   hint). (d) App state is read at routing time, and a live session suppresses only its OWN
+   host's wake — a different Mac's wake posts a banner (`willPresent` shows re-wake alerts).
+3. **Machine-handoff reseed convention**: beads re-filed from the git-tracked docs under a new
+   `portview-*` prefix (old `screenshare-*` ids kept in descriptions); deliberate-untriage rules
+   re-applied. GOTCHA: `bd init` auto-COMMITS `.beads/` despite the stealth convention — the
+   commit was excised (rebase) and `.beads/` is excluded via `.git/info/exclude` on this machine
+   (repo `.gitignore` deliberately untouched). A git operation that removes tracked `.beads`
+   files deletes bd's config from disk — restore `config.yaml`/`metadata.json` from the dropped
+   commit, the dolt data dir survives untracked.
+4. **jc3 ("auto/pinned mapping pin") was NOT reconstructed** — its description existed only in
+   the lost DB and every plausible reading is already test-covered; the bead carries the analysis
+   and waits for the user to restate intent rather than shipping guessed scope.
+
 ## [2026-07-10] Fleet session: injectable-seam test policy, outbound-lane ownership, lanes landed DORMANT (ACCEPTED)
 
 **Context**: Fable fleet session executed 16 beads (waves: vs9/627/8n1.1/480/42r → w6n.1/w6n.2/90p/b1l
