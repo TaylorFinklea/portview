@@ -3,6 +3,7 @@ import CloudKit
 import Foundation
 import Network
 import PortviewClientCore
+import PortviewProtocol
 import PortviewTransport
 import UserNotifications
 

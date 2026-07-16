@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
 import PortviewClientCore
+import PortviewProtocol
 
 /// Outcome of one CloudKit zone-changes fetch, decoded at the CK edge (`ReWakeCenter`) into pure
 /// values so the handler below never imports CloudKit.

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import CloudKit
 import Foundation
-import PortviewClientCore
 import PortviewHostCore
+import PortviewProtocol
 import Security
 
 /// CloudKit-backed `BeaconStore` — the app-edge implementation behind `HostBeaconWriter` (spec:

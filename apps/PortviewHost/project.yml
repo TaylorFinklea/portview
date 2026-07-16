@@ -27,7 +27,7 @@ targets:
         product: PortviewHostCore
       # HostBeaconRecord (the shared CK record codec) for CloudKitBeaconStore.
       - package: Portview
-        product: PortviewClientCore
+        product: PortviewProtocol
     info:
       path: PortviewHost-Info.plist
       properties:

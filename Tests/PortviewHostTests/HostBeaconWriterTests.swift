@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import Testing
 import Foundation
-import PortviewClientCore
+import PortviewProtocol
 @testable import PortviewHostCore
 
 /// `HostBeaconWriter` writes the CloudKit `HostBeacon` record ONLY on explicit triggers (hosting

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
+import PortviewProtocol
 
 /// The client's persisted CloudKit re-wake state (spec: `docs/superpowers/specs/2026-07-01-cloudkit-rewake.md`
 /// §3): the per-host dedupe/rate-limit maps `ReWakeDecision.evaluate` consumes, plus the zone

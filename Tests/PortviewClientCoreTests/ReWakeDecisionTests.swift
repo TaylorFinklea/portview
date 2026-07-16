@@ -3,6 +3,7 @@ import Foundation
 import Testing
 
 import PortviewClientCore
+import PortviewProtocol
 
 /// `ReWakeDecision.evaluate` policy (spec §3): unknown host → ignore; per-host epoch dedupe/replay
 /// guard that a nudge (`wantsReconnect = 1`) always bypasses; a per-host wall-clock rate limit fed

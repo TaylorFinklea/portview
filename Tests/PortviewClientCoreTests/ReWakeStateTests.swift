@@ -3,6 +3,7 @@ import Foundation
 import Testing
 
 import PortviewClientCore
+import PortviewProtocol
 
 /// `ReWakeState` persistence codec: JSON round-trip of BOTH per-host maps + the change token + the
 /// one-time flags, tolerant decode of missing/corrupt data, and `markActed` stamping both maps

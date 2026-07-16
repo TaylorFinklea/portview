@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Foundation
-import PortviewClientCore
+import PortviewProtocol
 import os
 
 private let logger = Logger(subsystem: "dev.finklea.portview", category: "beacon")

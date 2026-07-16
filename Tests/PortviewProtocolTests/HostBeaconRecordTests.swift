@@ -2,7 +2,7 @@
 import Foundation
 import Testing
 
-import PortviewClientCore
+import PortviewProtocol
 
 /// The CK-record ↔ struct field codec for `HostBeaconRecord`. `recordName` is deliberately NOT part
 /// of the field dictionary (it's CKRecord.ID-level identity, not a CK field), so the codec covers only
