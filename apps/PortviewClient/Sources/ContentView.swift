@@ -36,7 +36,7 @@ struct ContentView: View {
                 PairView(
                     onConnect: { payload in
                         showScanner = false
-                        session.connect(payload: payload)
+                        session.connect(payload: payload, discovered: discovery.hosts)
                     },
                     onManual: { showScanner = false; showManual = true },
                     onClose: { showScanner = false })

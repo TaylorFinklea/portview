@@ -4,6 +4,21 @@ import PortviewTransport
 
 /// Pure planning helpers for re-binding a dropped session and persisting where it connected.
 public enum ReconnectPlanning {
+    /// QR pairing carries the host's certificate pin plus a direct-address fallback. When the
+    /// named host is already visible on Bonjour, prefer its service endpoint so Network.framework
+    /// resolves the reachable interface; otherwise QR remains self-contained for off-LAN pairing.
+    public static func qrPairingCandidates(
+        payload: PairingPayload, discovered: [DiscoveredHost]
+    ) -> [NWEndpoint] {
+        guard let port = NWEndpoint.Port(rawValue: payload.port) else { return [] }
+        let fallback = NWEndpoint.hostPort(host: NWEndpoint.Host(payload.host), port: port)
+        if let name = payload.name,
+           let match = discovered.first(where: { $0.name == name }) {
+            return [match.endpoint]
+        }
+        return [fallback]
+    }
+
     /// Extract a concrete host:port from a connection's resolved endpoint (only `.hostPort` yields
     /// one — a `.service`/`.host`/nil endpoint returns nil). Pure for unit testing.
     public static func hostPort(from endpoint: NWEndpoint?) -> (host: String, port: UInt16)? {

@@ -96,13 +96,15 @@ final class SessionViewModel: ObservableObject {
         start(endpoints: [host.endpoint], pinHex: pinHex, reconnectName: host.name)
     }
 
-    /// Connect from a scanned QR pairing payload (host, port, and pin all included).
-    func connect(payload: PairingPayload) {
-        guard let nwPort = NWEndpoint.Port(rawValue: payload.port) else {
+    /// Connect from a scanned QR pairing payload, preferring a live Bonjour endpoint for the
+    /// advertised host name while retaining the QR's address as an off-LAN fallback.
+    func connect(payload: PairingPayload, discovered: [DiscoveredHost]) {
+        let endpoints = ReconnectPlanning.qrPairingCandidates(payload: payload, discovered: discovered)
+        guard !endpoints.isEmpty else {
             status = .failed("Invalid port.")
             return
         }
-        start(endpoints: [.hostPort(host: NWEndpoint.Host(payload.host), port: nwPort)],
+        start(endpoints: endpoints,
               pinHex: payload.pinHex, reconnectName: payload.name ?? payload.host)
     }
 

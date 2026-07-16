@@ -101,6 +101,34 @@ final class GlassMappingTests: XCTestCase {
         XCTAssertEqual(result, [service.endpoint])
     }
 
+    // MARK: - QR pairing candidates
+
+    /// A scanned QR supplies the certificate pin, but a live Bonjour service for the named Mac
+    /// supplies the sole endpoint so Network.framework can resolve a reachable interface on a
+    /// multi-homed host.
+    func testQRPairingCandidatesUseOnlyNameMatchedBonjourService() {
+        let payload = PairingPayload(
+            host: "10.30.0.101", port: 58901, pinHex: pin, name: "Taylor's MacBook Pro")
+        let match = discovered("Taylor's MacBook Pro")
+
+        let result = ReconnectPlanning.qrPairingCandidates(
+            payload: payload, discovered: [discovered("Other Mac"), match])
+
+        XCTAssertEqual(result, [match.endpoint])
+    }
+
+    /// Off-LAN (or before Bonjour resolves) the QR remains self-contained and dials its baked
+    /// address exactly as it did before this preference was added.
+    func testQRPairingCandidatesUseQRAddressWithoutBonjourMatch() {
+        let payload = PairingPayload(
+            host: "100.112.0.25", port: 58901, pinHex: pin, name: "Taylor's MacBook Pro")
+
+        let result = ReconnectPlanning.qrPairingCandidates(
+            payload: payload, discovered: [discovered("Other Mac")])
+
+        XCTAssertEqual(result, [.hostPort(host: "100.112.0.25", port: 58901)])
+    }
+
     // MARK: - Client quality settings → handshake params
 
     func testDefaultClientSettingsIsAuto() {
