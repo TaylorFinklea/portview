@@ -13,6 +13,11 @@ import PortviewProtocol
                                displayID: 0, width: 1, height: 1, data: [0]))
     }
 
+    private func audio(_ sequence: UInt64) -> AnyMessage {
+        .audioFrame(AudioFrame(sampleRate: 48_000, channels: 2, ptsMicros: sequence,
+                               data: [0, 0, 0, 0]))
+    }
+
     @Test func controlPreservesFIFOOrder() async {
         let buffer = InboundBuffer()
         buffer.enqueue([.bye(Bye(reason: "a")), .clipboardUpdate(ClipboardUpdate(text: "x")), .bye(Bye(reason: "b"))])
@@ -36,6 +41,18 @@ import PortviewProtocol
         #expect(await buffer.next() == .bye(Bye(reason: "ctl")))
         #expect(await buffer.next() == video(1))
         #expect(await buffer.next() == video(2))
+    }
+
+    @Test func audioBurstCannotStarveVideo() async {
+        let buffer = InboundBuffer()
+        buffer.enqueue([video(1)])
+        buffer.enqueue((1...20).map { audio(UInt64($0)) })
+
+        // Audio is realtime media, not control. The bounded audio lane retains the newest eight
+        // packets, then alternates with video instead of allowing an audio burst to hold the
+        // picture on its initial frame indefinitely.
+        #expect(await buffer.next() == audio(13))
+        #expect(await buffer.next() == video(1))
     }
 
     @Test func suspendedNextWakesOnEnqueue() async {

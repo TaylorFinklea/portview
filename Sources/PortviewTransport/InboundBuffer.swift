@@ -7,35 +7,43 @@ import PortviewProtocol
 /// `AsyncStream(unfolding:)` pulling from here).
 ///
 /// Lanes:
-/// - **Control** (everything but video): lossless FIFO. Its buffered payload bytes are metered
+/// - **Control** (everything but audio/video): lossless FIFO. Its buffered payload bytes are metered
 ///   against a high/low water mark — crossing the high water tells the connection to STOP
 ///   re-arming `receive`, so the transport's own flow control (QUIC receive window) pushes back
 ///   on the peer; draining below the low water resumes it (hysteresis, no thrash).
+/// - **Audio**: coalesces to the newest packets. Audio is realtime media, not control: placing it
+///   in the lossless control FIFO lets a steady audio stream starve video forever.
 /// - **Video**: coalesces to the newest `videoLaneDepth` frames (mirrors CaptureEngine's
 ///   `.bufferingNewest(2)`) — a stalled consumer costs at most two frames of memory, and the
-///   drops surface to the host as sequence gaps in `ClientFeedback.droppedFrames`. Video is
-///   delivered after any queued control (control is small and latency-sensitive; video is
-///   newest-wins anyway).
+///   drops surface to the host as sequence gaps in `ClientFeedback.droppedFrames`. When both
+///   realtime lanes have data they alternate, while control remains latency-priority.
 ///
 /// Lock-guarded (the repo's transport/host idiom) because producers arrive on the connection's
 /// DispatchQueue while the consumer suspends in Swift Concurrency.
 final class InboundBuffer: @unchecked Sendable {
     static let defaultVideoLaneDepth = 2
+    static let defaultAudioLaneDepth = 8
     static let defaultControlHighWaterBytes = 4 * 1024 * 1024
     static let defaultControlLowWaterBytes = 1 * 1024 * 1024
 
     private let lock = NSLock()
     private var controlLane: [AnyMessage] = []
     private var controlHead = 0 // popped index — avoids O(n) removeFirst per message
+    private var audioLane: [AnyMessage] = []
     private var videoLane: [AnyMessage] = []
+    /// Alternates realtime delivery whenever both audio and video have work, so neither stream
+    /// can starve the other. The first tie favors audio to keep scheduling its playout buffer warm.
+    private var deliverAudioNext = true
     private var waiter: CheckedContinuation<AnyMessage?, Never>?
     private var finished = false
     private(set) var controlBytesBuffered = 0
+    private(set) var droppedAudioFrames = 0
     private(set) var droppedVideoFrames = 0
     /// True while the connection should NOT re-arm `receive` (control lane above high water).
     private(set) var isReceivePaused = false
 
     private let videoLaneDepth: Int
+    private let audioLaneDepth: Int
     private let controlHighWaterBytes: Int
     private let controlLowWaterBytes: Int
     private var onResumeReceive: @Sendable () -> Void
@@ -49,12 +57,15 @@ final class InboundBuffer: @unchecked Sendable {
     }
 
     var videoFramesBuffered: Int { lock.lock(); defer { lock.unlock() }; return videoLane.count }
+    var audioFramesBuffered: Int { lock.lock(); defer { lock.unlock() }; return audioLane.count }
 
     init(videoLaneDepth: Int = InboundBuffer.defaultVideoLaneDepth,
+         audioLaneDepth: Int = InboundBuffer.defaultAudioLaneDepth,
          controlHighWaterBytes: Int = InboundBuffer.defaultControlHighWaterBytes,
          controlLowWaterBytes: Int = InboundBuffer.defaultControlLowWaterBytes,
          onResumeReceive: @escaping @Sendable () -> Void = {}) {
         self.videoLaneDepth = videoLaneDepth
+        self.audioLaneDepth = audioLaneDepth
         self.controlHighWaterBytes = controlHighWaterBytes
         self.controlLowWaterBytes = controlLowWaterBytes
         self.onResumeReceive = onResumeReceive
@@ -74,6 +85,13 @@ final class InboundBuffer: @unchecked Sendable {
                 if overflow > 0 {
                     videoLane.removeFirst(overflow)
                     droppedVideoFrames += overflow
+                }
+            } else if case .audioFrame = message {
+                audioLane.append(message)
+                let overflow = audioLane.count - audioLaneDepth
+                if overflow > 0 {
+                    audioLane.removeFirst(overflow)
+                    droppedAudioFrames += overflow
                 }
             } else {
                 controlLane.append(message)
@@ -96,8 +114,8 @@ final class InboundBuffer: @unchecked Sendable {
         return paused
     }
 
-    /// Next message: queued control first, then buffered video; suspends when empty; nil once
-    /// `finish()`ed and drained (or when the awaiting task is cancelled).
+    /// Next message: queued control first, then alternating buffered audio/video; suspends when
+    /// empty; nil once `finish()`ed and drained (or when the awaiting task is cancelled).
     func next() async -> AnyMessage? {
         await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<AnyMessage?, Never>) in
@@ -147,7 +165,22 @@ final class InboundBuffer: @unchecked Sendable {
             if controlHead == controlLane.count { controlLane.removeAll(keepingCapacity: true); controlHead = 0 }
             return message
         }
-        if !videoLane.isEmpty { return videoLane.removeFirst() }
+        if !audioLane.isEmpty, !videoLane.isEmpty {
+            if deliverAudioNext {
+                deliverAudioNext = false
+                return audioLane.removeFirst()
+            }
+            deliverAudioNext = true
+            return videoLane.removeFirst()
+        }
+        if !audioLane.isEmpty {
+            deliverAudioNext = false
+            return audioLane.removeFirst()
+        }
+        if !videoLane.isEmpty {
+            deliverAudioNext = true
+            return videoLane.removeFirst()
+        }
         return nil
     }
 
@@ -164,11 +197,10 @@ final class InboundBuffer: @unchecked Sendable {
     }
 
     /// Meter only payload-bearing control messages (a fixed overhead per message plus the big
-    /// variable payloads); video is bounded by lane depth, not bytes.
+    /// variable payloads); realtime audio and video are bounded by lane depth, not bytes.
     private static func approximatePayloadBytes(_ message: AnyMessage) -> Int {
         let payload: Int = switch message {
         case .fileChunk(let m): m.data.count
-        case .audioFrame(let m): m.data.count
         case .clipboardUpdate(let m): m.text.utf8.count
         case .typeText(let m): m.text.utf8.count
         default: 0

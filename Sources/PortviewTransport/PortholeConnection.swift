@@ -22,14 +22,15 @@ public final class PortviewConnection: @unchecked Sendable {
     private let connection: NWConnection
     private let queue: DispatchQueue
     private var decoder = FrameDecoder()
-    /// Two-lane bounded buffer behind `inbound` (internal so tests can observe its bounds).
+    /// Three-lane bounded buffer behind `inbound` (internal so tests can observe its bounds).
     let inboundBuffer: InboundBuffer
 
-    /// Messages received from the peer. Control messages arrive lossless and in order; video
-    /// frames coalesce to the newest two when the consumer falls behind (the drops surface as
-    /// sequence gaps in the client's diagnostics). When buffered control payload crosses the
-    /// buffer's high water, the receive loop pauses so the transport's flow control pushes back
-    /// on the peer; it resumes once this stream is drained below the low water.
+    /// Messages received from the peer. Control messages arrive lossless and in order; realtime
+    /// audio and video coalesce independently to bounded newest-packet/frame lanes and alternate
+    /// when both have work. Video drops surface as sequence gaps in the client's diagnostics.
+    /// When buffered control payload crosses the buffer's high water, the receive loop pauses so
+    /// the transport's flow control pushes back on the peer; it resumes once this stream is
+    /// drained below the low water.
     public let inbound: AsyncStream<AnyMessage>
 
     /// The live connection's resolved remote endpoint (a `.hostPort` once the path is up), so a
