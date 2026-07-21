@@ -6,6 +6,15 @@
 
 `main`
 
+## Latest Session (2026-07-21 #2 — mutual-auth security session: §4 resolved, foundation + §3 core landed)
+
+- Dedicated security session for the mutual-auth epic `portview-han`. TWO adversarial reviews (GPT-5.6 Sol max + Kimi K3, both read-only vs live code) CONVERGED on every load-bearing call. §4 enrollment-trust blocker RESOLVED. Full design + must-fixes: spec §4-RESOLVED section + decisions.md 2026-07-21 ADR.
+- **User-approved decisions**: (a) enrollment root = host-LOCAL one-tap "Allow this device?" + dual-fingerprint compare, for both SAS and QR (Option b confirmed weaker); (b) revoke KILLS live sessions (emergency withdrawal); (c) build the pure wire+crypto core now, stage the UI/gate work.
+- **LANDED (TDD, all green, suite 488→515)**: `PairingStore` §2 (fail-closed, id==SHA256(pubkey) DERIVED not caller-asserted — a Sol finding in my own draft); lane session-token constant-time compare + never-log (both reviewers: defense-in-depth, NOT load-bearing — closes the long-deferred marker); §3 wire+crypto core — `ServerChallenge`(tag 31)/`ClientAuth`(tag 32) + `ClientAuthCrypto` (frozen signed payload, nonce=replay defense, host-cert-hash binding=relay defense). Host app builds. 3 commits.
+- **KEY REVIEW CATCHES folded**: spec's ServerChallenge/ClientAuth tags 30/31 COLLIDED (30=requestKeyframe) → landed 31/32. The host tap is remotely-clickable (global CGEvents + pre-ClientHello input dispatch) → needs LOCAL presence. Enroll must bind at the signed-challenge gate, not a mutable preamble pending-key. Rollout gate must be host-config, never wire-negotiated (negotiate takes the LOWER version).
+- **Staged as sub-beads** (parented to portview-han, out of fleet — security session only): han.1 handshake-gate wiring + rollout policy; han.2 client keypair + ClientIdentityStore (§1); han.3 enrollment ceremony (local-presence prompt + dual-fingerprint UI — user product/device-gated); han.4 revoke-kills-live + ClientKeyID/epoch registry + menu-bar revoke UI.
+- NEXT: han.2 (client keypair, pure/TDD) or han.1 (gate wiring) are the natural next code steps; han.3 needs the version-sequencing decision (touches ProtocolVersion vs the dormant-lanes lever — flagged for user) + UI. Review + push the now-**10 unpushed commits** on main.
+
 ## Latest Session (2026-07-21 — FREEZE FIXED + device-verified: client keyframe recovery landed; product test PASSES)
 
 - **The freeze is dead.** Root cause (from 2026-07-16 on-device diagnostics): the video lane's newest-2 coalescing dropped frames by design, but nothing recovered — one dropped delta broke the HEVC chain, every later decode failed -12909 silently, picture froze forever. Fix (1 commit): `KeyframeRecovery` policy (PortviewClientCore, 12 tests) + `InboundBuffer` newest-keyframe pinning (4 tests) + SessionViewModel wiring incl. first client os.Logger. ADR: decisions.md (2026-07-21). Design adversarially reviewed by GPT-5.6 Sol (max, 2-pass — its 3 upgrades are in the ADR).

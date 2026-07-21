@@ -163,3 +163,103 @@ fingerprint)" confirm that §4 already mandates for QR; or (b) bind the enrolled
 SAS transcript (cover it in the confirm MAC) so the host rejects a pubkey that didn't participate
 in the matched session. Until resolved, `t-authgate` stays `tier_floor: lead` and blocked on this
 decision. Full review output: the session's `w9tenxck7` workflow result.
+
+## §4 RESOLVED + full hardening (2026-07-21, adversarial review: GPT-5.6 Sol max + Kimi K3)
+
+Two independent adversarial reviews (Sol at max effort, Kimi K3) CONVERGED: **Option (a) is the
+enrollment trust root — SOUND-WITH-FIXES.** Option (b) is confirmed *weaker*, not stronger: the
+SAS confirm MAC derives from `clientNonce+hostNonce+certSHA256` (all transcript-public;
+SASCode.swift:67-83), so any peer that ran a preamble can produce a valid confirm over *its own*
+pubkey with zero human involvement. No MAC over transcript-derived keys can prove human approval
+of a specific key; keep (b)-style transcript/key binding only as complementary defense-in-depth,
+never as an auto-enroll exemption. **Decision: Option (a).** `t-store` (§2, PairingStore) is
+IMPLEMENTED (2026-07-21, fail-closed + id==SHA256(pubkey) derived). The must-fixes below are
+mandatory before `t-authgate` ships — without fixes 1–2 the recommendation is BROKEN (blind-tap
+TOFU), per both reviewers.
+
+**Enrollment must-fixes (fold into §4):**
+
+1. **Enroll at the signed-challenge gate, not from preamble data.** Unknown pubkey + VALID
+   signature over the fresh nonce on the *pinned re-dial* + open pairing window → raise the
+   prompt → Allow → `enroll` → proceed. This makes displayed fingerprint == enrolled key == the
+   key that just proved possession on a pinned channel, closing the display→enroll binding gap by
+   construction (both reviewers). Ordering trap: the client re-dials pinned immediately on match
+   (SASClientCoordinator.swift:138), so its first `ClientAuth` arrives UNENROLLED — the gate must
+   treat "unknown key, valid sig, window open" as prompt-pending, not instant-close. Enroll the
+   exact pubkey byte-snapshot captured at prompt-render; never re-read a mutable "pending key" at
+   tap time.
+2. **Client displays its own key fingerprint during pairing; host prompt shows the same
+   host-computed fingerprint** for the human to COMPARE (≥ 80 displayed bits, e.g. 8 bytes hex or
+   a word encoding). Without an independently-shown reference the tap is explicit TOFU.
+3. **The host approval tap must require genuine LOCAL presence** (Sol, critical): Portview injects
+   CGEvents globally (InputInjector.swift) and input dispatches even before `ClientHello`
+   (HostRunner.swift:640-641), so an attacker with temporary/compromised access could remotely
+   click "Allow." Require `LAContext`/Touch ID, OR atomically suspend all remote input + discard
+   queued injected events + reject Portview-originated input until the prompt is dismissed.
+   Disconnect existing legacy sessions before enabling enrollment.
+4. **`deviceName` is attacker-controlled** (ClientHello.swift:6-18): label it "a device calling
+   itself X", sanitize control/bidi chars, truncate, and NEVER use it for identity — the
+   fingerprint is the sole anchor.
+5. **One outstanding enrollment request per user-opened window** (or an immutable attempt UUID on
+   every event). The request captures `{attemptID, exact publicKey, host-computed fingerprint,
+   claimedName, expiry, session binding}`; Allow atomically consumes THAT exact request; Deny/
+   timeout/close invalidates it and blocks that source for the window (reuse
+   `SASPairingControl.sourceKey`).
+6. **Pin the first in-flight preamble's HUD code** until it resolves — the single-slot `.sasCode`
+   overwrite (HostRunner.swift:711) is a pre-existing pairing-DoS that compounds prompt confusion.
+
+**§3 handshake corrections (fold into §3 + Wire additions):**
+
+- **TAGS ARE WRONG in the original spec.** Tag 30 is already `requestKeyframe`, 29 is
+  `clientFeedback` (MessageType.swift:39-40). Allocate **`ServerChallenge` = tag 31**,
+  **`ClientAuth` = tag 32**. Each lands with a golden KAT + EnumTests entry (wire-safety gates).
+- **Message order:** `ClientHello → ServerChallenge → ClientAuth → ServerHello → StartSession`
+  (the host needs the first client message to distinguish streaming vs SAS; the client already
+  sends ClientHello first — SessionViewModel.swift:505-515). First frame must be exactly
+  `SASClientCommit` or `ClientHello`; anything else closes. No privileged resources built before a
+  successful `ClientAuth`.
+- **Frozen signed bytes:** `UTF8("Portview client-auth v1") ‖ nonce[32] ‖ hostCertDER_SHA256[32]`
+  — no hex, no optional/variable-length fields. `ServerChallenge` = the 32-byte nonce ONLY (a
+  server-supplied cert hash would let a relay obtain a signature over the real host's hash);
+  client signs the pin it already holds. New decoders reject trailing bytes. Fresh CSPRNG nonce
+  per connection, one auth response under a short deadline, close on timeout/malformed/unexpected/
+  verify-fail. **Remove the empty-array `hostCertSHA256` fallback (HostRunner.swift:149)** — auth
+  binding must fail closed if the 32-byte hash is unavailable.
+
+**Rollout gate (never wire-negotiated):** `ProtocolVersion.negotiate` takes the LOWER version, so
+"authenticate when version ≥ authVersion" is bypassable by advertising v1. Ship a HOST-LOCAL
+policy: `.required` (default, fail-closed) vs `.legacyBootstrap(expiresAt:)` (explicit, warned,
+time-bounded; new-capability clients still authenticate; closing it disconnects legacy sessions).
+Version sequencing interacts with the dormant lanes lever (memory `lanes-dormant-lever`): because
+`current==1` and dormant `laneVersion==2` would activate lanes if `current` bumped, the clean
+order is `mutualAuthVersion=2`, MOVE dormant `laneVersion→3`, set `current=2` for mutual auth,
+activate lanes later at v3 after their A/B. Safe one-directional auto-promotion `bootstrap→required`
+once the PairingStore is non-empty (only auth-capable clients can have enrolled). **This
+version/lanes interaction is a user-facing sequencing decision — confirm before touching
+`ProtocolVersion`.**
+
+**Revocation = emergency capability withdrawal (both reviewers): revoke MUST terminate live
+sessions**, not just future handshakes — a screen-control tool leaves keyboard/mouse/clipboard/
+file access running otherwise, and active traffic prevents the QUIC idle timeout from bounding it.
+Implementation properties: keep both per-connection `SessionID` and authenticated `ClientKeyID`
+(thread the key id into `control.register`, HostRunner.swift:614); index `byClient`; serialize
+admission + revocation through one shared authority (avoid multiple PairingStore instances with
+stale caches); use an enrollment generation/epoch so a delayed teardown can't kill a later
+re-enrollment; make authorization-check + session registration atomic (or register-then-recheck
+before privileged setup); mark the session capability invalid BEFORE closing transport
+(InboundBuffer.finish drains queued messages — buffered input could execute post-revoke); don't
+reuse `disconnectAll()` (it sends `bye` async before closing) as the security primitive — revoke
+invalidates synchronously and closes immediately. A separate "deny future reconnects" op may have
+deferred semantics; Revoke may not.
+
+**Lane token hygiene: DONE** (2026-07-21, commit). Constant-time compare + never-log landed;
+both reviewers confirmed it is defense-in-depth, NOT load-bearing (reachable only by the pinned
+tunnel peer already holding the 32-byte token; 8-attempt cap).
+
+**Re-sequenced beads:** `t-store` DONE. `t-authgate` (now materially larger than the original
+spec) splits into: (i) wire additions `ServerChallenge`/`ClientAuth` tags 31/32 + KATs + client
+Curve25519 keypair/ClientIdentityStore (§1) + signed-challenge crypto (pure, TDD); (ii) the
+`serveSession` auth gate + host-local rollout policy; (iii) the enrollment ceremony (local-presence
+prompt + dual-fingerprint compare + per-window request) — has real iOS/macOS UI + a user product
+decision; (iv) revoke-kills-live-sessions + the ClientKeyID/epoch session-registry changes + menu-
+bar revoke UI. All `tier_floor: lead`.

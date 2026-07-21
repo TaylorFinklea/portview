@@ -2,6 +2,56 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-21] Mutual-auth epic: enrollment trust root + hardened handshake design (ACCEPTED)
+
+**Context**: the dedicated security session for the mutual-auth epic (`portview-han`, was
+1nt/7jl/5yw/9m2). The host authenticates NO client today — any peer reaching host:port with a bare
+`ClientHello` gets full screen+input control. Spec `docs/superpowers/specs/2026-07-01-revocable-
+pairing-mutual-auth.md` (§4 enrollment-trust was the open blocker). Two independent adversarial
+reviews — **GPT-5.6 Sol (max) + Kimi K3** — both READ-ONLY against live code; they CONVERGED on
+every load-bearing call. User approved the decisions below.
+
+1. **Enrollment root = Option (a): a host-LOCAL one-tap "Allow this device?" with dual-fingerprint
+   compare, required for BOTH SAS and QR.** Option (b) (bind pubkey into the SAS transcript) is
+   confirmed *weaker*, not stronger: the SAS confirm MAC key derives from transcript-public values
+   (`clientNonce+hostNonce+certSHA256`, SASCode.swift:67-83), so any peer that ran a preamble
+   forges a valid confirm over its own key — SAS authenticates host→human, never device→host. No
+   transcript-derived MAC can prove human approval of a specific key. (a) unifies both paths on one
+   root, one tap per device ever.
+2. **The one-tap needs three hardening properties or it's blind-tap TOFU** (both reviewers): (i)
+   enroll at the SIGNED-CHALLENGE gate on the pinned re-dial (unknown key + valid sig + open
+   window → prompt), so displayed fingerprint == enrolled key == key that proved possession — NOT
+   from a mutable preamble "pending key" an attacker races inside the 120s window; (ii) the client
+   must DISPLAY its own key fingerprint for the human to compare (≥80 bits); (iii) the host tap
+   must require genuine LOCAL presence (LAContext, or atomically suspend+discard remote input until
+   dismissed) — because Portview injects CGEvents globally and input dispatches even pre-`ClientHello`,
+   so an attacker with temporary access could otherwise REMOTELY click Allow. `deviceName` is
+   attacker-controlled → label "claimed", never trust for identity.
+3. **Revoke = emergency capability withdrawal: it terminates LIVE sessions**, not just future
+   handshakes (user-approved). A revoked-but-live device otherwise keeps keyboard/screen/clipboard/
+   file access, and active traffic prevents the QUIC idle timeout from bounding it. Needs a
+   per-session `ClientKeyID` threaded into the registry + an enrollment epoch so a delayed teardown
+   can't kill a later re-enrollment, and capability-invalidation BEFORE transport close (InboundBuffer
+   drains queued messages, so buffered input could execute post-revoke).
+4. **Rollout gate is host-LOCAL config, never wire-negotiated** — `ProtocolVersion.negotiate` takes
+   the lower version, so any "authenticate when version ≥ N" is bypassable by advertising v1. Ship
+   `.required` (default, fail-closed) vs `.legacyBootstrap(expiresAt:)` (explicit, time-bounded).
+   Version sequencing interacts with the dormant-lanes lever (`current==1`, dormant `laneVersion==2`):
+   the clean order is mutualAuth=v2, move dormant laneVersion→3, set current=2, activate lanes at v3
+   after their A/B. **Flagged as a user sequencing decision before touching `ProtocolVersion`.**
+5. **Wire framing corrections** (Sol): the spec's `ServerChallenge=30`/`ClientAuth=31` collided —
+   tag 30 is `requestKeyframe`. Landed as **31/32**, fixed-width payloads, decoders reject trailing
+   bytes (Frame doesn't enforce exhaustion). Signed payload frozen: version tag ‖ nonce[32] ‖
+   hostCertDER_SHA256[32]; `ServerChallenge` carries the nonce ONLY (a server-supplied cert hash
+   would let a relay harvest a real-host signature). Remove the empty-array `hostCertSHA256` fallback
+   (HostRunner.swift:149) — auth binding must fail closed.
+
+**Landed this session** (TDD, all green, suite 500→515): `PairingStore` §2 (fail-closed,
+id==SHA256(pubkey) derived not caller-asserted — a Sol finding in my own first draft); lane
+session-token constant-time compare + never-log (both reviewers: defense-in-depth, not
+load-bearing); the §3 wire+crypto core (ServerChallenge/ClientAuth + ClientAuthCrypto). The gate
+wiring, enrollment ceremony (iOS/macOS UI), and revoke-epoch are staged as sub-beads (below).
+
 ## [2026-07-21] Client-pull keyframe recovery: the lossy video lane finally has a resync path (ACCEPTED)
 
 **Context**: the residual "freezes immediately/at ~10s" bug from the 2026-07-16 session,
