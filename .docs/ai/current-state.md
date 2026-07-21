@@ -6,6 +6,14 @@
 
 `main`
 
+## Latest Session (2026-07-21 — FREEZE FIXED + device-verified: client keyframe recovery landed; product test PASSES)
+
+- **The freeze is dead.** Root cause (from 2026-07-16 on-device diagnostics): the video lane's newest-2 coalescing dropped frames by design, but nothing recovered — one dropped delta broke the HEVC chain, every later decode failed -12909 silently, picture froze forever. Fix (1 commit): `KeyframeRecovery` policy (PortviewClientCore, 12 tests) + `InboundBuffer` newest-keyframe pinning (4 tests) + SessionViewModel wiring incl. first client os.Logger. ADR: decisions.md (2026-07-21). Design adversarially reviewed by GPT-5.6 Sol (max, 2-pass — its 3 upgrades are in the ADR).
+- **Device-verified on Roshar (fresh USB pairing to this Mac now exists — wireless installs work from here on)**: startup showed dropped=12 (the exact old freeze trigger) → healed instantly, 57fps steady, user confirms working session with motion.
+- Verify at close: package **488/90** green; client device build SUCCEEDED + installed; host running all 2026-07-16 fixes.
+- Beads: portview-4x8 CLOSED. Filed portview-waa (timer-driven ClientFeedback — feedback currently goes silent exactly when decode breaks, Sol-confirmed design flaw) → blocks portview-sq0 (host keyframe-request limiter + feedback-silence watchdog). Both triaged senior/M.
+- NEXT: user reviews + pushes **4 unpushed commits** (3× 2026-07-16 + keyframe recovery); demote-or-keep decision on the notice-level host session diagnostics (pump heartbeat etc.) when convenient; then the standing queue — portview-han security session, waa/sq0, l4y decisions, cqv.2 notarization, w6n.6 lane A/B, device-verify sitting (2u9).
+
 ## Latest Session (2026-07-16 — blank-screen debugging: 2 host bugs fixed + device-verified; freeze localized to phone's stale build)
 
 - Continued Codex's blank-screen session. THREE bugs: (1) odd-height notch display (1800×1169) → HEVC -12905 every frame → host sent ZERO video (yesterday's "black screen"; `dd805e2`, even-clamp `outputSize`); (2) lane preamble deadline cancelled the iPhone tunnel's phantom zero-byte stream → nw cascade killed the live session at ~6.5s (`e5d7f2f`, park zero-byte streams); (3) residual ~7-10s freeze = PHONE-side. ADR: decisions.md (2026-07-16).

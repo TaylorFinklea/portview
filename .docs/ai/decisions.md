@@ -2,6 +2,39 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-21] Client-pull keyframe recovery: the lossy video lane finally has a resync path (ACCEPTED)
+
+**Context**: the residual "freezes immediately/at ~10s" bug from the 2026-07-16 session,
+localized on-device with client console diagnostics. Root cause: the video lane's newest-2
+coalescing is BY DESIGN lossy, but nothing recovered from a drop — one coalesced-away HEVC
+delta broke the reference chain, every later delta failed decode (-12909) forever, and the
+`try?` swallowed it all. The only keyframe-request trigger was the app-foreground hook.
+Design adversarially reviewed by GPT-5.6 Sol (max effort, two-pass; its review upgraded the
+fix in three ways noted below). Fixed + device-verified (startup dropped=12 → healed, 57fps).
+
+1. **Recovery is client-PULL, policy-owned, and single-limited.** `KeyframeRecovery`
+   (PortviewClientCore, pure): keyframe always heals; a delta breaks the chain on gap, rewind,
+   or no-keyframe-history; decode failure breaks it too; ALL triggers — gap, decode failure,
+   app-foreground — share ONE 1s rate limiter (Sol: separate limiters could double-request;
+   an unlimited re-ask could ratchet a lossy link into keyframe-only streaming, ~1.4Mbps
+   per extra IDR/s). Generation `reset()` at session start + display switch because host
+   pumps restart sequence numbering and a new pump's leading IDR can itself drop —
+   cross-generation contiguity is accidental (Sol's gap-predicate finding). No new wire
+   message: `.requestKeyframe` already is the recovery protocol.
+2. **The buffer pins the newest KEYFRAME against eviction** (`InboundBuffer`). Sol's deepest
+   find: the recovery IDR the client just requested could be coalesced away by the very
+   frame burst it recovers from — the fix could defeat itself. Newest keyframe is exempt
+   from newest-wins; deltas around it still coalesce; lane stays depth-bounded; a newer
+   keyframe supersedes the pin.
+3. **Decode failures are observable now**: the client's first `os.Logger`
+   (`dev.finklea.portview` / `video`), throttled by the recovery limiter — never per-frame.
+   The silent `try?` that hid 480+ consecutive decode failures is gone.
+4. **NOT adopted (deliberate)**: host periodic IDR (belt-and-braces cost on every session vs
+   a pull that fires only on damage); deeper startup lane (mitigation, not fix); skipping
+   known-broken deltas pre-decode (cheap VT failures; revisit only if profiling says so).
+   Host-side request limiter + feedback-silence watchdog filed as beads (sq0, gated on waa —
+   feedback still piggybacks on successful decode, a design flaw Sol confirmed).
+
 ## [2026-07-16] Blank-screen debugging: codec dims are a full-path invariant; never cancel a never-ready inbound QUIC stream (ACCEPTED)
 
 **Context**: first real product test on the new machine — phone connected but showed a black
