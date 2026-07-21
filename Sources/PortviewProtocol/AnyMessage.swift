@@ -31,6 +31,8 @@ public enum AnyMessage: Equatable, Sendable {
     case pong(Pong)
     case clientFeedback(ClientFeedback)
     case requestKeyframe(RequestKeyframe)
+    case serverChallenge(ServerChallenge)
+    case clientAuth(ClientAuth)
 
     public var messageType: MessageType {
         switch self {
@@ -64,6 +66,8 @@ public enum AnyMessage: Equatable, Sendable {
         case .pong: .pong
         case .clientFeedback: .clientFeedback
         case .requestKeyframe: .requestKeyframe
+        case .serverChallenge: .serverChallenge
+        case .clientAuth: .clientAuth
         }
     }
 }

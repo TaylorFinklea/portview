@@ -208,4 +208,23 @@ import Testing
         // Empty payload: bodyLength = 1 (just the type byte). Frame = [varint 1][type 30].
         #expect(Frame.encodeAny(.requestKeyframe(RequestKeyframe())) == [1, 30])
     }
+
+    @Test func serverChallengeWireBytesArePinned() {
+        // 32-byte nonce, no length prefix. bodyLength = 1 + 32 = 33. Frame = [33, 31, nonce×32].
+        let m = ServerChallenge(nonce: [UInt8](repeating: 0xAA, count: 32))
+        #expect(Frame.encodeAny(.serverChallenge(m)) == [33, 31] + [UInt8](repeating: 0xAA, count: 32))
+    }
+
+    @Test func clientAuthWireBytesArePinned() {
+        // 32-byte key ‖ 64-byte sig, no length prefixes. bodyLength = 1 + 32 + 64 = 97.
+        let m = ClientAuth(publicKey: [UInt8](repeating: 0xBB, count: 32),
+                           signature: [UInt8](repeating: 0xCC, count: 64))
+        #expect(Frame.encodeAny(.clientAuth(m))
+                == [97, 32] + [UInt8](repeating: 0xBB, count: 32) + [UInt8](repeating: 0xCC, count: 64))
+    }
+
+    @Test func serverChallengeAndClientAuthTagsArePinned() {
+        #expect(MessageType.serverChallenge.rawValue == 31)
+        #expect(MessageType.clientAuth.rawValue == 32)
+    }
 }

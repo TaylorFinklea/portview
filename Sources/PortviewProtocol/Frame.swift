@@ -66,6 +66,8 @@ public enum Frame {
         case .pong(let m): encode(m)
         case .clientFeedback(let m): encode(m)
         case .requestKeyframe(let m): encode(m)
+        case .serverChallenge(let m): encode(m)
+        case .clientAuth(let m): encode(m)
         }
     }
 
@@ -118,6 +120,8 @@ public enum Frame {
         case .pong: return .pong(try Pong(from: &r))
         case .clientFeedback: return .clientFeedback(try ClientFeedback(from: &r))
         case .requestKeyframe: return .requestKeyframe(try RequestKeyframe(from: &r))
+        case .serverChallenge: return .serverChallenge(try ServerChallenge(from: &r))
+        case .clientAuth: return .clientAuth(try ClientAuth(from: &r))
         }
     }
 }

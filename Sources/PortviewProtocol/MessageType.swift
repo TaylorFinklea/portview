@@ -38,4 +38,6 @@ public enum MessageType: UInt8, Sendable, CaseIterable {
     case pong = 28
     case clientFeedback = 29
     case requestKeyframe = 30
+    case serverChallenge = 31
+    case clientAuth = 32
 }
