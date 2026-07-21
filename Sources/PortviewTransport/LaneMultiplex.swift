@@ -42,18 +42,25 @@ enum StreamClassifier {
 /// depth on top of the tunnel's native grouped delivery). Minted at handshake, carried to the
 /// client in `ServerHello.sessionToken`, presented back in every `LanePreamble`.
 public enum LaneSessionToken {
-    /// Mint a fresh token from the system CSPRNG.
-    ///
-    /// SECURITY MARKER (deliberate deferral): token COMPARISON on the accept path is a plain
-    /// byte-equality lookup, and hygiene (constant-time compare, never-log) is DEFERRED to the
-    /// security-review pass per the lane-splitting spec's review fold — do not bolt ad-hoc
-    /// hardening on here.
+    /// Mint a fresh token from the system CSPRNG. Token COMPARISON on the accept path is
+    /// constant-time (`AcceptedTunnel.bind`) and the token is never logged — the 2026-07-21
+    /// security-review hygiene pass; see the compare there.
     public static func mint() -> [UInt8] {
         var bytes = [UInt8](repeating: 0, count: LanePreamble.tokenLength)
         let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
         precondition(status == errSecSuccess, "SecRandomCopyBytes failed: \(status)")
         return bytes
     }
+}
+
+/// Constant-time equality for two byte arrays: XOR-accumulate over every byte, no early return, so
+/// the running time depends only on length (the token length is a fixed public constant), never on
+/// content. The standard primitive for comparing a secret against attacker-supplied bytes.
+func constantTimeEqual(_ a: [UInt8], _ b: [UInt8]) -> Bool {
+    guard a.count == b.count else { return false }
+    var difference: UInt8 = 0
+    for i in 0..<a.count { difference |= a[i] ^ b[i] }
+    return difference == 0
 }
 
 /// One secondary lane stream bound to an authorized session: the preamble's `Lane` plus a
@@ -410,14 +417,25 @@ final class AcceptedTunnel: @unchecked Sendable {
     let group: NWConnectionGroup
     private let lock = NSLock()
     private var lanePathStreams = 0
-    private var authorizations: [[UInt8]: LaneAuthorization] = [:]
+    /// Authorization records (usually exactly one per tunnel). NOT a token-keyed dictionary: the
+    /// presented token on `bind` is attacker-controlled, and a hashed/`==` lookup is a
+    /// byte-prefix timing oracle. Stored as records so `bind` scans them with a constant-time
+    /// compare and revoke keys on object identity, never on a second attacker-facing token lookup
+    /// (security-review must-fix, 2026-07-21). Defense-in-depth only — a lane stream reaches here
+    /// solely on the pinned tunnel's own group, and the token is a 32-byte CSPRNG secret the host
+    /// handed that same client; the cap bounds guesses to 8/tunnel.
+    private var authorizations: [LaneAuthorization] = []
 
     /// One authorized session token's lane bindings and delivery stream. `@unchecked Sendable`:
     /// `boundLanes` is only touched under the owning tunnel's lock.
     private final class LaneAuthorization: @unchecked Sendable {
+        let token: [UInt8]
         let continuation: AsyncStream<AcceptedLane>.Continuation
         var boundLanes: Set<Lane> = []
-        init(continuation: AsyncStream<AcceptedLane>.Continuation) { self.continuation = continuation }
+        init(token: [UInt8], continuation: AsyncStream<AcceptedLane>.Continuation) {
+            self.token = token
+            self.continuation = continuation
+        }
     }
 
     init(group: NWConnectionGroup) {
@@ -431,23 +449,26 @@ final class AcceptedTunnel: @unchecked Sendable {
     /// dead session's token can't bind new lanes.
     func authorize(sessionToken: [UInt8]) -> AsyncStream<AcceptedLane> {
         let (stream, continuation) = AsyncStream<AcceptedLane>.makeStream()
-        let authorization = LaneAuthorization(continuation: continuation)
+        let authorization = LaneAuthorization(token: sessionToken, continuation: continuation)
         lock.lock()
-        let replaced = authorizations[sessionToken]
-        authorizations[sessionToken] = authorization
+        // Replace any prior authorization for the same token (host-minted, trusted input here —
+        // this is not the attacker-facing timing surface `bind` is). Finish the replaced stream.
+        let replaced = authorizations.filter { constantTimeEqual($0.token, sessionToken) }
+        authorizations.removeAll { auth in replaced.contains { $0 === auth } }
+        authorizations.append(authorization)
         lock.unlock()
-        replaced?.continuation.finish()
+        replaced.forEach { $0.continuation.finish() }
         continuation.onTermination = { [weak self, weak authorization] _ in
-            self?.revoke(sessionToken: sessionToken, ifStill: authorization)
+            self?.revoke(ifStill: authorization)
         }
         return stream
     }
 
-    private func revoke(sessionToken: [UInt8], ifStill authorization: LaneAuthorization?) {
+    private func revoke(ifStill authorization: LaneAuthorization?) {
         lock.lock()
         defer { lock.unlock() }
-        guard let authorization, authorizations[sessionToken] === authorization else { return }
-        authorizations[sessionToken] = nil
+        guard let authorization else { return }
+        authorizations.removeAll { $0 === authorization }  // object identity, not a token lookup
     }
 
     /// Count one stream entering the lane-preamble path; false once the per-tunnel cap is hit.
@@ -464,14 +485,18 @@ final class AcceptedTunnel: @unchecked Sendable {
     /// unknown/not-yet-authorized or the lane is already bound (a token-holder must not bind N
     /// "video" streams and multiply host send work).
     ///
-    /// SECURITY MARKER (deliberate deferral): the token check is a plain byte-equality dictionary
-    /// lookup; constant-time compare + never-log hygiene are DEFERRED to the security-review pass
-    /// per the lane-splitting spec's review fold.
+    /// The presented token is matched CONSTANT-TIME against every authorization, scanning all
+    /// records without early return, so binding time doesn't leak how many token bytes matched
+    /// or which record hit. The token is never logged (nor is the preamble) — a rejection is
+    /// silent. (2026-07-21 security-review: closes the deferred hygiene marker.)
     func bind(_ preamble: LanePreamble, connection: PortviewConnection) -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard let authorization = authorizations[preamble.sessionToken],
-              !authorization.boundLanes.contains(preamble.lane) else {
+        var matched: LaneAuthorization?
+        for authorization in authorizations where constantTimeEqual(authorization.token, preamble.sessionToken) {
+            matched = authorization  // no break: scan every record so timing is token-independent
+        }
+        guard let authorization = matched, !authorization.boundLanes.contains(preamble.lane) else {
             return false
         }
         authorization.boundLanes.insert(preamble.lane)
@@ -482,7 +507,7 @@ final class AcceptedTunnel: @unchecked Sendable {
     /// Finish every authorization's lane stream (tunnel teardown).
     func finishAuthorizations() {
         lock.lock()
-        let live = authorizations.values
+        let live = authorizations
         authorizations.removeAll()
         lock.unlock()
         for authorization in live {
