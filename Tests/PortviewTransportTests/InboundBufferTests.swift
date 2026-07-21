@@ -8,8 +8,8 @@ import PortviewProtocol
         .fileChunk(FileChunk(transferID: id, isLast: isLast, data: [UInt8](repeating: 0, count: bytes)))
     }
 
-    private func video(_ sequence: UInt64) -> AnyMessage {
-        .videoFrame(VideoFrame(sequence: sequence, ptsMicros: sequence, isKeyframe: false,
+    private func video(_ sequence: UInt64, isKeyframe: Bool = false) -> AnyMessage {
+        .videoFrame(VideoFrame(sequence: sequence, ptsMicros: sequence, isKeyframe: isKeyframe,
                                displayID: 0, width: 1, height: 1, data: [0]))
     }
 
@@ -33,6 +33,42 @@ import PortviewProtocol
         #expect(buffer.droppedVideoFrames == 3)
         #expect(await buffer.next() == video(4))
         #expect(await buffer.next() == video(5))
+    }
+
+    @Test func overflowCannotEvictTheNewestKeyframe() async {
+        // A keyframe is the decoder's only resync point (2026-07-16 freeze): the recovery IDR the
+        // client just requested must not be coalesced away by the very burst it recovers from.
+        // Deltas around it are still newest-wins.
+        let buffer = InboundBuffer()
+        buffer.enqueue([video(10, isKeyframe: true), video(11), video(12), video(13), video(14)])
+        #expect(buffer.videoFramesBuffered == 2)
+        #expect(await buffer.next() == video(10, isKeyframe: true))
+        #expect(await buffer.next() == video(14))
+    }
+
+    @Test func aNewerKeyframeSupersedesTheOldPin() async {
+        let buffer = InboundBuffer()
+        buffer.enqueue([video(1, isKeyframe: true), video(2), video(3, isKeyframe: true), video(4), video(5)])
+        #expect(await buffer.next() == video(3, isKeyframe: true))
+        #expect(await buffer.next() == video(5))
+    }
+
+    @Test func keyframeArrivingAfterDeltaOverflowIsRetained() async {
+        // The recovery scenario end-to-end: deltas overflowed (consumer stalled), then the host's
+        // requested IDR lands mid-burst — it must still reach the consumer.
+        let buffer = InboundBuffer()
+        buffer.enqueue([video(1), video(2), video(3)])
+        buffer.enqueue([video(4, isKeyframe: true), video(5), video(6), video(7)])
+        #expect(await buffer.next() == video(4, isKeyframe: true))
+        #expect(await buffer.next() == video(7))
+    }
+
+    @Test func allKeyframeLaneStillBoundedAndNewestWins() async {
+        let buffer = InboundBuffer()
+        buffer.enqueue([video(1, isKeyframe: true), video(2, isKeyframe: true), video(3, isKeyframe: true)])
+        #expect(buffer.videoFramesBuffered == 2)
+        #expect(await buffer.next() == video(2, isKeyframe: true))
+        #expect(await buffer.next() == video(3, isKeyframe: true))
     }
 
     @Test func controlDrainsBeforeBufferedVideo() async {

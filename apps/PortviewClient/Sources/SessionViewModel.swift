@@ -3,10 +3,13 @@ import Foundation
 import Network
 import UIKit
 import CoreMedia
+import os
 import PortviewProtocol
 import PortviewTransport
 import PortviewMedia
 import PortviewClientCore
+
+private let logger = Logger(subsystem: "dev.finklea.portview", category: "video")
 
 /// Drives a Portview client session: connect (cert-pinned) → handshake → receive video
 /// frames → rebuild sample buffers → enqueue for display. If a live session drops, it re-binds the
@@ -62,6 +65,10 @@ final class SessionViewModel: ObservableObject {
     let renderer = MetalVideoRenderer()
     private let decoder = VideoDecoder()
     private let audioPlayer = AudioPlayer()
+    /// Decoder-resync policy: requests a keyframe (rate-limited) when a coalesced-away frame or
+    /// a decode failure breaks the HEVC delta chain — without it, one dropped frame froze the
+    /// picture permanently (2026-07-16). Reset per session attempt and per display switch.
+    private var keyframeRecovery = KeyframeRecovery()
     private var task: Task<Void, Never>?
     private var connection: PortviewClientSession?
     /// Ordered outbound input lane bound to `connection` (created/torn down with it via bind/unbind).
@@ -202,6 +209,8 @@ final class SessionViewModel: ObservableObject {
         cursorNormalized = CGPoint(x: 0.5, y: 0.5)
         resetViewport()
         resetQualityDiagnostics()
+        // New pump on the host = new sequence generation (its leading keyframe may itself drop).
+        keyframeRecovery.reset()
         // Cut to the new display's window instead of easing across from the old one's.
         updateMagnifierTarget()
         renderer.snapWindow()
@@ -332,9 +341,13 @@ final class SessionViewModel: ObservableObject {
     /// Ask the host for a fresh keyframe so the video delta chain recovers after a gap. Called when the
     /// app returns to the foreground: while backgrounded VideoToolbox may have torn down the decode
     /// session, and frames missed during the gap leave the delta chain broken until the next keyframe.
+    /// Routed through `KeyframeRecovery` so foreground, gap, and decode-failure triggers share ONE
+    /// rate limiter — a foreground event racing a detected gap must not double-request.
     func requestKeyframe() {
         guard status == .streaming else { return }
-        send(.requestKeyframe(RequestKeyframe()))
+        if keyframeRecovery.observeDiscontinuity(now: ProcessInfo.processInfo.systemUptime) {
+            send(.requestKeyframe(RequestKeyframe()))
+        }
     }
 
     /// Push a file to the Mac (saved to its ~/Downloads). Announce it, then stream ordered
@@ -486,6 +499,9 @@ final class SessionViewModel: ObservableObject {
         hostLocked = false
         // A prior connection's RTT is meaningless for this one; 0 = "not yet measured".
         latestRTTMicros = 0
+        // Fresh recovery generation: the host's video pump (and its sequence numbering) restarts
+        // with the session, so cross-session contiguity is accidental.
+        keyframeRecovery.reset()
         var client = ClientHandshake(
             deviceID: UIDevice.current.identifierForVendor?.uuidString ?? "ios-client",
             deviceName: UIDevice.current.name,
@@ -523,9 +539,30 @@ final class SessionViewModel: ObservableObject {
                 applyInbound(message)  // folds displays/activeDisplayID/displaySize + status → .streaming
                 didStream = true
             case .videoFrame(let frame):
+                // Resync check BEFORE decode: a sequence gap means the depth-2 video lane
+                // coalesced frames away and the delta chain is broken — every delta decode will
+                // fail until the requested keyframe rebases it. The policy rate-limits, so this
+                // also throttles the log line.
+                if keyframeRecovery.observeArrival(sequence: frame.sequence, isKeyframe: frame.isKeyframe,
+                                                   now: ProcessInfo.processInfo.systemUptime) {
+                    logger.notice("video chain broken at seq=\(frame.sequence, privacy: .public) — requesting keyframe")
+                    send(.requestKeyframe(RequestKeyframe()))
+                }
                 let decodeStart = ProcessInfo.processInfo.systemUptime
-                if let sample = try? rebuild(frame),
-                   let pixelBuffer = try? await decoder.decode(sample) {
+                var failedStage = "rebuild"
+                let decoded: CVPixelBuffer?
+                do {
+                    let sample = try rebuild(frame)
+                    failedStage = "decode"
+                    decoded = try await decoder.decode(sample)
+                } catch {
+                    decoded = nil
+                    if keyframeRecovery.observeDecodeFailure(now: ProcessInfo.processInfo.systemUptime) {
+                        logger.notice("video \(failedStage, privacy: .public) failed seq=\(frame.sequence, privacy: .public) key=\(frame.isKeyframe, privacy: .public) (\(error, privacy: .public)) — requesting keyframe")
+                        send(.requestKeyframe(RequestKeyframe()))
+                    }
+                }
+                if let pixelBuffer = decoded {
                     let decodeMs = (ProcessInfo.processInfo.systemUptime - decodeStart) * 1_000.0
                     // The frame self-describes the region it shows; the reducer settles the residual
                     // zoom to it (atomic with the pixels — no separate echo to race), guarded so an
@@ -562,6 +599,7 @@ final class SessionViewModel: ObservableObject {
                     // the new display's window instead of easing across, and tell the host.
                     viewportRequests.reset()
                     resetQualityDiagnostics()
+                    keyframeRecovery.reset()
                     updateMagnifierTarget()
                     renderer.snapWindow()
                     send(.switchDisplay(SwitchDisplay(displayID: activeDisplayID)))

@@ -14,9 +14,11 @@ import PortviewProtocol
 /// - **Audio**: coalesces to the newest packets. Audio is realtime media, not control: placing it
 ///   in the lossless control FIFO lets a steady audio stream starve video forever.
 /// - **Video**: coalesces to the newest `videoLaneDepth` frames (mirrors CaptureEngine's
-///   `.bufferingNewest(2)`) — a stalled consumer costs at most two frames of memory, and the
-///   drops surface to the host as sequence gaps in `ClientFeedback.droppedFrames`. When both
-///   realtime lanes have data they alternate, while control remains latency-priority.
+///   `.bufferingNewest(2)`) — a stalled consumer costs at most two frames of memory. The newest
+///   KEYFRAME is pinned against eviction (the decoder's only resync point — see
+///   `KeyframeRecovery`, which requests one whenever a coalesced-away delta breaks the HEVC
+///   reference chain). When both realtime lanes have data they alternate, while control remains
+///   latency-priority.
 ///
 /// Lock-guarded (the repo's transport/host idiom) because producers arrive on the connection's
 /// DispatchQueue while the consumer suspends in Swift Concurrency.
@@ -81,10 +83,14 @@ final class InboundBuffer: @unchecked Sendable {
         for message in messages {
             if case .videoFrame = message {
                 videoLane.append(message)
-                let overflow = videoLane.count - videoLaneDepth
-                if overflow > 0 {
-                    videoLane.removeFirst(overflow)
-                    droppedVideoFrames += overflow
+                // Newest-wins, except the newest KEYFRAME is pinned against eviction: it is the
+                // decoder's only resync point, and the recovery IDR the client just requested
+                // must not be coalesced away by the very burst it recovers from (2026-07-16
+                // freeze). Deltas around it stay newest-wins; a newer keyframe supersedes the pin.
+                while videoLane.count > videoLaneDepth {
+                    let evictIndex = newestKeyframeIndexLocked() == 0 ? 1 : 0
+                    videoLane.remove(at: evictIndex)
+                    droppedVideoFrames += 1
                 }
             } else if case .audioFrame = message {
                 audioLane.append(message)
@@ -182,6 +188,14 @@ final class InboundBuffer: @unchecked Sendable {
             return videoLane.removeFirst()
         }
         return nil
+    }
+
+    /// Index of the newest keyframe in the video lane, or nil when none is buffered.
+    private func newestKeyframeIndexLocked() -> Int? {
+        videoLane.lastIndex { message in
+            if case .videoFrame(let frame) = message { return frame.isKeyframe }
+            return false
+        }
     }
 
     private func maybeClearPauseLocked() -> Bool {
