@@ -2,6 +2,39 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-22] Client device identity (han.2): failure-policy triple + explicit rotation (ACCEPTED)
+
+**Context**: mutual-auth spec §1 implementation (`ClientIdentity` + `ClientIdentityStore` in
+PortviewClientCore, keychain impl in the client app). Adversarially reviewed per session policy by
+**GPT-5.6 Sol (max) + opencode-go Kimi K3**, both read-only vs live code; both SHIP-WITH-FIXES,
+all fixes folded same-commit.
+
+1. **`loadOrCreate` failure policy is direction-dependent, unlike the host's uniform stores**:
+   read-THROWS (transient, e.g. pre-first-unlock) → propagate, never mint — regenerating would
+   permanently destroy a possibly-enrolled identity; read-succeeds-but-undecodable (permanent) →
+   mint fresh + persist (fresh-install semantics; host fails closed on the unknown key until
+   re-enrolled); write-THROWS on create → propagate — never hand out an unpersisted identity the
+   host could enroll and then lose. Both reviewers confirmed all three branches. Every 32-byte
+   blob is a valid Ed25519 seed, so "undecodable" ≈ wrong length only; a future format change
+   needs explicit versioning (Sol note).
+2. **The read-mint-write section is serialized by a process-wide lock** (`creationLock`, mirroring
+   `TLSIdentity.persistenceLock`): Kimi's F1 showed two concurrent first-launch callers each mint
+   a key and the update-first keychain write silently overwrites — returned identity ≠ persisted
+   identity → silent un-enrollment. Reproduced by a 32-way test (3 distinct keys) before the fix.
+3. **Explicit `rotate(store:)` is the ONLY sanctioned key-abandonment path** (Sol): iOS keychain
+   generic-password items commonly SURVIVE app uninstall/reinstall — reviewers directly conflicted
+   on this fact; Sol is right — so reinstall is not a rotation path and the identity is per-DEVICE,
+   not per-install. Rotation is never automatic; the attended ceremony lands with han.3/han.4.
+4. **`ClientAuthCrypto.sign/verify` now hard-enforce the 32-byte field widths** (Sol): the frozen
+   framing is unambiguous only at fixed widths, and an empty cert hash would silently drop the
+   relay binding (the `HostRunner:149` fallback removal in han.1 now fails loudly, not silently).
+   Client keychain store also re-asserts accessibility on the UPDATE path (host mirrors don't;
+   deliberate divergence — the identity item's class is load-bearing for background re-wake).
+5. **Declined**: Kimi F2 (`keychainError(errSecSuccess)` on an unreachable cast-failure branch —
+   cosmetic, identical in the reviewed host stores; fix-both-or-neither → neither). Kimi F3 (move
+   `deviceID` derivation to PortviewProtocol) deferred to han.1 with the wiring (Sol explicitly
+   endorsed the current by-construction sharing; noted on the bead).
+
 ## [2026-07-21] Mutual-auth epic: enrollment trust root + hardened handshake design (ACCEPTED)
 
 **Context**: the dedicated security session for the mutual-auth epic (`portview-han`, was

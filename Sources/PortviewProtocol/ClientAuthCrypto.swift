@@ -24,9 +24,18 @@ public enum ClientAuthCrypto {
         Array(payloadTag.utf8) + nonce + hostCertSHA256
     }
 
-    /// Client side: sign the challenge with the device private key.
+    /// Both payload fields are fixed-width 32 bytes; the framing is unambiguous ONLY at these
+    /// widths, so sign/verify enforce them (a signer fed an empty cert hash would otherwise
+    /// silently omit the relay binding).
+    static let fieldWidth = 32
+
+    /// Client side: sign the challenge with the device private key. Throws on inputs that are not
+    /// exactly 32 bytes each — the frozen contract has no variable-length form.
     public static func sign(privateKey: Curve25519.Signing.PrivateKey,
                             nonce: [UInt8], hostCertSHA256: [UInt8]) throws -> [UInt8] {
+        guard nonce.count == fieldWidth, hostCertSHA256.count == fieldWidth else {
+            throw ClientAuthCryptoError.invalidFieldWidth
+        }
         let payload = signedPayload(nonce: nonce, hostCertSHA256: hostCertSHA256)
         return Array(try privateKey.signature(for: Data(payload)))
     }
@@ -37,10 +46,15 @@ public enum ClientAuthCrypto {
     /// an enrolled record; this confirms possession of the matching private key for THIS nonce.
     public static func verify(publicKey: [UInt8], signature: [UInt8],
                               nonce: [UInt8], hostCertSHA256: [UInt8]) -> Bool {
+        guard nonce.count == fieldWidth, hostCertSHA256.count == fieldWidth else { return false }
         guard let key = try? Curve25519.Signing.PublicKey(rawRepresentation: Data(publicKey)) else {
             return false
         }
         let payload = signedPayload(nonce: nonce, hostCertSHA256: hostCertSHA256)
         return key.isValidSignature(Data(signature), for: Data(payload))
     }
+}
+
+public enum ClientAuthCryptoError: Error {
+    case invalidFieldWidth
 }

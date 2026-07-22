@@ -6,7 +6,15 @@
 
 `main`
 
-## Latest Session (2026-07-21 #2 — mutual-auth security session: §4 resolved, foundation + §3 core landed)
+## Latest Session (2026-07-22 — mutual-auth han.2: client device identity landed, dual-reviewed)
+
+- **portview-han.2 CLOSED** (TDD, suite 515→**527**/94; test-ios + build-host green): `ClientIdentity` + `ClientIdentityStore` (PortviewClientCore) + `KeychainClientIdentityStore` (client app, AfterFirstUnlockThisDeviceOnly, update path re-asserts accessibility). deviceID = `PairingStore.deviceID` by construction + frozen vectors. ADR: decisions.md (2026-07-22).
+- **Adversarial reviews per user instruction: GPT-5.6 Sol (max) + opencode-go Kimi K3**, read-only vs live code, both SHIP-WITH-FIXES, all folded same-commit: Kimi F1 concurrent-mint race → `creationLock` (mirrors TLSIdentity precedent, reproduced RED first); Sol → explicit `rotate()` primitive (iOS keychain survives reinstall — reinstall is NOT rotation; Kimi had this fact wrong), 32-byte hard enforcement in `ClientAuthCrypto.sign/verify` (+`ClientAuthCryptoError`), keychain-update accessibility, test-store lock hygiene. Declined/deferred dispositions in the ADR.
+- Review prompt: `ai-scratch/han2-client-identity-review-2026-07-21.md`. Forward findings routed as bd notes → han.1 (catch-and-abort on thrown identity read, typed re-wake probe, deviceID→PortviewProtocol move, HostRunner:149 fallback now fails LOUD) and han.4 (rotation ceremony = revoke+re-enroll one guided flow).
+- Gotcha rehit: iOS build "cannot find X in scope" for last session's new symbols = stale explicit-modules cache → `xcodebuild clean` fixes. Also: new app-target files need `xcodegen generate` (static pbxproj file list).
+- NEXT: han.1 (gate wiring + rollout policy) is the natural next code step; han.3 still needs the version-sequencing user decision. Now **11 unpushed commits** on main for user review + push.
+
+## Previous Session (2026-07-21 #2 — mutual-auth security session: §4 resolved, foundation + §3 core landed)
 
 - Dedicated security session for the mutual-auth epic `portview-han`. TWO adversarial reviews (GPT-5.6 Sol max + Kimi K3, both read-only vs live code) CONVERGED on every load-bearing call. §4 enrollment-trust blocker RESOLVED. Full design + must-fixes: spec §4-RESOLVED section + decisions.md 2026-07-21 ADR.
 - **User-approved decisions**: (a) enrollment root = host-LOCAL one-tap "Allow this device?" + dual-fingerprint compare, for both SAS and QR (Option b confirmed weaker); (b) revoke KILLS live sessions (emergency withdrawal); (c) build the pure wire+crypto core now, stage the UI/gate work.

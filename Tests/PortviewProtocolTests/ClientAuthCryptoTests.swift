@@ -21,6 +21,38 @@ import CryptoKit
         #expect(payload.count == 23 + 32 + 32)
     }
 
+    @Test func signRejectsNon32ByteInputs() throws {
+        // The payload contract is fixed-width 32/32 (spec §3 frozen bytes). Enforcing it at the
+        // signer stops a future mis-wiring (e.g. the HostRunner empty-cert-hash fallback, slated
+        // for removal in han.1) from silently signing a challenge that omits the relay binding.
+        let priv = Curve25519.Signing.PrivateKey()
+        #expect(throws: ClientAuthCryptoError.self) {
+            _ = try ClientAuthCrypto.sign(privateKey: priv, nonce: [], hostCertSHA256: certHash(0x22))
+        }
+        #expect(throws: ClientAuthCryptoError.self) {
+            _ = try ClientAuthCrypto.sign(privateKey: priv, nonce: nonce(0x11), hostCertSHA256: [])
+        }
+        #expect(throws: ClientAuthCryptoError.self) {
+            _ = try ClientAuthCrypto.sign(
+                privateKey: priv, nonce: [UInt8](repeating: 0x11, count: 31),
+                hostCertSHA256: certHash(0x22))
+        }
+    }
+
+    @Test func verifyRejectsNon32ByteInputsWithoutThrowing() throws {
+        // Verify fails CLOSED (returns false, never throws/crashes) on malformed widths, even for
+        // a signature that would be valid over those exact bytes if widths were unconstrained.
+        let priv = Curve25519.Signing.PrivateKey()
+        let pub = Array(priv.publicKey.rawRepresentation)
+        let shortNonce = [UInt8](repeating: 0x11, count: 16)
+        let payload = ClientAuthCrypto.signedPayload(nonce: shortNonce, hostCertSHA256: certHash(0x22))
+        let sig = Array(try priv.signature(for: Data(payload)))
+        #expect(!ClientAuthCrypto.verify(
+            publicKey: pub, signature: sig, nonce: shortNonce, hostCertSHA256: certHash(0x22)))
+        #expect(!ClientAuthCrypto.verify(
+            publicKey: pub, signature: sig, nonce: nonce(0x11), hostCertSHA256: []))
+    }
+
     @Test func signVerifyRoundTrips() throws {
         let priv = Curve25519.Signing.PrivateKey()
         let pub = Array(priv.publicKey.rawRepresentation)
