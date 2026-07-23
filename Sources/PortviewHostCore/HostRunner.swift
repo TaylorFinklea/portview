@@ -858,10 +858,12 @@ public struct HostRunner: Sendable {
     /// Requires ALL of `enrollment`, an OPEN pairing window (`sas?.isOpen()`), and `control`
     /// (eviction needs it) to even attempt the ceremony — any missing dependency closes with no
     /// ceremony, matching the pre-Task-6 `.unknownKey` behavior exactly. Deliberately does NOT wrap
-    /// `awaitDecision` in any extra cancellation machinery: the connection's own serve task is
-    /// already cancelled by `serve`'s `withTaskCancellationHandler` on teardown, and
-    /// `EnrollmentAuthority.awaitDecision`'s own cancellation handler resolves `false` (without
-    /// blocking the source) when that happens — a second cancellation path here would only race it.
+    /// `awaitDecision` in any extra cancellation machinery: `serve`'s `withTaskCancellationHandler`
+    /// only fires on whole-group teardown (host shutdown, listener cancel) — a peer that dies
+    /// mid-prompt is NOT detected while `awaitDecision` parks. That individual connection is
+    /// cleaned up only by `EnrollmentAuthority`'s own 25 s deadline (accepted design cost), which
+    /// resolves `false` without blocking the source; a second cancellation path here would only
+    /// race the deadline or the group-teardown case.
     private static func runEnrollmentCeremony(
         publicKey: [UInt8],
         deviceName: String,

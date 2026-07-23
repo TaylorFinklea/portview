@@ -107,7 +107,12 @@ import PortviewProtocol
         async let client = PortviewConnection.connectCapturingCert(to: .hostPort(host: "127.0.0.1", port: port))
         var it = listener.connections.makeAsyncIterator()
         guard let accepted = await it.next() else { throw TestHarnessError.noAcceptedConnection }
-        _ = try await client
+        // Unlike `dialAndAuthenticate`'s returned connection, the client end here is never used by
+        // the caller (only the host-side `accepted` is registered) — close it explicitly instead of
+        // letting it drop implicitly (mirrors `HostControlEvictionTests.twoHostConnections`, which
+        // deliberately keeps its client ends alive/accounted-for through registration).
+        let (clientConnection, _) = try await client
+        clientConnection.close()
         return (listener, accepted)
     }
 
@@ -195,10 +200,11 @@ import PortviewProtocol
     }
 
     @Test func unknownKeyPathNeverLeaksPubkeyInEmittedEvents() async throws {
-        // Hygiene (design v2 M3): with no authority wired yet (Task 6), the unknown-key path must
-        // close exactly like the old `.rejected(.unknownKey)` — and it must never leak the raw
-        // public key via any emitted `HostRunnerEvent`. Only the `KeyFingerprint` is loggable, and
-        // that goes to `os.Logger`, never `emit`.
+        // Hygiene (design v2 M3): the unknown-key path must never leak the raw public key via any
+        // emitted `HostRunnerEvent`. Only the `KeyFingerprint` is loggable, and that goes to
+        // `os.Logger`, never `emit`. Wired through the FULL ceremony (scripted DENY) so this test
+        // actually produces `.enrollmentRequest` + `.enrollmentResolved` events to scan — without a
+        // ceremony, the gate closes with zero events and the scan below iterates nothing.
         let identity = try TLSIdentity.makeEphemeralSelfSigned()
         let hostCert = [UInt8](try identity.certificateSHA256())
         let listener = try PortviewListener(quicIdentity: identity)
@@ -206,30 +212,43 @@ import PortviewProtocol
         let pairings = PairingStore(store: MemoryPairingStore())  // nobody enrolled
         let probe = Probe()
         let events = EventCollector()
+        let sas = SASPairingControl()
+        await sas.openWindow()
+        let enrollment = EnrollmentAuthority(deadline: .milliseconds(500))
+        let control = HostControl(keepAwake: KeepAwake(backend: NoopKeepAwakeBackend()))
         let host = runHost(listener, hostCert: hostCert, policy: .required, pairings: pairings,
-                           probe: probe, emit: { event in Task { await events.record(event) } })
+                           probe: probe, control: control, sas: sas, enrollment: enrollment,
+                           emit: { event in Task { await events.record(event) } })
         defer { host.cancel(); listener.cancel() }
 
-        let (conn, captured) = try await PortviewConnection.connectCapturingCert(
-            to: .hostPort(host: "127.0.0.1", port: port))
-        defer { conn.close() }
-        try await conn.send(hello())
+        let denier = scriptedResolution(events, enrollment, approve: false)
+        defer { denier.cancel() }
 
-        var it = conn.inbound.makeAsyncIterator()
-        guard case .serverChallenge(let challenge)? = await it.next() else {
-            Issue.record("expected ServerChallenge after ClientHello"); return
-        }
         let key = Curve25519.Signing.PrivateKey()
-        let signature = try ClientAuthCrypto.sign(
-            privateKey: key, nonce: challenge.nonce, hostCertSHA256: [UInt8](captured))
-        try await conn.send(.clientAuth(ClientAuth(
-            publicKey: Array(key.publicKey.rawRepresentation), signature: signature)))
-
-        while await it.next() != nil {}  // drain until the host closes
+        let conn = try await dialAndAuthenticate(port: port, key: key, deviceName: "Phone")
+        defer { conn.close() }
+        var it = conn.inbound.makeAsyncIterator()
+        while let message = await it.next() {
+            if case .serverHello = message { Issue.record("rejected peer must never see ServerHello") }
+        }
         #expect(await awaitOutcome(probe) == .unknownKey(publicKey: Array(key.publicKey.rawRepresentation)))
 
-        let pubkeyHex = key.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+        guard let request = await awaitFirstEnrollmentRequest(events) else {
+            Issue.record("expected an .enrollmentRequest event — the scan below would be vacuous without it")
+            return
+        }
+        guard let approved = await awaitEnrollmentResolved(events, attemptID: request.attemptID) else {
+            Issue.record("expected an .enrollmentResolved event"); return
+        }
+        #expect(approved == false)
+
         let recordedEvents = await events.events
+        // (a) Structural non-vacuousness: at least one enrollment event was actually collected.
+        #expect(recordedEvents.contains { if case .enrollmentRequest = $0 { return true }; return false })
+
+        // (b) Hygiene: no collected event — across the whole ceremony, not just the request — ever
+        // surfaces the raw public key.
+        let pubkeyHex = key.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
         for event in recordedEvents {
             #expect(!String(describing: event).lowercased().contains(pubkeyHex))
         }
