@@ -117,6 +117,65 @@ import CryptoKit
         #expect(await pairing.isAuthorized(id: "anything") == false)
     }
 
+    @Test func bootstrapNeverReopensAfterRevokingAllDevices() async throws {
+        // Sol han.1 review (CRITICAL): the durable "migration complete" marker. Once a device has
+        // EVER enrolled, revoking the last one must NOT return the store to `.empty` (which would
+        // reopen the legacy bootstrap to any silent peer). The map is empty but the snapshot stays
+        // `.populated` — the host stays fail-closed to `.required` until a re-attended enrollment.
+        let store = MemoryStore()
+        let pairing = PairingStore(store: store, now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        #expect(await pairing.enrollmentSnapshot() == .populated)
+        try await pairing.revoke(id: c.id)
+        #expect(await pairing.list().isEmpty)                    // no devices authorized
+        #expect(await pairing.enrollmentSnapshot() == .populated) // but migration is permanent
+    }
+
+    @Test func migrationMarkerPersistsAcrossReload() async throws {
+        // The marker is durable, not just in-memory: a fresh actor over the same backing store (a
+        // host restart) reads migration-complete even after every device was revoked.
+        let store = MemoryStore()
+        let first = PairingStore(store: store, now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await first.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        try await first.revoke(id: c.id)
+
+        let reloaded = PairingStore(store: store, now: { Date(timeIntervalSince1970: 2000) })
+        #expect(await reloaded.enrollmentSnapshot() == .populated)
+        #expect(await reloaded.list().isEmpty)
+    }
+
+    @Test func legacyBareMapBlobStillDecodes() async throws {
+        // Back-compat: a store written by the han.2-era format (a bare `[id: EnrolledClient]` map,
+        // no wrapper) must still decode. A non-empty legacy map implies migration already happened.
+        let c = newClient()
+        let legacy = [c.id: EnrolledClient(id: c.id, publicKey: c.publicKey, deviceName: "old",
+                                           enrolledAt: Date(timeIntervalSince1970: 1000),
+                                           lastSeen: Date(timeIntervalSince1970: 1000))]
+        let store = MemoryStore(try JSONEncoder().encode(legacy))
+        let pairing = PairingStore(store: store, now: { Date(timeIntervalSince1970: 2000) })
+        #expect(await pairing.isAuthorized(id: c.id) == true)
+        #expect(await pairing.enrollmentSnapshot() == .populated)
+    }
+
+    @Test func enrollmentSnapshotDistinguishesEmptyPopulatedUnreadable() async throws {
+        // The rollout-policy view (Sol han.1 review): unlike `list()`/`isAuthorized` which fail
+        // closed to EMPTY, this must surface an unreadable store as `.unreadable` so the policy can
+        // fail closed to `.required` instead of reopening bootstrap.
+        let empty = PairingStore(store: MemoryStore(), now: { Date(timeIntervalSince1970: 2000) })
+        #expect(await empty.enrollmentSnapshot() == .empty)
+
+        let populated = PairingStore(store: MemoryStore(), now: { Date(timeIntervalSince1970: 2000) })
+        try await populated.enroll(publicKey: newClient().publicKey, deviceName: "iPhone")
+        #expect(await populated.enrollmentSnapshot() == .populated)
+
+        let store = MemoryStore()
+        let unreadable = PairingStore(store: store, now: { Date(timeIntervalSince1970: 2000) })
+        store.failRead = true  // cold cache + throwing read → not verifiably empty
+        #expect(await unreadable.enrollmentSnapshot() == .unreadable)
+    }
+
     @Test func cachedMapSurvivesAKeychainThatLocksMidSession() async {
         let store = MemoryStore()
         let pairing = PairingStore(store: store, now: { Date(timeIntervalSince1970: 2000) })

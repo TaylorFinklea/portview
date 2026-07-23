@@ -6,12 +6,20 @@ import PortviewTransport
 /// A thread-safe registry of active client connections so the host UI can disconnect them without
 /// tearing down the listener (which would otherwise churn the bound port and break saved pairings).
 public final class HostControl: @unchecked Sendable {
+    /// How a live session cleared the mutual-auth gate. Legacy-admitted sessions (bootstrap policy,
+    /// no device key proven) must be terminable when the policy tightens to `.required`.
+    public enum SessionAuthClass: Sendable {
+        case authenticated
+        case legacyAdmitted
+    }
+
     private struct Session {
         let connection: PortviewConnection
         /// The session's ordered outbound lane (owned by its serve loop): broadcast/file sends
         /// enqueue here so they order with the session's other outbound traffic and stop at its
         /// teardown, instead of racing as detached per-send Tasks.
         let outbound: OutboundLane<AnyMessage>
+        let authClass: SessionAuthClass
     }
 
     private let lock = NSLock()
@@ -29,9 +37,10 @@ public final class HostControl: @unchecked Sendable {
         self.keepAwake = keepAwake
     }
 
-    func register(_ id: String, _ connection: PortviewConnection, outbound: OutboundLane<AnyMessage>) {
+    func register(_ id: String, _ connection: PortviewConnection, outbound: OutboundLane<AnyMessage>,
+                  authClass: SessionAuthClass) {
         lock.lock()
-        sessions[id] = Session(connection: connection, outbound: outbound)
+        sessions[id] = Session(connection: connection, outbound: outbound, authClass: authClass)
         lock.unlock()
         keepAwake.sessionBegan(id)
     }
@@ -41,6 +50,12 @@ public final class HostControl: @unchecked Sendable {
         sessions[id] = nil
         lock.unlock()
         keepAwake.sessionEnded(id)
+    }
+
+    /// Test seam: the ids of currently-registered sessions.
+    func activeSessionIDs() -> Set<String> {
+        lock.lock(); defer { lock.unlock() }
+        return Set(sessions.keys)
     }
 
     /// Send a file to the connected iPhone (Mac→iPhone transfer): an offer then ordered 64 KB
@@ -79,6 +94,23 @@ public final class HostControl: @unchecked Sendable {
         lock.unlock()
         for session in active {
             session.outbound.enqueue(message)
+        }
+    }
+
+    /// Terminate every session admitted UN-authenticated under the legacy bootstrap policy, when the
+    /// rollout policy tightens to `.required` (mutual-auth §4-RESOLVED; Kimi K3 + Sol han.1 review).
+    /// SYNCHRONOUS invalidation: unlike `disconnectAll`, this does NOT send a graceful `bye` first —
+    /// a peer the host has stopped trusting must lose keyboard/screen/clipboard/file access at once,
+    /// and a `bye` would both delay the close and (client-side) suppress the reconnect we don't owe
+    /// it. Authenticated sessions are untouched. Idempotent; a no-op when none are legacy.
+    public func evictLegacyAdmitted() {
+        lock.lock()
+        let evicted = sessions.filter { $0.value.authClass == .legacyAdmitted }
+        for id in evicted.keys { sessions[id] = nil }
+        lock.unlock()
+        for (id, session) in evicted {
+            session.connection.close()
+            keepAwake.sessionEnded(id)
         }
     }
 

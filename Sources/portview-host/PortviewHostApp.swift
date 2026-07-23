@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import PortviewHostCore
+import PortviewTransport
 
 @main
 struct PortviewHostApp {
@@ -8,7 +9,10 @@ struct PortviewHostApp {
         // terminal QR, and the permission help must land in the terminal, not the unified log —
         // the os.Logger sweep covers the PortviewHostCore library (diagnosability inside the
         // GUI-launched .app); a developer running `swift run portview-host` reads the terminal.
-        await HostRunner().run(identity: .terminal) { event in
+        // Legacy-bootstrap until the enrollment ceremony (han.3) exists — see HostAppModel.
+        await HostRunner().run(identity: .terminal,
+                               authPolicy: .legacyBootstrap(expiresAt: .distantFuture),
+                               pairings: PairingStore()) { event in
             switch event {
             case .message(let message):
                 print(message)

@@ -5,6 +5,7 @@ import CoreGraphics
 import Foundation
 import Observation
 import PortviewHostCore
+import PortviewTransport
 
 @MainActor
 @Observable
@@ -84,7 +85,14 @@ final class HostAppModel {
         connectedSince = nil
 
         task = Task { [weak self, control, sasControl] in
-            let events = HostRunner().events(identity: .app(displayName: Self.displayName), control: control, sasControl: sasControl)
+            // Legacy-bootstrap until the enrollment ceremony (han.3) exists: no device CAN enroll
+            // yet, so `.required` would lock every client out. Auto-promotion flips this to
+            // required the moment a first device enrolls; han.3 revisits the open-ended expiry.
+            // This PairingStore is the ONE shared authority — han.3's enrollment ceremony and
+            // han.4's revoke UI must use this same instance, never construct their own.
+            let events = HostRunner().events(identity: .app(displayName: Self.displayName), control: control, sasControl: sasControl,
+                                             authPolicy: .legacyBootstrap(expiresAt: .distantFuture),
+                                             pairings: PairingStore())
             for await event in events {
                 self?.handle(event)
             }

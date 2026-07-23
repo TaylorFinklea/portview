@@ -263,3 +263,31 @@ Curve25519 keypair/ClientIdentityStore (§1) + signed-challenge crypto (pure, TD
 prompt + dual-fingerprint compare + per-window request) — has real iOS/macOS UI + a user product
 decision; (iv) revoke-kills-live-sessions + the ClientKeyID/epoch session-registry changes + menu-
 bar revoke UI. All `tier_floor: lead`.
+
+## han.1 implementation addendum (2026-07-22)
+
+The §3 gate + host-local rollout policy are IMPLEMENTED (`serveAuthGate`/`MutualAuthPolicy`,
+Kimi K3-reviewed SHIP-WITH-FIXES, folded). One §4-RESOLVED clause is deliberately re-sequenced:
+**"closing legacy bootstrap disconnects legacy sessions" is NOT in han.1 — bead (iv) explicitly
+owns it** (the session registry must record each session's auth class, and any effectiveMode
+transition to `.required` — first-enrollment auto-promotion or expiry — synchronously invalidates
+and closes legacy-admitted sessions, same machinery as revoke-kills-live). SEQUENCING CONSTRAINT:
+bead (iv)'s eviction must land BEFORE or WITH bead (iii) — promotion is unreachable until
+enrollment exists, which is why han.1 could ship without it. Both call sites run
+`.legacyBootstrap(expiresAt: .distantFuture)` until (iii); the expiry is a user decision there.
+
+## han.1 EXPAND addendum (2026-07-22, dual review Kimi K3 SHIP-WITH-FIXES + Sol RETURN)
+
+Sol's RETURN was answered by EXPANDING han.1 rather than deferring (user decision). Landed here:
+- **Durable/monotonic promotion**: `PairingStore.migrationComplete` (set on first enroll, never
+  cleared) + `enrollmentSnapshot()` tri-state. Revoking the last device or a host restart can no
+  longer reopen bootstrap; an unreadable store fails closed to `.required`.
+- **Legacy eviction mechanism**: `HostControl.SessionAuthClass` tagging + `evictLegacyAdmitted()`
+  (synchronous close, no `bye`); a lazy sweep fires on any `.required`-mode connection.
+- **Single-read gate** (no per-message deadline reset → no slot-starvation).
+
+Superseded the earlier han.1 addendum's "eviction is entirely han.4" claim. What REMAINS deferred:
+han.4 owns the fine-grained in-flight admission TOCTOU (generation/epoch-bound admission +
+register-then-recheck) and the cross-process app/CLI single-authority; han.3 owns the EAGER
+evict-at-enroll hook and the `.distantFuture` migration-window decision. han.4 no longer strictly
+blocks han.3 (durable promotion + eviction mechanism already shipped).

@@ -9,6 +9,19 @@ import CryptoKit
 // checks `isAuthorized` on every streaming handshake BEFORE building any session scaffolding.
 // Revoking makes the device's next handshake fail closed.
 
+/// The rollout-policy view of the enrollment store (mutual-auth §4-RESOLVED). DISTINCT from
+/// `isAuthorized`/`list`, which fail closed to empty: a policy that reads a keychain error as
+/// "empty" would REOPEN bootstrap on a transient failure (Sol han.1 review, CRITICAL). `.unreadable`
+/// lets the policy fail closed to `.required` instead.
+public enum EnrollmentSnapshot: Sendable, Equatable {
+    /// The store was read successfully and holds no enrolled clients.
+    case empty
+    /// The store was read successfully and holds at least one enrolled client.
+    case populated
+    /// The store could not be read/decoded — treat as "not verifiably empty" (fail closed).
+    case unreadable
+}
+
 /// One enrolled client device. `id` = SHA-256 of `publicKey` (raw representation), hex.
 public struct EnrolledClient: Codable, Equatable, Sendable {
     public let id: String
@@ -45,10 +58,20 @@ protocol PairingRecordStore: Sendable {
 /// populates the cache (so a denial is never cached as permission) and never clobbers persisted
 /// data on a mutation.
 public actor PairingStore {
+    /// The persisted shape: the enrolled-client map PLUS a durable `migrationComplete` marker.
+    /// The marker is set the first time ANY device enrolls and is NEVER cleared by revoke — so
+    /// revoking the last device (or a fresh host start over that store) can't reopen the legacy
+    /// bootstrap to a silent peer (Sol han.1 review, CRITICAL: promotion must be durable +
+    /// monotonic, not derived from the CURRENT map emptiness).
+    struct Persisted: Codable {
+        var clients: [String: EnrolledClient]
+        var migrationComplete: Bool
+    }
+
     private let store: PairingRecordStore
     private let now: () -> Date
-    /// Last known-good decoded map. `nil` = never read successfully yet.
-    private var cache: [String: EnrolledClient]?
+    /// Last known-good decoded state. `nil` = never read successfully yet.
+    private var cache: Persisted?
 
     init(store: PairingRecordStore, now: @escaping () -> Date = Date.init) {
         self.store = store
@@ -92,6 +115,18 @@ public actor PairingStore {
         Array(authorizedMap().values)
     }
 
+    /// The rollout-policy view. `.populated` = migration is complete (a device is enrolled now OR
+    /// the durable marker records one ever was) → the gate must require auth. `.empty` = verified
+    /// never-enrolled → bootstrap may stay open. `.unreadable` = a cold read threw → fail closed to
+    /// require (a keychain error must NOT be read as "empty → open"). The policy MUST use this, not
+    /// `list().isEmpty`, for both the durability and the fail-closed reasons (Sol han.1, CRITICAL).
+    public func enrollmentSnapshot() -> EnrollmentSnapshot {
+        if let state = readState() {
+            return (state.migrationComplete || !state.clients.isEmpty) ? .populated : .empty
+        }
+        return .unreadable  // NOT verifiably empty — never populates the cache
+    }
+
     /// Enroll (or update) a client by its RAW public key — the id is derived internally
     /// (`SHA256(publicKey)`), never caller-supplied. Read-modify-write: reads the CURRENT map first
     /// so a concurrent entry isn't clobbered, and THROWS on a read failure rather than overwriting
@@ -99,64 +134,77 @@ public actor PairingStore {
     /// + lastSeen.
     public func enroll(publicKey: Data, deviceName: String) throws {
         let id = Self.deviceID(forPublicKey: publicKey)
-        var map = try mutableMap()
-        let enrolledAt = map[id]?.enrolledAt ?? now()
-        map[id] = EnrolledClient(id: id, publicKey: publicKey, deviceName: deviceName,
-                                 enrolledAt: enrolledAt, lastSeen: now())
-        try persist(map)
+        var state = try mutableState()
+        let enrolledAt = state.clients[id]?.enrolledAt ?? now()
+        state.clients[id] = EnrolledClient(id: id, publicKey: publicKey, deviceName: deviceName,
+                                           enrolledAt: enrolledAt, lastSeen: now())
+        state.migrationComplete = true  // durable, monotonic: an enrollment ever happened.
+        try persist(state)
     }
 
     /// Revoke a client. The next handshake's `isAuthorized` returns false → connection closed
-    /// pre-scaffolding. A no-op (and no write) if the id wasn't enrolled.
+    /// pre-scaffolding. A no-op (and no write) if the id wasn't enrolled. Never clears
+    /// `migrationComplete` — revoking the last device leaves the gate at `.required`, not reopened.
     public func revoke(id: String) throws {
-        var map = try mutableMap()
-        guard map.removeValue(forKey: id) != nil else { return }
-        try persist(map)
+        var state = try mutableState()
+        guard state.clients.removeValue(forKey: id) != nil else { return }
+        try persist(state)
     }
 
     /// Update a client's `lastSeen` (called on a successful authenticated handshake). No-op if
     /// the id isn't enrolled.
     public func touch(id: String) throws {
-        var map = try mutableMap()
-        guard var entry = map[id] else { return }
+        var state = try mutableState()
+        guard var entry = state.clients[id] else { return }
         entry.lastSeen = now()
-        map[id] = entry
-        try persist(map)
+        state.clients[id] = entry
+        try persist(state)
     }
 
     // MARK: - Internals
 
-    /// Authorization view: cache if present, else a swallow-errors read (fail closed to empty,
-    /// caching only a genuinely-successful read/absent state — never a thrown read).
+    /// Authorization view: the client map, fail-closed to empty on a read/decode failure.
     private func authorizedMap() -> [String: EnrolledClient] {
+        readState()?.clients ?? [:]
+    }
+
+    /// Read view: cache if warm, else a swallow-errors read caching only a genuinely-successful
+    /// state. Returns nil on a thrown read (fail closed; never caches a denial as permission).
+    private func readState() -> Persisted? {
         if let cache { return cache }
         do {
-            let map = try readMap()
-            cache = map
-            return map
+            let state = try readPersisted()
+            cache = state
+            return state
         } catch {
-            return [:]  // fail closed; do NOT cache — a later successful read may populate.
+            return nil
         }
     }
 
-    /// Mutation view: cache if present, else a read that PROPAGATES failure (so a mutation never
-    /// starts from a partial/empty map and silently drops persisted entries).
-    private func mutableMap() throws -> [String: EnrolledClient] {
+    /// Mutation view: cache if warm, else a read that PROPAGATES failure (so a mutation never
+    /// starts from a partial/empty state and silently drops persisted entries or the marker).
+    private func mutableState() throws -> Persisted {
         if let cache { return cache }
-        let map = try readMap()
-        cache = map
-        return map
+        let state = try readPersisted()
+        cache = state
+        return state
     }
 
-    private func readMap() throws -> [String: EnrolledClient] {
-        guard let data = try store.read() else { return [:] }  // absent = nobody enrolled yet
-        return try JSONDecoder().decode([String: EnrolledClient].self, from: data)
+    private func readPersisted() throws -> Persisted {
+        guard let data = try store.read() else {
+            return Persisted(clients: [:], migrationComplete: false)  // absent = nobody ever enrolled
+        }
+        if let state = try? JSONDecoder().decode(Persisted.self, from: data) { return state }
+        // Back-compat: the han.2-era format was a bare `[id: EnrolledClient]` map. A non-empty
+        // legacy map means migration already happened; an empty one means it hadn't.
+        let map = try JSONDecoder().decode([String: EnrolledClient].self, from: data)
+        return Persisted(clients: map, migrationComplete: !map.isEmpty)
     }
 
-    private func persist(_ map: [String: EnrolledClient]) throws {
-        let data = try JSONEncoder().encode(map)
+    private func persist(_ state: Persisted) throws {
+        let data = try JSONEncoder().encode(state)
         try store.write(data)
-        cache = map
+        cache = state
     }
 }
 

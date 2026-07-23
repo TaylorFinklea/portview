@@ -67,11 +67,18 @@ public struct HostRunner: Sendable {
 
     public init() {}
 
+    /// `pairings` has NO default on purpose (Kimi K3 han.1 review): the gate and the (han.3)
+    /// enrollment ceremony must share ONE PairingStore instance — a second instance's cache goes
+    /// stale on the first's writes. Forcing the caller to construct it keeps that authority split
+    /// impossible to reach by omitting an argument.
     public func events(identity: HostPermissionIdentity, control: HostControl? = nil,
-                       sasControl: SASPairingControl? = nil) -> AsyncStream<HostRunnerEvent> {
+                       sasControl: SASPairingControl? = nil,
+                       authPolicy: MutualAuthPolicy = .required,
+                       pairings: PairingStore) -> AsyncStream<HostRunnerEvent> {
         AsyncStream { continuation in
             let task = Task {
-                await run(identity: identity, control: control, sasControl: sasControl) { event in
+                await run(identity: identity, control: control, sasControl: sasControl,
+                          authPolicy: authPolicy, pairings: pairings) { event in
                     continuation.yield(event)
                 }
                 continuation.finish()
@@ -84,6 +91,8 @@ public struct HostRunner: Sendable {
         identity: HostPermissionIdentity,
         control: HostControl? = nil,
         sasControl: SASPairingControl? = nil,
+        authPolicy: MutualAuthPolicy = .required,
+        pairings: PairingStore,
         onEvent: @escaping @Sendable (HostRunnerEvent) -> Void
     ) async {
         guard CGRequestScreenCaptureAccess() else {
@@ -146,7 +155,13 @@ public struct HostRunner: Sendable {
             }
 
             let registry = DisplayRegistry(displays)
-            let hostCertBytes = (try? tlsIdentity.certificateSHA256()).map { [UInt8]($0) } ?? []
+            // Fail CLOSED if the cert hash is unavailable (spec §4-RESOLVED must-fix): the hash is
+            // the SAS commit binding AND the signed-challenge relay defense — hosting without it
+            // would silently drop both. (Was a degrade-to-`[]` fallback.)
+            let hostCertBytes = [UInt8](try tlsIdentity.certificateSHA256())
+            if case .legacyBootstrap = authPolicy {
+                onEvent(.message("⚠️ Device authentication is in legacy-bootstrap mode: clients that predate device identity are admitted un-authenticated. Enrolling a first device tightens the gate automatically."))
+            }
             // Host-side authority (not just the client-side UX gate above): drop input injection
             // while locked, regardless of what any connected client sends. Seed from the current
             // state in case the Mac is already locked when this session starts.
@@ -170,6 +185,7 @@ public struct HostRunner: Sendable {
                     group.addTask {
                         await Self.serveConnections(listener.connections) { connection in
                             await Self.serve(connection, registry: registry, hostCertSHA256: hostCertBytes,
+                                             authPolicy: authPolicy, pairings: pairings,
                                              emit: onEvent, control: control, sas: sasControl)
                         }
                     }
@@ -462,28 +478,37 @@ public struct HostRunner: Sendable {
         _ connection: PortviewConnection,
         registry: DisplayRegistry,
         hostCertSHA256: [UInt8] = [],
+        authPolicy: MutualAuthPolicy,
+        pairings: PairingStore,
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in },
         control: HostControl? = nil,
         sas: SASPairingControl? = nil
     ) async {
         await withTaskCancellationHandler {
             await serveSession(connection, registry: registry, hostCertSHA256: hostCertSHA256,
+                               authPolicy: authPolicy, pairings: pairings,
                                emit: emit, control: control, sas: sas)
         } onCancel: {
             connection.close()
         }
     }
 
-    private static func serveSession(
+    /// `internal` (not `private`) so the auth-gate loopback integration tests can drive it
+    /// directly (same precedent as `serveSASPreamble`). The two trailing closures are test seams:
+    /// `onAuthGateOutcome` observes the gate's decision, `didBuildScaffolding` fires exactly where
+    /// session scaffolding construction begins — a rejected peer must never reach it.
+    static func serveSession(
         _ connection: PortviewConnection,
         registry: DisplayRegistry,
         hostCertSHA256: [UInt8] = [],
+        authPolicy: MutualAuthPolicy,
+        pairings: PairingStore,
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in },
         control: HostControl? = nil,
-        sas: SASPairingControl? = nil
+        sas: SASPairingControl? = nil,
+        onAuthGateOutcome: (@Sendable (AuthGateOutcome) -> Void)? = nil,
+        didBuildScaffolding: (@Sendable () -> Void)? = nil
     ) async {
-        guard let firstDisplay = await registry.current().first else { connection.close(); return }
-
         // Peek the first message to LOCK this connection's role BEFORE building any session
         // scaffolding. An SAS-preamble connection (first message = client commit) is UNPINNED (TOFU)
         // and must never reach the clipboard / input-injector / capture / file path — trust is decided
@@ -500,6 +525,42 @@ public struct HostRunner: Sendable {
                                    hostCertSHA256: hostCertSHA256, sas: sas, emit: emit)
             return
         }
+
+        // The first frame must be exactly SASClientCommit or ClientHello (spec §4-RESOLVED, §3
+        // corrections); any other opener is a protocol violation and closes before a challenge is
+        // even issued.
+        guard case .clientHello = firstMessage else { connection.close(); return }
+
+        // Mutual-auth gate (spec §3): challenge/verify BEFORE any scaffolding — and before the
+        // display guard below, because authorization is a connection-level decision that must not
+        // depend on a display being attached. The policy is HOST-LOCAL, never wire-negotiated.
+        let mode = authPolicy.effectiveMode(now: Date(), enrollment: await pairings.enrollmentSnapshot())
+        // If the policy has tightened to `.required` (a device enrolled, the window expired, or the
+        // store is unreadable → fail closed), terminate any sessions still lingering from the
+        // bootstrap era before doing anything else. This lazy sweep fires on the next connection;
+        // the EAGER sweep at the instant of enrollment is han.3's enroll-ceremony hook.
+        if mode == .required { control?.evictLegacyAdmitted() }
+        let outcome = await serveAuthGate(
+            inbound: inbound, hostCertSHA256: hostCertSHA256, mode: mode, pairings: pairings,
+            sendChallenge: { try await connection.send(.serverChallenge($0)) })
+        onAuthGateOutcome?(outcome)
+        switch outcome {
+        case .rejected(let reason):
+            logger.notice("auth gate rejected connection: \(String(describing: reason), privacy: .public)")
+            connection.close()
+            return
+        case .legacyAdmitted:
+            emit(.message("⚠️ Legacy client connected without device authentication (bootstrap policy — enroll this device to tighten)."))
+        case .authenticated(let deviceID):
+            logger.info("auth gate: authenticated device \(deviceID, privacy: .public)")
+        }
+        // The session's auth class is carried into `control.register` so a later policy tightening
+        // can evict exactly the legacy-admitted sessions (HostControl.evictLegacyAdmitted).
+        let sessionAuthClass: HostControl.SessionAuthClass =
+            outcome == .legacyAdmitted ? .legacyAdmitted : .authenticated
+
+        guard let firstDisplay = await registry.current().first else { connection.close(); return }
+        didBuildScaffolding?()
 
         // One ordered outbound lane for this whole connection (survives display switches), owned
         // here and finished in the teardown defer: clipboard pushes, cursor confirmations, and
@@ -611,7 +672,7 @@ public struct HostRunner: Sendable {
                         // reconnect the old session's disconnect must not evict the new one's entry.
                         let sessionID = UUID().uuidString
                         connectedDeviceID = sessionID
-                        control?.register(sessionID, connection, outbound: outbound)
+                        control?.register(sessionID, connection, outbound: outbound, authClass: sessionAuthClass)
                         emit(.deviceConnected(id: sessionID, name: hello.deviceName))
                         // Seed this client with the current lock state (the live broadcast only reaches
                         // already-connected clients), so one that connects while locked pauses at once.
@@ -666,6 +727,77 @@ public struct HostRunner: Sendable {
             pendingMessage = await inbound.next()
         }
         logger.notice("session inbound drained — serve loop exiting")
+    }
+
+    /// The mutual-auth gate's decision for one streaming connection.
+    enum AuthGateOutcome: Equatable, Sendable {
+        /// The peer proved possession of an enrolled key; `deviceID` = SHA256(pubkey) hex.
+        case authenticated(deviceID: String)
+        /// The peer never answered the challenge and the ACTIVE policy is legacy bootstrap.
+        case legacyAdmitted
+        /// Fail closed: the caller must close the connection with no scaffolding built.
+        case rejected(AuthGateRejection)
+    }
+
+    enum AuthGateRejection: Equatable, Sendable {
+        case missingHostCertHash, sendFailed, timeout, unexpectedMessage, invalidSignature, unknownKey
+    }
+
+    /// How long the gate waits for `ClientAuth` after issuing its challenge. Long enough for a
+    /// relayed/Tailscale RTT + a client keychain read; under an active bootstrap policy it is also
+    /// the legacy client's admittance delay (a pre-auth client skips the unknown challenge tag and
+    /// never replies), so it stays low.
+    static let authGateDeadline: Duration = .seconds(3)
+
+    /// Run the signed-challenge auth gate (spec §3 + §4-RESOLVED) BEFORE any session scaffolding:
+    /// issue a fresh 32-byte CSPRNG nonce, read exactly ONE message under a single `deadline`, and
+    /// require BOTH a valid signature over the frozen payload (nonce ‖ host-cert-hash — replay +
+    /// relay defenses) AND an enrolled exact-match key. Everything else fails closed, except a
+    /// SILENT peer under `.bootstrap`, admitted as a warned legacy session. Exactly one read (Sol
+    /// han.1 review): the initial ClientHello was already consumed before this gate, so any further
+    /// message that isn't ClientAuth is a violation — granting a stray/duplicate frame a fresh
+    /// deadline would let paced duplicates starve the connection slots. The outbound side is a
+    /// closure seam (the caller binds it to `connection.send`) so the gate's decision logic is
+    /// testable without sockets.
+    static func serveAuthGate(
+        inbound: MessageReader,
+        hostCertSHA256: [UInt8],
+        mode: MutualAuthPolicy.Mode,
+        pairings: PairingStore,
+        deadline: Duration = authGateDeadline,
+        sendChallenge: @Sendable (ServerChallenge) async throws -> Void
+    ) async -> AuthGateOutcome {
+        // Spec must-fix: auth binding fails closed when the 32-byte host cert hash is unavailable —
+        // challenging without it would sign away the relay-defense field. (Production can't reach
+        // this: `run` aborts hosting if the hash can't be computed.)
+        guard hostCertSHA256.count == 32 else { return .rejected(.missingHostCertHash) }
+        var rng = SystemRandomNumberGenerator()
+        let nonce = (0..<ServerChallenge.nonceLength).map { _ in UInt8.random(in: .min ... .max, using: &rng) }
+        do { try await sendChallenge(ServerChallenge(nonce: nonce)) } catch {
+            return .rejected(.sendFailed)
+        }
+        guard let message = await inbound.next(deadline: deadline) else {
+            // Silence: a pre-auth legacy client skips the unknown challenge tag and never replies.
+            return mode == .bootstrap ? .legacyAdmitted : .rejected(.timeout)
+        }
+        guard case .clientAuth(let auth) = message else {
+            // Anything that isn't the expected auth (a stray/duplicate hello or any other frame) is
+            // a protocol violation in BOTH modes — a peer that SPEAKS non-auth is not a silent
+            // legacy client, and it gets no second read.
+            return .rejected(.unexpectedMessage)
+        }
+        guard ClientAuthCrypto.verify(publicKey: auth.publicKey, signature: auth.signature,
+                                      nonce: nonce, hostCertSHA256: hostCertSHA256) else {
+            return .rejected(.invalidSignature)
+        }
+        guard let record = await pairings.authorizedClient(forPublicKey: Data(auth.publicKey)) else {
+            // han.3 hook: unknown key + VALID signature + an open pairing window becomes the
+            // enrollment prompt (spec §4-RESOLVED must-fix 1). Until that ceremony exists: fail
+            // closed.
+            return .rejected(.unknownKey)
+        }
+        try? await pairings.touch(id: record.id)  // lastSeen is best-effort
+        return .authenticated(deviceID: record.id)
     }
 
     /// Serve the SAS pairing PREAMBLE on an unpinned connection: two-sided commit-then-reveal, then

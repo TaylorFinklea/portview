@@ -2,6 +2,71 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-22] Mutual-auth gate wiring (han.1): host-local policy, display-independent auth, durable promotion + legacy eviction (ACCEPTED)
+
+**Context**: spec §3 gate + §4-RESOLVED rollout policy wired into `serveSession`. DUAL adversarial
+review per the user's mandate: **Kimi K3** (SHIP-WITH-FIXES) + **GPT-5.6 Sol** (RETURN). The
+verdicts diverged productively — each caught what the other rated acceptable. Sol reviewed the
+policy LOGIC as if `.required` were live; the user chose to EXPAND han.1 to answer the RETURN
+rather than defer it. Final folded set below.
+
+**Sol RETURN → resolution (user chose expand):**
+- **CRITICAL reopen-after-revoke + store-error-as-empty — CLOSED in han.1.** `PairingStore` now
+  persists a durable, monotonic `migrationComplete` marker (set on first enroll, NEVER cleared by
+  revoke) so revoking the last device — or a host restart over that store — can't reopen bootstrap.
+  `enrollmentSnapshot()` returns a tri-state (`.empty`/`.populated`/`.unreadable`); an unreadable
+  store fails closed to `.required` (was `!list().isEmpty`, which read a keychain error as "empty →
+  open"). Back-compat: the han.2-era bare-map blob still decodes (non-empty ⇒ migration done).
+- **MEDIUM duplicate-hello starvation — CLOSED.** The gate reads exactly ONE message (the initial
+  hello was already consumed pre-gate); a stray/duplicate frame no longer earns a fresh deadline.
+- **HIGH legacy-eviction — MECHANISM in han.1, eager trigger deferred.** `HostControl` tags each
+  session's auth class and `evictLegacyAdmitted()` synchronously closes legacy-admitted sessions
+  (no graceful `bye` — a de-trusted peer loses access at once). Wired as a LAZY sweep: any
+  connection observed under `.required` evicts lingering bootstrap-era sessions. The EAGER sweep at
+  the instant of enrollment is han.3's ceremony hook.
+- **HIGH atomic admission-vs-revocation (in-flight TOCTOU) — deferred to han.4.** Genuinely needs
+  the generation/epoch-bound admission + register-then-recheck that is han.4's named registry work.
+- **HIGH `.distantFuture` production expiry — deferred to han.3 (user product decision).** The
+  migration-window length; behaviorally identical in han.1's shipped window (bootstrap active until
+  enrollment exists either way).
+
+**Kimi K3 SHIP-WITH-FIXES (folded earlier):** bootstrap invalid-signature test pin; removed the
+`PairingStore` default-argument (gate + han.3 ceremony must share ONE instance — a second serves a
+stale cache); verified the first-frame role-lock closed a real pre-existing pre-auth input-injection
+hole.
+
+1. **The gate runs BEFORE the display guard** (guard moved below it): authorization is a
+   connection-level decision that must not depend on an attached display. Side effect: SAS
+   pairing no longer requires a display either. Kimi verified nothing between the old and new
+   guard positions touches a display.
+2. **First frame must be exactly `SASClientCommit` or `ClientHello`** — this also closed a real
+   pre-existing hole Kimi verified against HEAD: any non-SAS opener previously fell through to
+   the main loop, where input messages hit `injector.handle` with NO handshake at all.
+3. **Rollout policy is host-LOCAL** (`MutualAuthPolicy`, never wire-negotiated): `.required` |
+   `.legacyBootstrap(expiresAt:)`, one-way tightening (expiry OR first-enrollment auto-promotion).
+   Both call sites ship `.legacyBootstrap(expiresAt: .distantFuture)` DELIBERATELY: no enrollment
+   ceremony exists until han.3, `.required` would lock every client out. Un-migrated clients eat
+   the 3s gate deadline at connect (client ignores the unknown challenge tag) — bounded to the
+   bootstrap era; the client responder ships WITH han.3, never before (a responder without
+   enrollment would get valid-sig-unknown-key CLOSED — worse than legacy admit).
+4. **Legacy eviction: mechanism landed in han.1 (per the expand), eager trigger → han.3.**
+   `HostControl` tags each session's auth class; `evictLegacyAdmitted()` synchronously closes the
+   legacy ones; a lazy sweep fires whenever a connection is observed under `.required`. What
+   remains for han.4 is the fine-grained in-flight admission TOCTOU (generation/epoch-bound
+   admission), and for han.3 the eager sweep at the instant of enrollment. Durable/monotonic
+   promotion (the reopen-after-revoke half of Sol's CRITICAL) is ALSO in han.1 now via the
+   `PairingStore.migrationComplete` marker.
+5. **`run`/`events` REQUIRE `pairings` explicitly** (no default arg): the gate and han.3's
+   enrollment ceremony must share ONE `PairingStore` — a second instance serves a stale cache
+   (enrollments/revocations invisible until restart). Kimi's catch.
+6. **Fail-closed cert hash**: `HostRunner` now refuses to start hosting if the identity's
+   SHA-256 can't be computed (was degrade-to-`[]`) — the hash is both the SAS commit binding and
+   the signed-challenge relay defense.
+7. **Confirmed by review**: fresh CSPRNG nonce per connection (replay), client signs its held pin
+   (relay — a signature harvested at host A fails at host B), crypto-before-store ordering denies
+   an enrollment oracle, a late ClientAuth after bootstrap admit lands harmlessly in the main
+   loop's `default:`, log hygiene clean (only the derived deviceID, no key material/nonces).
+
 ## [2026-07-22] Client device identity (han.2): failure-policy triple + explicit rotation (ACCEPTED)
 
 **Context**: mutual-auth spec §1 implementation (`ClientIdentity` + `ClientIdentityStore` in

@@ -6,6 +6,15 @@
 
 `main`
 
+## Latest Session (2026-07-22 #2 — mutual-auth han.1: serveSession auth gate + rollout policy, DUAL-reviewed + EXPANDED)
+
+- **han.1 DONE — implemented, dual-reviewed, EXPANDED to answer Sol's RETURN, all green (suite 515→**548**/98; test-ios + build-host green). Ready to commit + close.** Dual adversarial review per the user's mandate: Kimi K3 SHIP-WITH-FIXES + GPT-5.6 Sol RETURN (verdicts diverged productively; user chose to EXPAND rather than defer). ADR: decisions.md (2026-07-22 han.1 entry, full disposition).
+- Built (TDD): `MutualAuthPolicy` (host-local, never wire-negotiated) + `serveAuthGate` (fresh CSPRNG nonce, SINGLE read — no deadline-reset starvation; silent peer → legacy admit only under active bootstrap) + serveSession wiring (first frame must be SASClientCommit|ClientHello — closed a real pre-auth input-injection hole; gate before the display guard; `didBuildScaffolding`/`onAuthGateOutcome` seams); `run` fail-closed cert hash (`?? []` REMOVED); both call sites `.legacyBootstrap(.distantFuture)` + explicit shared `PairingStore`.
+- **EXPAND (Sol RETURN → closed in han.1)**: `PairingStore.migrationComplete` durable/monotonic marker + `enrollmentSnapshot()` tri-state (`.empty`/`.populated`/`.unreadable`) — revoke-all/restart never reopen bootstrap; unreadable store fails closed to required; han.2-era bare-map blob still decodes. `HostControl.SessionAuthClass` + `evictLegacyAdmitted()` (synchronous close, no bye) + lazy sweep on any `.required` connection.
+- **Sol residual → routed**: atomic in-flight admission TOCTOU (generation/epoch) → han.4; eager evict-at-enroll hook + `.distantFuture` window decision → han.3. han.4 no longer blocks han.3 (durable promotion + eviction mechanism shipped). Spec addendum + bead notes updated.
+- Reviewer lane note: pi's `openai-codex` OAuth store (`~/.pi/agent/auth.json`) expired independently of the codex CLI's store; user re-auth'd mid-session. Two Lead reviewers of different families earned their keep — each caught what the other rated acceptable (Sol: store-error fail-open; Kimi: PairingStore split-authority).
+- NEXT: commit han.1 (12th unpushed commit) + `bd close portview-han.1`. Then han.3+han.4 (user decisions flagged: `.distantFuture` window, enrollment UI/device-gated).
+
 ## Latest Session (2026-07-22 — mutual-auth han.2: client device identity landed, dual-reviewed)
 
 - **portview-han.2 CLOSED** (TDD, suite 515→**527**/94; test-ios + build-host green): `ClientIdentity` + `ClientIdentityStore` (PortviewClientCore) + `KeychainClientIdentityStore` (client app, AfterFirstUnlockThisDeviceOnly, update path re-asserts accessibility). deviceID = `PairingStore.deviceID` by construction + frozen vectors. ADR: decisions.md (2026-07-22).
