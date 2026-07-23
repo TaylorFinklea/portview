@@ -22,6 +22,16 @@ import PortviewProtocol
         func write(_ data: Data) throws { lock.lock(); defer { lock.unlock() }; blob = data }
     }
 
+    /// Thread-safe mutable Bool for driving a TOCTOU race: a test flips it mid-gate-wait to prove
+    /// the gate re-reads window state at the decision point rather than trusting a stale snapshot.
+    private final class LockingBoolBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Bool
+        init(_ value: Bool) { self.value = value }
+        func get() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
+        func set(_ newValue: Bool) { lock.lock(); defer { lock.unlock() }; value = newValue }
+    }
+
     /// One scripted gate run: `respond` maps the issued challenge to the client's scripted reply
     /// messages (empty = a silent/legacy client). Returns the outcome.
     private func runGate(
@@ -29,14 +39,14 @@ import PortviewProtocol
         pairings: PairingStore,
         hostCertSHA256: [UInt8] = [UInt8](repeating: 0x3C, count: 32),
         deadline: Duration = .seconds(2),
-        sasWindowOpen: Bool = false,
+        isSASWindowOpen: @escaping @Sendable () async -> Bool = { false },
         respond: @escaping @Sendable (ServerChallenge) -> [AnyMessage]
     ) async -> HostRunner.AuthGateOutcome {
         let (stream, continuation) = AsyncStream.makeStream(of: AnyMessage.self)
         let inbound = HostRunner.MessageReader(stream)
         return await HostRunner.serveAuthGate(
             inbound: inbound, hostCertSHA256: hostCertSHA256, mode: mode,
-            sasWindowOpen: sasWindowOpen, pairings: pairings, deadline: deadline,
+            isSASWindowOpen: isSASWindowOpen, pairings: pairings, deadline: deadline,
             sendChallenge: { challenge in
                 for message in respond(challenge) { continuation.yield(message) }
             })
@@ -115,7 +125,7 @@ import PortviewProtocol
         let pairings = PairingStore(store: MemoryPairingStore())
         let outcome = await runGate(
             mode: .bootstrap, pairings: pairings, deadline: .milliseconds(100),
-            sasWindowOpen: false) { _ in [] }
+            isSASWindowOpen: { false }) { _ in [] }
         #expect(outcome == .legacyAdmitted)
     }
 
@@ -126,8 +136,26 @@ import PortviewProtocol
         let pairings = PairingStore(store: MemoryPairingStore())
         let outcome = await runGate(
             mode: .bootstrap, pairings: pairings, deadline: .milliseconds(100),
-            sasWindowOpen: true) { _ in [] }
+            isSASWindowOpen: { true }) { _ in [] }
         #expect(outcome == .rejected(.timeout))
+    }
+
+    @Test func windowOpenedDuringGateWaitIsCaughtAtDecisionTime() async throws {
+        // TOCTOU regression (review finding): sampling the pairing-window state ONCE before the
+        // gate's wait let a silent peer already in-flight when the user opens the pairing window
+        // resolve against a STALE `false` → `.legacyAdmitted` during an active ceremony — exactly
+        // the scenario the barrier exists to prevent, and the window-open evict sweep can't catch
+        // it (the admission registers after the sweep). The gate must re-evaluate window state AT
+        // the timeout decision point: a window that opens mid-wait must still be caught.
+        let box = LockingBoolBox(false)
+        let pairings = PairingStore(store: MemoryPairingStore())
+        async let outcome = runGate(
+            mode: .bootstrap, pairings: pairings, deadline: .milliseconds(100),
+            isSASWindowOpen: { box.get() }) { _ in [] }
+        try await Task.sleep(for: .milliseconds(30))
+        box.set(true)
+        let result = await outcome
+        #expect(result == .rejected(.timeout))
     }
 
     @Test func silentClientIsRejectedUnderRequired() async throws {

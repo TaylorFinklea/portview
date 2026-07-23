@@ -540,9 +540,9 @@ public struct HostRunner: Sendable {
         // bootstrap era before doing anything else. This lazy sweep fires on the next connection;
         // the EAGER sweep at the instant of enrollment is han.3's enroll-ceremony hook.
         if mode == .required { control?.evictLegacyAdmitted() }
-        let sasWindowOpen = await sas?.isOpen() ?? false
         let outcome = await serveAuthGate(
-            inbound: inbound, hostCertSHA256: hostCertSHA256, mode: mode, sasWindowOpen: sasWindowOpen,
+            inbound: inbound, hostCertSHA256: hostCertSHA256, mode: mode,
+            isSASWindowOpen: { await sas?.isOpen() ?? false },
             pairings: pairings,
             sendChallenge: { try await connection.send(.serverChallenge($0)) })
         onAuthGateOutcome?(outcome)
@@ -767,19 +767,23 @@ public struct HostRunner: Sendable {
     /// require BOTH a valid signature over the frozen payload (nonce ‖ host-cert-hash — replay +
     /// relay defenses) AND an enrolled exact-match key. Everything else fails closed, except a
     /// SILENT peer under `.bootstrap` with NO pairing window open, admitted as a warned legacy
-    /// session. `sasWindowOpen` is the legacy barrier (design v2 H3): while a ceremony window is
+    /// session. `isSASWindowOpen` is the legacy barrier (design v2 H3): while a ceremony window is
     /// open, a silent peer under `.bootstrap` is rejected (`.timeout`) rather than legacy-admitted —
     /// a legacy peer could otherwise watch the host screen and click Deny on someone else's
-    /// enrollment prompt. Exactly one read (Sol han.1 review): the initial ClientHello was already
-    /// consumed before this gate, so any further message that isn't ClientAuth is a violation —
-    /// granting a stray/duplicate frame a fresh deadline would let paced duplicates starve the
-    /// connection slots. The outbound side is a closure seam (the caller binds it to
-    /// `connection.send`) so the gate's decision logic is testable without sockets.
+    /// enrollment prompt. It is a closure evaluated AT the timeout decision point, not sampled once
+    /// at gate entry (review TOCTOU fix): a silent peer already in-flight when the user opens the
+    /// pairing window must still be caught by the barrier, even though the window wasn't open yet
+    /// when the gate started waiting — the window-open evict sweep can't catch it, since the
+    /// admission would only register after the sweep runs. Exactly one read (Sol han.1 review): the
+    /// initial ClientHello was already consumed before this gate, so any further message that isn't
+    /// ClientAuth is a violation — granting a stray/duplicate frame a fresh deadline would let paced
+    /// duplicates starve the connection slots. The outbound side is a closure seam (the caller binds
+    /// it to `connection.send`) so the gate's decision logic is testable without sockets.
     static func serveAuthGate(
         inbound: MessageReader,
         hostCertSHA256: [UInt8],
         mode: MutualAuthPolicy.Mode,
-        sasWindowOpen: Bool,
+        isSASWindowOpen: @Sendable () async -> Bool,
         pairings: PairingStore,
         deadline: Duration = authGateDeadline,
         sendChallenge: @Sendable (ServerChallenge) async throws -> Void
@@ -795,8 +799,10 @@ public struct HostRunner: Sendable {
         }
         guard let message = await inbound.next(deadline: deadline) else {
             // Silence: a pre-auth legacy client skips the unknown challenge tag and never replies.
-            // Legacy barrier: no legacy admissions while the ceremony window is open.
-            return (mode == .bootstrap && !sasWindowOpen) ? .legacyAdmitted : .rejected(.timeout)
+            // Legacy barrier: no legacy admissions while the ceremony window is open. Read HERE, at
+            // the decision point, not before the wait — a window opened mid-wait must still trip it.
+            guard mode == .bootstrap else { return .rejected(.timeout) }
+            return await isSASWindowOpen() ? .rejected(.timeout) : .legacyAdmitted
         }
         guard case .clientAuth(let auth) = message else {
             // Anything that isn't the expected auth (a stray/duplicate hello or any other frame) is
