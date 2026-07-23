@@ -56,4 +56,11 @@ import Testing
         // Only banned/control chars — nothing survives stripping either.
         #expect(DeviceNameSanitizer.sanitize("\u{200E}\u{200F}\u{061C}") == "(unnamed device)")
     }
+
+    @Test func stripsLineSeparatorAndParagraphSeparator() {
+        // U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR) must be stripped directly,
+        // never converted to spaces — they are not in the control category but are a line-injection
+        // vector if they survive into display UI. This test pins the invariant explicitly.
+        #expect(DeviceNameSanitizer.sanitize("A\u{2028}B\u{2029}C") == "ABC")
+    }
 }

@@ -7,11 +7,14 @@ import Foundation
 /// persisted `enroll`, and `.deviceConnected`).
 internal enum DeviceNameSanitizer {
     /// Bidi/format scalars not already covered by the Unicode `.control` general category:
-    /// LRM/RLM, the embed/override/isolate controls, and the Arabic Letter Mark.
+    /// LRM/RLM, the embed/override/isolate controls, the Arabic Letter Mark, and line/paragraph
+    /// separators (U+2028/U+2029) which must never survive into UI display as they are a
+    /// line-injection vector.
     private static let bannedScalars: CharacterSet = {
         var set = CharacterSet(charactersIn: "\u{200E}\u{200F}\u{061C}")
         set.insert(charactersIn: Unicode.Scalar(0x202A)!...Unicode.Scalar(0x202E)!)
         set.insert(charactersIn: Unicode.Scalar(0x2066)!...Unicode.Scalar(0x2069)!)
+        set.insert(charactersIn: "\u{2028}\u{2029}")
         return set
     }()
 
