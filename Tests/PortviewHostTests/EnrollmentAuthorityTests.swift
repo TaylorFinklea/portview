@@ -41,6 +41,16 @@ import PortviewProtocol
         #expect(request.expiresAt == now.addingTimeInterval(25))
     }
 
+    @Test func expiresAtDerivesFromInjectedDeadline() async throws {
+        // expiresAt must be derived from the injected `deadline`, not a hardcoded constant —
+        // otherwise they can silently diverge (a caller injecting a custom deadline would still
+        // see a request advertised as expiring at now+25s).
+        let authority = EnrollmentAuthority(deadline: .milliseconds(2500))
+        let request = try #require(await authority.begin(
+            publicKey: Data([1]), claimedName: "A", source: "s1", now: now))
+        #expect(request.expiresAt == now.addingTimeInterval(2.5))
+    }
+
     @Test func secondBeginWhilePendingIsNil() async throws {
         let authority = EnrollmentAuthority()
         _ = try #require(await authority.begin(
@@ -129,6 +139,19 @@ import PortviewProtocol
             publicKey: Data([3]), claimedName: "C", source: "s2", now: now) == nil)
     }
 
+    @Test func windowClosedInvalidatesPreParkApproval() async throws {
+        // A decision recorded BEFORE any `awaitDecision` ever parks (i.e. `pending.decided` was
+        // set by `approve` racing ahead) is deliberately discarded by a window-epoch change —
+        // fail-safe direction only. This pins that `invalidatePending` is unconditional even over
+        // an already-`true` decision, per spec must-fix 5 ("deny/timeout/close invalidates it").
+        let authority = EnrollmentAuthority()
+        let request = try #require(await authority.begin(
+            publicKey: Data([1]), claimedName: "A", source: "s1", now: now))
+        await authority.approve(request.attemptID)
+        await authority.windowClosed()
+        #expect(await authority.awaitDecision(request.attemptID) == false)
+    }
+
     @Test func windowOpenedResetsBlocksCapAndStalePending() async throws {
         let authority = EnrollmentAuthority(deadline: .milliseconds(80))
 
@@ -193,6 +216,48 @@ import PortviewProtocol
         let afterReset = await authority.begin(
             publicKey: Data([100]), claimedName: "Reset", source: "src-reset", now: now)
         #expect(afterReset != nil)
+    }
+
+    @Test func cancellationResolvesFalseWithoutBlockingSource() async throws {
+        let authority = EnrollmentAuthority()
+        let request = try #require(await authority.begin(
+            publicKey: Data([1]), claimedName: "A", source: "s1", now: now))
+
+        let waiter = Task<Bool, Never> {
+            await authority.awaitDecision(request.attemptID)
+        }
+        // Give the task a chance to actually park its continuation before cancelling it —
+        // cancellation is a host-side event (e.g. the serve task tearing down), not peer
+        // misbehavior, so unlike deny/timeout/windowClosed it must NOT block the source.
+        try await Task.sleep(for: .milliseconds(20))
+        waiter.cancel()
+        #expect(await waiter.value == false)
+
+        let sameSource = await authority.begin(
+            publicKey: Data([2]), claimedName: "B", source: "s1", now: now)
+        #expect(sameSource != nil)
+    }
+
+    @Test func doubleParkSameAttemptGuardsAgainstLeak() async throws {
+        // One-caller-per-attempt contract: a second concurrent `awaitDecision` for the SAME
+        // attemptID must not steal/overwrite the first caller's already-parked continuation
+        // (that would leak it forever — the first caller would never resume). Force a
+        // deterministic ordering (park first, then a beat later attempt to park again) rather
+        // than racing two `async let`s, so the assertions below aren't ambiguous about which
+        // call "won".
+        let authority = EnrollmentAuthority(deadline: .milliseconds(150))
+        let request = try #require(await authority.begin(
+            publicKey: Data([1]), claimedName: "A", source: "s1", now: now))
+
+        async let firstResult = authority.awaitDecision(request.attemptID)
+        try await Task.sleep(for: .milliseconds(30))
+        let secondResult = await authority.awaitDecision(request.attemptID)
+
+        // The new (second) caller gets an immediate `false` from the defensive guard.
+        #expect(secondResult == false)
+        // The original park is untouched and still resolves on its own (here, at the deadline)
+        // — proof its continuation was never stolen/leaked.
+        #expect(await firstResult == false)
     }
 
     @Test func singleResume() async throws {

@@ -50,6 +50,13 @@ public actor EnrollmentAuthority {
         self.deadline = deadline
     }
 
+    /// `Duration` -> `TimeInterval` so `expiresAt` can be derived directly from the injected
+    /// `deadline` instead of a separately-hardcoded constant (they must never diverge).
+    private static func timeInterval(for duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return TimeInterval(components.seconds) + TimeInterval(components.attoseconds) / 1e18
+    }
+
     /// Admits a new attempt, or returns nil if: one is already pending, `source` is blocked for
     /// this window, the window's request cap is exhausted, or `windowClosed()` was the last window
     /// event received. Captures `publicKey` as an independent snapshot (Swift `Data` value/COW
@@ -66,7 +73,7 @@ public actor EnrollmentAuthority {
             claimedName: claimedName,
             source: source,
             createdAt: now,
-            expiresAt: now.addingTimeInterval(25))
+            expiresAt: now.addingTimeInterval(Self.timeInterval(for: deadline)))
         requestsThisWindow += 1
         pending = PendingAttempt(request: request, continuation: nil, decided: nil)
         return request
@@ -94,6 +101,14 @@ public actor EnrollmentAuthority {
                 if let decided = entry.decided {
                     pending = nil
                     continuation.resume(returning: decided)
+                    return
+                }
+                // One-caller-per-attempt contract: if another `awaitDecision` for this same
+                // attemptID already parked a continuation, don't steal/overwrite it — that would
+                // leak the first caller's continuation forever. Resolve this new, redundant
+                // caller immediately instead.
+                guard entry.continuation == nil else {
+                    continuation.resume(returning: false)
                     return
                 }
                 entry.continuation = continuation
@@ -142,10 +157,13 @@ public actor EnrollmentAuthority {
         resolve(attemptID, outcome: false, blockSource: true)
     }
 
-    /// The awaiting task was cancelled (e.g. connection death unwinding via the caller's
-    /// `withTaskCancellationHandler`) — resolve like a deny rather than leak the continuation.
+    /// The awaiting task was cancelled (e.g. the serve task tearing down, connection death
+    /// unwinding via the caller's `withTaskCancellationHandler`) — resolve false so the
+    /// continuation isn't leaked, but do NOT block the source: cancellation is a host-side event,
+    /// not peer misbehavior, so it must not carry the same re-prompt-grinding penalty as
+    /// deny/timeout/windowClosed.
     private func cancelled(_ attemptID: UUID) {
-        resolve(attemptID, outcome: false, blockSource: true)
+        resolve(attemptID, outcome: false, blockSource: false)
     }
 
     /// Shared resolution path for approve/deny/timeout/cancellation: only acts if `attemptID` is
@@ -170,7 +188,12 @@ public actor EnrollmentAuthority {
 
     /// Window-epoch invalidation shared by `windowOpened`/`windowClosed`: unconditionally clears
     /// `pending` and resolves its continuation false if one was parked (nothing to leak if not —
-    /// no continuation was ever created for it yet).
+    /// no continuation was ever created for it yet). Deliberately unconditional even when a
+    /// decision was already recorded (`entry.decided != nil` — e.g. an `approve()` that raced
+    /// ahead of the caller's `awaitDecision` ever parking): a window-epoch change invalidates the
+    /// pending request in every state, not just the ones still awaiting resolution. Fail-safe
+    /// direction only — a pre-park `true` never survives a window boundary (spec must-fix 5:
+    /// "deny/timeout/close invalidates it").
     private func invalidatePending(blockSource: Bool) {
         guard let entry = pending else { return }
         pending = nil
