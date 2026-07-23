@@ -58,10 +58,19 @@ public struct SASAttemptLimiter: Sendable {
 /// callers are already in async contexts, so actor isolation replaces the hand-rolled lock.
 public actor SASPairingControl {
     private var limiter: SASAttemptLimiter
-    /// Source key of whichever preamble currently holds the HUD's single code-display slot. Only
-    /// the owner's derived code may be shown, so a second concurrent preamble (must-fix 6) fails to
-    /// claim and must close its connection before the host ever reveals its nonce to it.
-    private var codeDisplayOwner: String?
+    /// Owner token of whichever preamble currently holds the HUD's single code-display slot — an
+    /// opaque LEASE, not a slot-holder identity. Only the current token's holder may display its
+    /// derived code, so a second concurrent preamble (must-fix 6) fails to claim and must close its
+    /// connection before the host ever reveals its nonce to it. `openWindow()` can force-release
+    /// this out from under a live holder (stale-claim recovery); the stripped holder does NOT get
+    /// evicted directly — it must observe the loss itself via `holdsCodeDisplay(token:)` before it
+    /// acts on the slot again (in particular, immediately before displaying its code).
+    private var codeDisplayOwner: UInt64?
+    /// Monotonically incrementing source of fresh owner tokens. Deliberately NOT derived from
+    /// `source`: link-local/APIPA bucketing (`linkLocalIPv4Bucket`) and IPv6 /64 bucketing both
+    /// let distinct connections share one source key, so a source-derived token could collide
+    /// across them and let an unrelated connection mistake itself for the current lease holder.
+    private var nextCodeDisplayToken: UInt64 = 0
 
     public init(windowDuration: TimeInterval = 120, maxAttempts: Int = 5, maxTotalAttempts: Int = 20) {
         limiter = SASAttemptLimiter(windowDuration: windowDuration, maxAttempts: maxAttempts,
@@ -69,8 +78,10 @@ public actor SASPairingControl {
     }
 
     /// User opened the pairing window (e.g. tapped "Pair" on the host). Force-releases any
-    /// code-display claim left over from a previous window — a connection that never reached its
-    /// release (crash, forced close) must not wedge every future window's display slot shut.
+    /// code-display lease left over from a previous window — a connection that never reached its
+    /// release (crash, forced close) must not wedge every future window's display slot shut. This
+    /// does not reach into the stripped holder and stop it; that connection keeps running and must
+    /// notice the loss on its own via `holdsCodeDisplay(token:)`.
     public func openWindow(now: Date = Date()) { limiter.open(now: now); codeDisplayOwner = nil }
     public func closeWindow() { limiter.close() }
 
@@ -79,21 +90,36 @@ public actor SASPairingControl {
         limiter.registerAttempt(source: source, now: now)
     }
 
-    /// Claim the HUD's single code-display slot for `source`. Returns true iff the slot was free
-    /// (now held by `source`); false if another source already holds it. Callers must acquire this
-    /// BEFORE sending the host's SAS reveal, so a losing concurrent preamble closes its connection
-    /// before its peer ever derives a code that isn't the one displayed.
-    func claimCodeDisplay(source: String) -> Bool {
-        guard codeDisplayOwner == nil else { return false }
-        codeDisplayOwner = source
-        return true
+    /// Claim the HUD's single code-display slot for `source`, returning a fresh owner token on
+    /// success, or nil if another connection already holds the lease. `source` does not shape the
+    /// token (see `nextCodeDisplayToken`); it exists only so callers key the claim off the same
+    /// value they already derived for attempt-limiting. Callers must acquire this BEFORE sending
+    /// the host's SAS reveal, so a losing concurrent preamble closes its connection before its peer
+    /// ever derives a code that isn't the one displayed — and must re-validate with
+    /// `holdsCodeDisplay(token:)` immediately before actually displaying the code, since a
+    /// subsequent `openWindow()` can force-release this lease at any time after it's granted.
+    func claimCodeDisplay(source: String) -> UInt64? {
+        guard codeDisplayOwner == nil else { return nil }
+        nextCodeDisplayToken += 1
+        codeDisplayOwner = nextCodeDisplayToken
+        return nextCodeDisplayToken
     }
 
-    /// Release the code-display slot if `source` is its current owner; a non-owner release is a
-    /// no-op so a stale/late caller can't evict the connection actually holding the slot.
-    func releaseCodeDisplay(source: String) {
-        guard codeDisplayOwner == source else { return }
+    /// Release the code-display lease if `token` is its current owner; a stale or non-owner token
+    /// is a no-op so a connection that already lost the lease (e.g. via `openWindow()`) — or a late
+    /// duplicate release — can't evict whoever holds the slot now.
+    func releaseCodeDisplay(token: UInt64) {
+        guard codeDisplayOwner == token else { return }
         codeDisplayOwner = nil
+    }
+
+    /// True iff `token` is still the current code-display lease holder. The one call site that
+    /// matters is `serveSASPreamble`, immediately before `emit(.sasCode(...))`: a lease acquired
+    /// earlier in that function can have been force-released by an intervening `openWindow()`
+    /// (e.g. while this connection was blocked awaiting the client's reveal), and a stripped holder
+    /// must skip the emit rather than trust its now-stale token.
+    func holdsCodeDisplay(token: UInt64) -> Bool {
+        codeDisplayOwner == token
     }
 
     /// Per-source key for the attempt limiter: the connection's resolved remote HOST (IP), dropping
@@ -107,15 +133,21 @@ public actor SASPairingControl {
     /// (`IPv6Address.rawValue` carries no zone — it lives in `.interface`), so two addresses
     /// differing only in scope bucket together. IPv4-mapped/compatible IPv6 (dual-stack listeners
     /// surface v4 peers as ::ffff:a.b.c.d, whose upper 64 bits are all zero) keys as its embedded
-    /// IPv4 address rather than collapsing every v4 client into one all-zeros /64 bucket. Plain
-    /// IPv4 addresses in 169.254.0.0/16 (APIPA — self-assigned when DHCP fails) all bucket into one
+    /// IPv4 address rather than collapsing every v4 client into one all-zeros /64 bucket. IPv4
+    /// addresses in 169.254.0.0/16 (APIPA — self-assigned when DHCP fails) all bucket into one
     /// shared key: many distinct devices on a segment can each mint one, so per-address keying
     /// would hand each an independent budget instead of the single-source-class treatment they
-    /// warrant. Unresolved/non-hostPort endpoints share a single bucket.
+    /// warrant. This link-local bucketing applies equally to the embedded IPv4 address extracted
+    /// from a mapped IPv6 peer (::ffff:169.254.x.x) — otherwise a dual-stack listener's view of an
+    /// APIPA peer would bypass the bucket and mint it a private per-address budget. Unresolved/
+    /// non-hostPort endpoints share a single bucket.
     static func sourceKey(for endpoint: NWEndpoint?) -> String {
         guard case .hostPort(let host, _) = endpoint else { return "unresolved" }
         if case .ipv6(let address) = host {
-            if let v4 = address.asIPv4 { return String(describing: NWEndpoint.Host.ipv4(v4)) }
+            if let v4 = address.asIPv4 {
+                if isLinkLocalIPv4(v4) { return linkLocalIPv4Bucket }
+                return String(describing: NWEndpoint.Host.ipv4(v4))
+            }
             let prefix = [UInt8](address.rawValue.prefix(8))
             let groups = stride(from: 0, to: 8, by: 2).map {
                 String(format: "%x", UInt16(prefix[$0]) << 8 | UInt16(prefix[$0 + 1]))

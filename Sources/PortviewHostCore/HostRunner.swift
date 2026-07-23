@@ -824,12 +824,6 @@ public struct HostRunner: Sendable {
         let source = SASPairingControl.sourceKey(for: connection.resolvedRemoteEndpoint)
         guard await sas.registerAttempt(source: source) else { return }
 
-        // Claim the HUD's single code-display slot BEFORE any reveal is sent (must-fix 6): a
-        // second concurrent preamble that loses the claim returns here, closing its connection,
-        // so its client never derives a code that isn't the one displayed. Released on every exit.
-        guard await sas.claimCodeDisplay(source: source) else { return }
-        defer { Task { await sas.releaseCodeDisplay(source: source) } }
-
         // Host: fresh nonce + commit, sent before any reveal.
         let hostNonce = SASCode.randomNonce()
         let hostCommit = SASCode.commit(nonce: hostNonce, role: .host, certSHA256: hostCertSHA256)
@@ -837,15 +831,30 @@ public struct HostRunner: Sendable {
 
         // Client reveal must come next; verify it against the client commit before using the nonce.
         // Deadline-bounded (rather than left to the ~30s QUIC idle timeout) so an idle/phantom
-        // preamble connection doesn't hold its slot for the full ~30s.
+        // preamble connection can't sit here indefinitely — it hasn't claimed the display slot yet,
+        // so a stalled peer no longer holds that slot hostage during this wait either.
         guard let next = await inbound.next(deadline: .seconds(5)),
               case .sasClientReveal(let reveal) = next else { return }
         guard SASCode.verify(commitment: clientCommit.commit, nonce: reveal.nonce,
                              role: .client, certSHA256: hostCertSHA256) else { return }
 
-        // Reveal the host nonce, then both sides derive the same code; display it for the user.
+        // Claim the HUD's single code-display slot now that the client's reveal is verified, still
+        // strictly BEFORE the host's own reveal is sent (must-fix 6): a second concurrent preamble
+        // that loses the claim returns here, closing its connection, before its client ever derives
+        // a code that isn't the one displayed. Claiming this late (rather than at engagement start)
+        // keeps a silent/stalled connection from holding the display slot for the whole 5s wait
+        // above. Released via its token on every exit.
+        guard let displayToken = await sas.claimCodeDisplay(source: source) else { return }
+        defer { Task { await sas.releaseCodeDisplay(token: displayToken) } }
+
+        // Reveal the host nonce, then both sides derive the same code.
         do { try await connection.send(.sasHostReveal(SASHostReveal(nonce: hostNonce))) } catch { return }
         let code = SASCode.derive(clientNonce: reveal.nonce, hostNonce: hostNonce, certSHA256: hostCertSHA256)
+        // Re-validate the lease immediately before displaying: `openWindow()` can force-release a
+        // stale claim at any time, including the moment between the claim above and here, so a
+        // holder that was stripped mid-flight must skip the emit rather than overwrite a newer
+        // window's code with its own (the exact must-fix-6 DoS this lease exists to close).
+        guard await sas.holdsCodeDisplay(token: displayToken) else { return }
         emit(.sasCode(code))
 
         // Guardrail E (optional, best-effort): read EXACTLY ONE more message — the client's

@@ -273,37 +273,77 @@ import Network
         #expect(SASPairingControl.sourceKey(for: linkLocal) != SASPairingControl.sourceKey(for: routable))
         #expect(SASPairingControl.sourceKey(for: routable) == "10.0.0.2")
     }
+
+    // MARK: - IPv4-mapped IPv6 link-local (::ffff:169.254.x.x must bucket the same as plain
+    // 169.254.x.x — the embedded-v4 extraction in the .ipv6 branch must apply the same link-local
+    // check, not just the plain .ipv4 branch, or a dual-stack listener's mapped view of an APIPA
+    // peer bypasses the shared bucket)
+
+    @Test func sourceKeyBucketsMappedIPv4LinkLocalWithPlainLinkLocal() {
+        let mappedLinkLocal = NWEndpoint.hostPort(host: "::ffff:169.254.1.2", port: 50_001)
+        let plainLinkLocal = NWEndpoint.hostPort(host: "169.254.9.9", port: 50_002)
+        #expect(SASPairingControl.sourceKey(for: mappedLinkLocal) == SASPairingControl.sourceKey(for: plainLinkLocal))
+    }
+
+    @Test func sourceKeyMappedRoutableIPv4StaysUnchanged() {
+        let mappedRoutable = NWEndpoint.hostPort(host: "::ffff:10.0.0.2", port: 50_001)
+        #expect(SASPairingControl.sourceKey(for: mappedRoutable) == "10.0.0.2")
+    }
 }
 
-/// Claims the HUD's single code-display slot so a second concurrent SAS preamble can't overwrite
-/// the code the user is looking at (must-fix 6): only one connection may hold the slot at a time,
-/// non-owner release is a no-op (a losing/late connection can't evict the real owner), and opening
-/// a fresh pairing window force-releases any claim left over from a previous window.
+/// Claims the HUD's single code-display slot as an owner-token LEASE so a second concurrent SAS
+/// preamble can't overwrite the code the user is looking at (must-fix 6): only one connection may
+/// hold the lease at a time, a stale/non-owner token's release is a no-op (a losing/late connection
+/// can't evict the real owner), and opening a fresh pairing window force-releases any lease left
+/// over from a previous window — the STRIPPED holder must observe that loss via
+/// `holdsCodeDisplay(token:)` rather than keep believing it still owns the slot.
 @Suite struct SASCodeDisplayClaimTests {
-    @Test func firstClaimSucceedsSecondFailsUntilRelease() async {
+    @Test func firstClaimSucceedsSecondFailsUntilRelease() async throws {
         let sas = SASPairingControl()
-        let first = await sas.claimCodeDisplay(source: "10.0.0.2")
+        let first = try #require(await sas.claimCodeDisplay(source: "10.0.0.2"))
         let second = await sas.claimCodeDisplay(source: "10.0.0.3")
-        #expect(first)
-        #expect(second == false)
-        await sas.releaseCodeDisplay(source: "10.0.0.2")
+        #expect(second == nil)
+        await sas.releaseCodeDisplay(token: first)
         let afterRelease = await sas.claimCodeDisplay(source: "10.0.0.3")
-        #expect(afterRelease)
+        #expect(afterRelease != nil)
     }
 
-    @Test func releaseByNonOwnerIsANoOp() async {
+    @Test func releaseByStaleTokenIsANoOp() async throws {
         let sas = SASPairingControl()
-        _ = await sas.claimCodeDisplay(source: "10.0.0.2")
-        await sas.releaseCodeDisplay(source: "10.0.0.3")   // not the owner — must not release
+        let owner = try #require(await sas.claimCodeDisplay(source: "10.0.0.2"))
+        await sas.releaseCodeDisplay(token: owner + 1)   // not the current owner token — no-op
         let stillHeld = await sas.claimCodeDisplay(source: "10.0.0.3")
-        #expect(stillHeld == false)
+        #expect(stillHeld == nil)
+        #expect(await sas.holdsCodeDisplay(token: owner))   // original lease is untouched
     }
 
-    @Test func openWindowForceReleasesStaleClaim() async {
+    @Test func openWindowForceReleasesStaleClaimAndStrippedHolderObservesIt() async throws {
+        // The exact must-fix-6 driving scenario: claim → openWindow() strips it → the OLD holder
+        // must see it lost the lease (not keep emitting as if it still owned the slot), and a new
+        // claim must succeed in its place.
         let sas = SASPairingControl()
-        _ = await sas.claimCodeDisplay(source: "10.0.0.2")
+        let oldToken = try #require(await sas.claimCodeDisplay(source: "10.0.0.2"))
         await sas.openWindow()
-        let afterOpen = await sas.claimCodeDisplay(source: "10.0.0.3")
-        #expect(afterOpen)
+        #expect(await sas.holdsCodeDisplay(token: oldToken) == false)
+        let newToken = await sas.claimCodeDisplay(source: "10.0.0.3")
+        #expect(newToken != nil)
+    }
+
+    @Test func tokensAreMonotonicNotDerivedFromSource() async throws {
+        // Tokens come from the actor's own counter, never from `source` — link-local/APIPA and
+        // IPv6 /64 bucketing mean distinct connections can share one source key, so a
+        // source-derived token could collide across them and let a stripped holder mistake itself
+        // for the new owner.
+        let sas = SASPairingControl()
+        let first = try #require(await sas.claimCodeDisplay(source: "169.254.0.0/16"))
+        await sas.releaseCodeDisplay(token: first)
+        let second = try #require(await sas.claimCodeDisplay(source: "169.254.0.0/16"))
+        #expect(first != second)
+    }
+
+    @Test func holdsCodeDisplayIsFalseForANonOwnerToken() async throws {
+        let sas = SASPairingControl()
+        let owner = try #require(await sas.claimCodeDisplay(source: "10.0.0.2"))
+        #expect(await sas.holdsCodeDisplay(token: owner + 1) == false)
     }
 }
