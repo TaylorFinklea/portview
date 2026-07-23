@@ -29,7 +29,14 @@ struct PortviewHostApp {
             case .sasCode, .sasConfirmed:
                 break  // never print/log the SAS code (secret hygiene); the CLI has no pairing-window UI
             case .enrollmentRequest, .enrollmentResolved:
-                break  // the CLI wires no EnrollmentAuthority yet (han.3 ceremony UI is Task 8/9)
+                // The CLI passes no `enrollment:` authority (nil), so `serveSession` never emits
+                // these — a documented limitation, not a bug: `nil` authority means the CLI host
+                // only ever admits its existing enrolled devices (`PairingStore` lookups still
+                // work); enrolling a NEW device requires the macOS app's Allow/Deny ceremony
+                // (`HostAppModel`/`MenuBarHostView`). And because `PairingStore` is a per-process
+                // warm cache (han.4 owns the cross-process fix), a long-running CLI process won't
+                // see a device the app just enrolled until the CLI is restarted.
+                break
             }
         }
     }

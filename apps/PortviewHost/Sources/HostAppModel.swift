@@ -3,6 +3,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import LocalAuthentication
 import Observation
 import PortviewHostCore
 import PortviewTransport
@@ -47,6 +48,10 @@ final class HostAppModel {
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private let control = HostControl()
     @ObservationIgnored private let sasControl = SASPairingControl()
+    /// The ONE shared enrollment-ceremony authority (han.3 design) — constructed once here (not
+    /// per-`start()`) so `beginPairing`/`endPairing` and the Allow/Deny actions all resolve against
+    /// the same actor state; passed into `events(...)` below beside the app's `PairingStore`.
+    @ObservationIgnored private let authority = EnrollmentAuthority()
     @ObservationIgnored private var permissionsTask: Task<Void, Never>?
     @ObservationIgnored private var pairingTimeoutTask: Task<Void, Never>?
     /// CloudKit re-wake beacon (fire-and-forget; each trigger runs in its own task so an iCloud stall
@@ -63,6 +68,11 @@ final class HostAppModel {
     private(set) var clientConfirmed = false
     /// How long a pairing window stays open before auto-closing.
     private static let pairingWindowSeconds: TimeInterval = 120
+
+    /// The single in-flight enrollment prompt (han.3), or nil when none is pending. Set by
+    /// `.enrollmentRequest`, cleared by `.enrollmentResolved` — the L1 no-false-success path: a
+    /// prompt must never outlive the request it was raised for.
+    private(set) var enrollmentPrompt: (attemptID: UUID, fingerprint: String, claimedName: String, expiresAt: Date)?
 
     /// Observed (not derived from the @ObservationIgnored task) so the menu-bar glyph + Start/Stop
     /// re-render on EVERY transition — including when the serve loop ends on its own while ready.
@@ -84,15 +94,16 @@ final class HostAppModel {
         sessions = HostSessions()
         connectedSince = nil
 
-        task = Task { [weak self, control, sasControl] in
-            // Legacy-bootstrap until the enrollment ceremony (han.3) exists: no device CAN enroll
-            // yet, so `.required` would lock every client out. Auto-promotion flips this to
-            // required the moment a first device enrolls; han.3 revisits the open-ended expiry.
-            // This PairingStore is the ONE shared authority — han.3's enrollment ceremony and
-            // han.4's revoke UI must use this same instance, never construct their own.
+        task = Task { [weak self, control, sasControl, authority] in
+            // Legacy-bootstrap until first-enroll auto-promotion flips this host to `.required`
+            // (han.3 revisits the open-ended expiry). This PairingStore is the ONE shared
+            // authority — han.4's revoke UI must use this same instance, never construct their
+            // own. `authority` is likewise the ONE shared EnrollmentAuthority (see its stored
+            // property comment above).
             let events = HostRunner().events(identity: .app(displayName: Self.displayName), control: control, sasControl: sasControl,
                                              authPolicy: .legacyBootstrap(expiresAt: .distantFuture),
-                                             pairings: PairingStore())
+                                             pairings: PairingStore(),
+                                             enrollment: authority)
             for await event in events {
                 self?.handle(event)
             }
@@ -117,9 +128,17 @@ final class HostAppModel {
 
     /// User opened a pairing window: clients may now run the SAS preamble and the host will display a
     /// code. Auto-closes after `pairingWindowSeconds` so an idle code can't linger.
+    ///
+    /// Legacy barrier (design v2, review H3/Sol-1): evict every legacy-admitted session and reset the
+    /// enrollment authority's epoch BEFORE the SAS window opens — no remote peer can be mid-session
+    /// (able to watch the ceremony or click Deny) once pairing UI becomes reachable.
     func beginPairing() {
         guard isRunning else { return }
-        Task { await sasControl.openWindow() }
+        control.evictLegacyAdmitted()
+        Task { [authority, sasControl] in
+            await authority.windowOpened()
+            await sasControl.openWindow()
+        }
         isPairing = true
         displayedSASCode = nil
         clientConfirmed = false
@@ -136,9 +155,29 @@ final class HostAppModel {
         pairingTimeoutTask?.cancel()
         pairingTimeoutTask = nil
         Task { await sasControl.closeWindow() }
+        Task { await authority.windowClosed() }
         isPairing = false
         displayedSASCode = nil
         clientConfirmed = false
+    }
+
+    /// Allow: gates every approval behind genuine LOCAL presence — LAContext is evaluated fresh per
+    /// tap, and only a POSITIVE result reaches `authority.approve`. Failure or cancel leaves the
+    /// prompt exactly as-is (no false success); it clears only via `.enrollmentResolved` (approve,
+    /// deny, the ceremony's internal deadline, or window close).
+    func approveEnrollment(_ attemptID: UUID) {
+        Task { [authority] in
+            let context = LAContext()
+            let approved = (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
+                                                               localizedReason: "Approve pairing this device")) ?? false
+            guard approved else { return }
+            await authority.approve(attemptID)
+        }
+    }
+
+    /// Deny: no local-presence check — a user can always reject a prompt outright.
+    func denyEnrollment(_ attemptID: UUID) {
+        Task { [authority] in await authority.deny(attemptID) }
     }
 
     /// Close the connected client session(s) without stopping hosting (keeps advertising).
@@ -259,6 +298,12 @@ final class HostAppModel {
                 endPairing()  // a client paired → close the window + clear the code
             }
             if case .deviceDisconnected = event { messages.append("device disconnected") }
+        case .enrollmentRequest(let attemptID, let fingerprint, let claimedName, let expiresAt):
+            enrollmentPrompt = (attemptID: attemptID, fingerprint: fingerprint, claimedName: claimedName, expiresAt: expiresAt)
+        case .enrollmentResolved(let attemptID, _):
+            // Only clear if this resolution is for the prompt currently shown — a prompt must
+            // never outlive its own request (L1 no-false-success path).
+            if enrollmentPrompt?.attemptID == attemptID { enrollmentPrompt = nil }
         }
     }
 

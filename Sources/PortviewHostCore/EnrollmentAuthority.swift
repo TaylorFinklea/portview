@@ -137,7 +137,7 @@ public actor EnrollmentAuthority {
 
     /// Fresh window epoch: resets blocked sources and the request cap, and invalidates (resolves
     /// false, without blocking) any stale pending attempt left over from before this call.
-    func windowOpened() {
+    public func windowOpened() {
         windowOpen = true
         blockedSources.removeAll()
         requestsThisWindow = 0
