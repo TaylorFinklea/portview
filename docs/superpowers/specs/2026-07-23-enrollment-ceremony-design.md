@@ -1,87 +1,132 @@
-# Design — Enrollment ceremony (han.3): local-presence prompt + dual-fingerprint compare
+# Design v2 — Enrollment ceremony (han.3): local-presence prompt + dual-fingerprint compare
 
 Implements §4-RESOLVED of `2026-07-01-revocable-pairing-mutual-auth.md` (Option (a), the six
-must-fixes). This doc covers the han.3 implementation architecture only; the security rationale
-lives in the parent spec. User decisions (2026-07-23): local presence = **LAContext/Touch ID**;
-migration window stays **`.distantFuture`** (first-enroll auto-promotion is the bound, per han.1's
-durable marker); scope = **full ceremony, UI device-gated**. Fingerprint encoding = grouped hex
-(user-confirmed).
+must-fixes). v2 folds the pre-implementation adversarial design review (2026-07-23, GPT-5.6 Sol:
+REDESIGN + Kimi K3: BUILD-WITH-CHANGES — converged on every load-bearing change; v1 lost the
+first-prompt race the ceremony exists to win). User decisions (fixed): local presence =
+**LAContext/Touch ID**; migration window stays **`.distantFuture`** (first-enroll auto-promotion
+is the bound); scope = **full ceremony, UI device-gated**; fingerprint = grouped hex.
 
-## Flow
+## Flow (v2 — changes marked ►)
 
-1. User opens the pairing window (existing menu-bar flow → `SASPairingControl.openWindow`).
-2. Client pairs via SAS; on match re-dials pinned (existing) and now RESPONDS to the auth gate:
-   `ClientHello` → `ServerChallenge` → `ClientAuth` signed with its persistent `ClientIdentity`.
-3. Gate: unknown key + VALID signature + window open → **prompt-pending**, not close. Host emits
-   an enrollment request (attemptID + fingerprint + sanitized claimed name).
-4. macOS prompt shows: “A device calling itself ‘X’ — fingerprint `AB12 CD34 EF56 7890 1234`”.
-   The phone’s pairing sheet shows ITS OWN fingerprint; the human compares (must-fix 2).
-5. Allow → `LAContext.evaluatePolicy(.deviceOwnerAuthentication)` (must-fix 3) → the gate enrolls
-   the EXACT pubkey byte-snapshot captured at prompt-render (must-fix 1), eagerly evicts
-   legacy-admitted sessions, proceeds to `ServerHello`. Deny/timeout/window-close → silent close +
-   the source is blocked for the window (must-fix 5).
+1. User opens the pairing window (menu-bar → `HostAppModel.beginPairing`).
+   ► **Legacy barrier (must-fix 3, review H3/Sol-1)**: `beginPairing` first calls
+   `control.evictLegacyAdmitted()`, AND while the window is open `serveSession` REFUSES new
+   legacy admissions (silent peer + bootstrap + `sas.isOpen()` → close, not admit — an enrolling
+   phone answers the challenge, so it is unaffected). No remote peer can watch the ceremony or
+   click Deny. The approve-time evict remains as the second fence.
+2. Client pairs via SAS (or QR); ► from the moment a pairing-driven connect starts, the phone
+   shows a PERSISTENT compare card — "Approve on the Mac — compare: `AB12 CD34 EF56 7890 1234`"
+   (its own `KeyFingerprint.short`), surviving the SAS sheet's submit and the pinned re-dial,
+   until the ceremony resolves (streaming / denied / timed out / cancelled). Invariant: the
+   reference is visible BEFORE the Mac prompt can exist (review H1/Sol-3). Same card on the QR
+   path.
+3. Pinned re-dial: `ClientHello` → `ServerChallenge` → `ClientAuth` (persistent `ClientIdentity`).
+   ► Pairing-driven connects that close pre-`ServerHello` RETRY (~2 s cadence, backoff) while the
+   pairing context is active — until window-close, user cancel, or an explicit denial — with
+   distinct end states ("denied on the Mac" / "timed out — retry" / connected) (review H2/Sol-5).
+4. Gate: unknown key + VALID signature + window open → prompt-pending. Host emits
+   `.enrollmentRequest(attemptID:fingerprint:claimedName:expiresAt:)` (► carries `expiresAt`; no
+   key material — the authority holds the snapshot).
+5. macOS prompt: "A device calling itself 'X' — fingerprint `AB12 CD34 …` — compare ALL FIVE
+   groups with the phone" (► full-compare copy, both surfaces; review fingerprint caveat).
+   Allow → `LAContext.evaluatePolicy(.deviceOwnerAuthentication)` → `authority.approve(attemptID)`.
+6. Gate on approval: ► re-check `sas.isOpen()` (a cap-exhaustion close invalidates), then
+   `pairings.enroll(exact snapshot, sanitizedName)` — ► **enroll-throw fails CLOSED**: consume
+   the attempt, close the connection, never `ServerHello`, emit a distinct error event (review
+   M1/Sol-8) — then `control.evictLegacyAdmitted()` (eager; ► non-optional in the ceremony path)
+   → proceed to `ServerHello` as `.authenticated`.
+7. Deny / 25 s timeout / window-close / connection-death → ► request invalidated on ALL paths
+   (single-resume continuation, entry removed), silent close, source blocked for the window.
+   ► `.enrollmentResolved(attemptID, outcome)` event so a lingering prompt can't false-succeed
+   (approve-after-deadline is a no-op AND the UI is told; review L1).
 
-## Units
+## Units (v2 deltas marked ►)
 
-**`KeyFingerprint` (PortviewProtocol — shared derivation, host and client must agree):**
-`short(forPublicKey:) -> String` = first 10 bytes of `SHA256(publicKey)` as 5 × 4-hex-char groups
-(80 displayed bits, must-fix 2). Frozen KAT. Distinct from `PairingStore.deviceID` (full hash, id)
-— the fingerprint is a human-compare VIEW derived from the same hash; a KAT pins prefix-of-id.
+**`KeyFingerprint` (PortviewProtocol):** `short(forPublicKey:) -> String` = first 10 bytes of
+`SHA256(publicKey)` as 5 × 4-hex groups (80 bits; ~2^80 targeted second-preimage — confirmed by
+both reviewers). Frozen KAT + prefix-of-`PairingStore.deviceID` KAT (host/client drift killer).
 
-**`DeviceNameSanitizer` (PortviewHostCore):** strip C0/C1 controls, bidi/format controls
-(U+200E/F, U+202A–E, U+2066–69, U+061C), collapse whitespace, truncate (64), fallback “(unnamed
-device)”. Display-only; never identity (must-fix 4).
+**`DeviceNameSanitizer` (PortviewHostCore):** strip C0/C1 + bidi/format controls (U+200E/F,
+U+202A–E, U+2066–69, U+061C), collapse whitespace, truncate 64, fallback "(unnamed device)".
+► Sanitized ONCE at serveSession entry and used EVERYWHERE the name flows: the enrollment event,
+`enroll` (persisted — han.4's revoke UI renders it), and `.deviceConnected` (fixes the
+pre-existing raw-name card; review L4/Sol-9).
 
-**`EnrollmentAuthority` (actor, PortviewHostCore):** the single-request-per-window state machine
-(must-fixes 1, 5).
-- `EnrollmentRequest`: `{attemptID: UUID, publicKey: Data (exact snapshot), fingerprint, claimedName
-  (sanitized), source (SASPairingControl.sourceKey), createdAt}`.
-- `begin(publicKey:claimedName:source:now:) -> EnrollmentRequest?` — nil if a request is already
-  pending, the source is blocked, or the window is closed at authority level.
-- `awaitDecision(_ attemptID:, deadline:) async -> Bool` — continuation the gate parks on.
-- `approve(_ attemptID:) / deny(_ attemptID:)` — approve atomically consumes exactly THAT attempt
-  (stale/unknown UUIDs are no-ops); deny/timeout/`windowClosed()` invalidate + block the source for
-  the window. Prompt deadline 25 s (inside the ~30 s QUIC idle so the parked connection survives).
+**`EnrollmentAuthority` (actor, PortviewHostCore):**
+- `EnrollmentRequest`: `{attemptID: UUID, publicKey: Data (exact snapshot), fingerprint,
+  claimedName (sanitized), source, createdAt, ► expiresAt}`.
+- `begin(...) -> EnrollmentRequest?` — nil if a request is pending, the source is blocked, ► the
+  per-window request cap (5) is exhausted, or the window is closed.
+- `awaitDecision(_ attemptID:) async -> Bool` — parked continuation; ► SINGLE-RESUME, entry
+  removed on every exit (approve / deny / 25 s deadline / `windowClosed()` / task cancellation /
+  ► connection-death via the caller's `withTaskCancellationHandler`). Timeout blocks the source
+  (must-fix 5) — DOCUMENTED as load-bearing against re-prompt grinding; the ≤25 s slot wedge on a
+  mid-prompt client death is the accepted cost.
+- `approve/deny(_ attemptID:)` — approve atomically consumes exactly THAT attempt.
+- ► Window ownership is SINGLE: `sas.isOpen()` (the `SASAttemptLimiter`) IS the window; the gate
+  consults it at begin AND at approve; `HostAppModel.endPairing`'s existing single fan-out adds
+  `authority.windowClosed()` (review M2/Sol-4).
+- ► Source key: reuse `SASPairingControl.sourceKey` with IPv4 link-local (169.254/16) bucketed as
+  ONE source (rotation bound, review L3); the /64 + attended-window bounds are otherwise accepted.
 
-**Gate change (`HostRunner`):** `serveAuthGate` stays pure crypto+store; its `.rejected(.unknownKey)`
-becomes outcome `.unknownKey(publicKey: [UInt8])`. `serveSession` (which already holds `sas`,
-`pairings`, `control`, `emit`, and the ClientHello) orchestrates the ceremony on that outcome:
-window open + authority present → `begin` + emit `.enrollmentRequest(...)` (new `HostRunnerEvent`
-case; carries NO key material — approval is by attemptID; the authority holds the snapshot) →
-`awaitDecision` → approved: `pairings.enroll(snapshot)` + `control?.evictLegacyAdmitted()` (the
-eager hook) + continue as authenticated; else close silently. No authority (CLI) or closed window →
-close exactly as today. Rejection stays oracle-free: the prompt path is only reachable AFTER a
-valid signature (han.1 note 4 satisfied by construction).
+**Gate change (`HostRunner`):** `serveAuthGate` stays pure; `.rejected(.unknownKey)` becomes
+outcome `.unknownKey(publicKey: [UInt8])`. ► HYGIENE: the new case is never stringified into
+logs/events — reason codes only, fingerprint at most; a test asserts no key bytes appear (review
+M3/Sol-9). `serveSession` orchestrates the ceremony on that outcome; ► works identically under
+`.required` (second-device enrollment post-promotion — pinned by test) and with the window closed
+or no authority (CLI) behaves exactly as today (instant close).
+► Legacy barrier: in bootstrap mode with `sas.isOpen()`, a silent-peer timeout → close (not
+legacyAdmitted).
 
-**Must-fix 6 (HUD code pin):** `SASPairingControl` gains `claimCodeDisplay(source:) -> Bool` /
-`releaseCodeDisplay(source:)`; `serveSASPreamble` claims before `emit(.sasCode)` (skips the emit if
-another preamble holds the slot — its attempt still counts against caps) and releases in its defer.
+**Must-fix 6 (HUD code pin):** ► claim moves BEFORE the `SASHostReveal` send (a losing preamble
+closes pre-reveal, so the losing phone never derives/awaits an undisplayed code — review
+L2/Sol-6); release in the preamble's defer; ► `openWindow()` force-releases any stale claim
+(window-epoch semantics).
 
-**Client responder (PortviewClientCore + iOS app):**
-- Pure `ChallengeResponse.make(identity:challenge:pinnedCertHashHex:) -> ClientAuth?` (nil on
-  malformed pin hex; signs `nonce ‖ pin` via `ClientIdentity.sign`).
-- `SessionViewModel`: loads `ClientIdentity` ONCE (launch/first-connect; a thrown keychain read
-  aborts the connect attempt — NEVER mints, per han.2; retried next connect), handles
-  `.serverChallenge` in the session loop by sending the response. Retry-safe: a gate-timeout close
-  falls into the existing reconnect flow.
-- Pairing sheet displays `KeyFingerprint.short(forPublicKey: identity.publicKey)` (device-gated).
+**Client (PortviewClientCore + iOS app):**
+- Pure `ChallengeResponse.make(identity:challenge:pinnedCertHash:) -> ClientAuth?` — ► takes the
+  immutable pin BYTES the connection actually dialed with (not re-read mutable hex state; Sol-7).
+- `SessionViewModel`: identity loaded once (thrown keychain read aborts the attempt, never mints);
+  handles `.serverChallenge` in the session loop; ► owns the persistent `enrollmentCompare`
+  published state (the card in step 2) and the ► bounded pairing-retry loop (step 3).
+- ► The compare card + retry are SessionViewModel-scoped, NOT tied to `SASClientCoordinator.state`
+  (which tears down pre-re-dial).
 
-**Host UI (macOS app, device-gated):** `HostAppModel` handles `.enrollmentRequest` → published
-prompt state → Allow (LAContext, then `authority.approve`) / Deny buttons in the menu-bar UI. The
-authority instance is constructed by the app beside its `PairingStore` and passed through
-`run`/`events` (new optional param; CLI passes nil → no ceremony, documented).
+**Host UI (macOS app, device-gated):** `.enrollmentRequest` → prompt with fingerprint +
+"a device calling itself X" + full-compare copy; Allow gated by LAContext; Deny plain;
+► `.enrollmentResolved` clears the prompt (expiry/deny/win); ► `beginPairing` runs the legacy
+barrier before exposing pairing UI. Authority constructed beside the app's `PairingStore`, passed
+through `run`/`events`.
+► CLI (nil authority): DOCUMENTED semantics — existing-enrolled-devices only; enroll via the app;
+a long-running CLI does not see new enrollments until restart (warm cache; per-process actors over
+one keychain item — han.4's cross-process authority owns the real fix; review M4/Sol-10).
+
+## Known residuals (explicit, not silent)
+
+- han.3 ACTIVATES the han.4-deferred in-flight admission TOCTOU (promotion becomes reachable):
+  a connection between gate-admit and register can survive the eager sweep until the next lazy
+  sweep. Bounded by the window-open legacy barrier; han.4's generation-bound admission +
+  register-then-recheck owns the close-out.
+- `evictLegacyAdmitted`'s close can still drain already-buffered input (transport drains on
+  close) — han.4's capability-invalidation-before-close (spec revocation §) owns it.
+- The park-vs-close timing difference is a window-open oracle (reachable only after a valid
+  signature); accepted — window state is not a secret.
 
 ## Testing
 
-Pure/TDD: `KeyFingerprintTests` (frozen KAT, format), `DeviceNameSanitizerTests` (bidi/control/
-truncate), `EnrollmentAuthorityTests` (single-pending, exact-attempt consume, deny/timeout blocks
-source, window-close invalidates), `SASPairingControl` code-display pin, `ChallengeResponseTests`,
-gate/serveSession ceremony tests (seam-driven + loopback: approve→enrolled+evicted+authenticated;
-deny→closed+not-enrolled; closed window/no authority→instant close; event carries sanitized name).
-Adversarial review (Sol + Kimi K3) pre-commit. Device-verify `[?]`: the two UI surfaces + the
-end-to-end pair→prompt→compare→allow→stream ceremony on real hardware.
+Pure/TDD: `KeyFingerprintTests` (frozen KAT + prefix-of-deviceID), `DeviceNameSanitizerTests`,
+`EnrollmentAuthorityTests` (single-pending, exact-consume, expiry, cap, source-block incl.
+link-local bucketing, windowClosed invalidation, single-resume on every exit),
+`SASPairingControl` claim-before-reveal + window-epoch release, `ChallengeResponseTests`,
+serveSession ceremony tests (approve→enrolled+evicted+authenticated; enroll-THROW→closed+
+not-enrolled+no-scaffolding; deny/timeout→silent close+source-block+resolved-event; window
+closed mid-prompt→invalidated; `.required`-mode ceremony works; legacy-barrier: silent peer +
+open window→closed; no key bytes in any log/event). Adversarial review (Sol + K3) pre-commit.
+Device-verify `[?]`: both UI surfaces + end-to-end pair→compare→allow→stream + deny + second-
+device-post-promotion on hardware.
 
 ## Out of scope (owned elsewhere)
 
-In-flight admission TOCTOU + cross-process authority + revoke UI (han.4); rotation ceremony
-(han.4); mTLS upgrade (future bead).
+In-flight admission TOCTOU close-out, cross-process authority, revoke UI, rotation ceremony
+(han.4); mTLS upgrade (future).
