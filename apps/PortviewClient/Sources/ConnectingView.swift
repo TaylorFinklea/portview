@@ -6,6 +6,10 @@ import SwiftUI
 /// pin → QUIC → HEVC negotiation); the last step stays in-progress until streaming begins.
 struct ConnectingView: View {
     let hostName: String
+    /// Non-nil while this is a pairing-driven connect (QR path; the SAS path shows this on its own
+    /// sheet instead) that may raise the host's enrollment prompt — this device's own key
+    /// fingerprint, for the human to compare against the Mac (design v2 step 2).
+    var compareFingerprint: String? = nil
     let onCancel: () -> Void
 
     var body: some View {
@@ -28,6 +32,23 @@ struct ConnectingView: View {
                 .padding(.top, 26)
 
                 Spacer()
+
+                if let compareFingerprint {
+                    VStack(spacing: 6) {
+                        Text("Approve on the Mac — compare ALL FIVE groups:")
+                            .font(.mono(11))
+                            .foregroundStyle(Glass.text2)
+                            .multilineTextAlignment(.center)
+                        Text(compareFingerprint)
+                            .font(.mono(16, .semibold))
+                            .foregroundStyle(Glass.text1Bright)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(14)
+                    .glassPanel(accent: true)
+                    .padding(.horizontal, 34)
+                    .padding(.bottom, 14)
+                }
 
                 VStack(alignment: .leading, spacing: 11) {
                     checklistRow("pin verified", done: true)

@@ -23,6 +23,18 @@ final class SessionViewModel: ObservableObject {
     @Published var status: Status = .idle
     /// Non-nil while pairing a discovered Mac via the 6-digit SAS code (drives the entry sheet).
     @Published var sasPairing: SASPairingState?
+    /// Non-nil while a PAIRING-driven connect (SAS-match re-dial or QR) is in flight, up to
+    /// streaming / an explicit denial / retry exhaustion / user cancel: this device's own key
+    /// fingerprint, for the persistent "Approve on the Mac — compare ALL FIVE groups" card (design
+    /// v2 step 2). Set BEFORE the pinned dial begins — the reference must be visible before the
+    /// Mac's prompt can even exist — and driven independently of `sasPairing` (which tears down
+    /// the moment the SAS code matches, before the re-dial that actually needs the card).
+    @Published var enrollmentCompare: String?
+    /// Which surface presents `enrollmentCompare`: the SAS-match re-dial keeps the SAS sheet open
+    /// (its own `sasPairing` state already tore down); the QR path has no sheet, so the plain
+    /// connecting view shows the line itself. Non-nil exactly when `enrollmentCompare` is.
+    enum PairingSource { case sas, qr }
+    @Published private(set) var enrollmentCompareSource: PairingSource?
     /// Latest cursor position reported by the host, normalized to the display (0…1).
     @Published var cursorNormalized = CGPoint(x: 0.5, y: 0.5)
     /// Displays the host offered (from ServerHello) and which one is currently streaming.
@@ -104,7 +116,8 @@ final class SessionViewModel: ObservableObject {
     }
 
     /// Connect from a scanned QR pairing payload, preferring a live Bonjour endpoint for the
-    /// advertised host name while retaining the QR's address as an off-LAN fallback.
+    /// advertised host name while retaining the QR's address as an off-LAN fallback. PAIRING-driven
+    /// (the host may prompt to enroll this device), so it raises the persistent compare card.
     func connect(payload: PairingPayload, discovered: [DiscoveredHost]) {
         let endpoints = ReconnectPlanning.qrPairingCandidates(payload: payload, discovered: discovered)
         guard !endpoints.isEmpty else {
@@ -112,7 +125,7 @@ final class SessionViewModel: ObservableObject {
             return
         }
         start(endpoints: endpoints,
-              pinHex: payload.pinHex, reconnectName: payload.name ?? payload.host)
+              pinHex: payload.pinHex, reconnectName: payload.name ?? payload.host, pairingSource: .qr)
     }
 
     /// Reconnect a saved Mac, preferring its live Bonjour endpoint (survives a LAN IP change) and
@@ -132,8 +145,11 @@ final class SessionViewModel: ObservableObject {
 
     init() {
         pairingCoordinator.onStateChange = { [weak self] state in self?.sasPairing = state }
+        // The match re-dial is PAIRING-driven: `sasPairing` tears down (→ nil) right before this
+        // fires (SASClientCoordinator.submitCode), so the compare card is what keeps the human
+        // reference on screen across the re-dial — never read `sasPairing` for that purpose here.
         pairingCoordinator.startPinnedSession = { [weak self] endpoint, pinHex, name in
-            self?.start(endpoints: [endpoint], pinHex: pinHex, reconnectName: name)
+            self?.start(endpoints: [endpoint], pinHex: pinHex, reconnectName: name, pairingSource: .sas)
         }
     }
 
@@ -153,7 +169,21 @@ final class SessionViewModel: ObservableObject {
         pairingCoordinator.cancel()
     }
 
-    private func start(endpoints: [NWEndpoint], pinHex: String, reconnectName: String?) {
+    /// Device signing identity (han.2), loaded once per app session and memoized — including a
+    /// FAILURE — so a transient keychain-unavailable moment never mints a fresh key mid-session
+    /// (`ClientIdentity.loadOrCreate`'s own contract: minting over a throwing read could orphan a
+    /// key the host already enrolled). Computed on first touch, from whichever runs first: a
+    /// pairing-driven `start` (to show the compare card) or the `.serverChallenge` responder.
+    private lazy var identityResult: Result<ClientIdentity, Error> = Result {
+        try ClientIdentity.loadOrCreate(store: KeychainClientIdentityStore())
+    }
+
+    /// `pairingSource`: non-nil when this connect may end in the host's enrollment prompt, so raise
+    /// the persistent compare card (design v2 step 2) BEFORE the dial — the human reference must be
+    /// on screen before the Mac's prompt can even exist. A failed identity load here aborts the
+    /// attempt outright (never dials) rather than surfacing "device unavailable" only once the
+    /// challenge arrives.
+    private func start(endpoints: [NWEndpoint], pinHex: String, reconnectName: String?, pairingSource: PairingSource? = nil) {
         guard let pin = Data(hexString: pinHex), pin.count == 32 else {
             status = .failed("Pin must be 64 hex characters.")
             return
@@ -161,6 +191,19 @@ final class SessionViewModel: ObservableObject {
         guard !endpoints.isEmpty else {
             status = .failed("No address to connect to.")
             return
+        }
+        if let pairingSource {
+            switch identityResult {
+            case .success(let identity):
+                enrollmentCompare = KeyFingerprint.short(forPublicKey: identity.publicKey)
+                enrollmentCompareSource = pairingSource
+            case .failure:
+                status = .failed("Device identity unavailable — unlock and retry.")
+                return
+            }
+        } else {
+            enrollmentCompare = nil
+            enrollmentCompareSource = nil
         }
         status = .connecting
         hostName = reconnectName
@@ -183,6 +226,9 @@ final class SessionViewModel: ObservableObject {
         connectedHostToSave = nil
         sessionName = nil
         sessionPinHex = nil
+        // User cancel clears the compare card (design v2 step 2).
+        enrollmentCompare = nil
+        enrollmentCompareSource = nil
         incomingFiles.removeAll()
         displays = []
         activeDisplayID = 0
@@ -414,13 +460,23 @@ final class SessionViewModel: ObservableObject {
             let (connection, endpoint) = try await connectFirst(endpoints, pin: pin)
             connectedEndpoint = endpoint
             bindConnection(connection)
-            let end = try await streamSession(connection)
+            let end = try await streamSession(connection, pin: pin)
             unbindConnection()
             stopSessionMedia()
             switch end {
             case .hostError, .evicted:
-                return // status already set (.failed / .idle); a host-initiated end is terminal
+                // Terminal; status already set (.failed / .idle). Never leave a stale card on screen.
+                enrollmentCompare = nil
+                enrollmentCompareSource = nil
+                return
             case .notStreamed:
+                // A pairing-driven connect closing before `ServerHello` is expected while the host
+                // is parked on its human Allow/Deny prompt (design v2 step 3) — retry instead of
+                // giving up immediately.
+                if enrollmentCompare != nil {
+                    await pairingRetryLoop(endpoints: endpoints, pin: pin)
+                    return
+                }
                 if !hasFailed { status = .idle }
                 return
             case .streamed:
@@ -430,6 +486,9 @@ final class SessionViewModel: ObservableObject {
             unbindConnection()
             stopSessionMedia()
             if Task.isCancelled { return }
+            // This attempt is dead; never leave a stale card on screen.
+            enrollmentCompare = nil
+            enrollmentCompareSource = nil
             status = .failed("\(error)")
             return
         }
@@ -439,6 +498,47 @@ final class SessionViewModel: ObservableObject {
             return
         }
         await reconnectLoop(name: reconnectName, fallback: connectedEndpoint, pin: pin)
+    }
+
+    private static let pairingRetryMaxAttempts = 6
+    private static let pairingRetryInitialDelay: TimeInterval = 2
+    private static let pairingRetryMaxDelay: TimeInterval = 8
+
+    /// Bounded retry for a pairing-driven connect that closed before `ServerHello` — most likely the
+    /// host is parked on the human Allow/Deny prompt (design v2 step 3). Retries the SAME
+    /// endpoints/pin the original dial used — not a Bonjour re-resolve like `reconnectLoop`, since a
+    /// pairing retry targets the address the human is looking at right now, not a possibly-moved
+    /// saved host — with 2s→4s→8s (capped) backoff, stopping the moment the card clears (streaming/
+    /// cancel already handled elsewhere) or a connection reports a terminal outcome. The wire gives
+    /// no separate "denied" signal: the host's ceremony closes silently on both an explicit Deny and
+    /// its own 25s timeout (HostRunner.swift), so exhausting the retry budget is the one terminal
+    /// failure state here — a genuine Deny also blocks this source for the rest of the pairing
+    /// window (EnrollmentAuthority), so further attempts would keep failing anyway.
+    private func pairingRetryLoop(endpoints: [NWEndpoint], pin: Data) async {
+        // Every exit path clears the card exactly once.
+        defer { enrollmentCompare = nil; enrollmentCompareSource = nil }
+        var delay = Self.pairingRetryInitialDelay
+        for _ in 1...Self.pairingRetryMaxAttempts {
+            guard !Task.isCancelled, enrollmentCompare != nil else { return }
+            try? await Task.sleep(for: .seconds(delay))
+            delay = min(delay * 2, Self.pairingRetryMaxDelay)
+            guard !Task.isCancelled, enrollmentCompare != nil else { return }
+            guard let (connection, _) = try? await connectFirst(endpoints, pin: pin) else { continue }
+            bindConnection(connection)
+            let end = (try? await streamSession(connection, pin: pin)) ?? .notStreamed
+            unbindConnection()
+            stopSessionMedia()
+            if Task.isCancelled { return }
+            switch end {
+            case .hostError, .evicted:
+                return // terminal; status already set by streamSession
+            case .streamed:
+                return // `.serverHello` already cleared the card + set .streaming
+            case .notStreamed:
+                continue // still pre-`ServerHello` (prompt pending / transient drop) — keep trying
+            }
+        }
+        if !hasFailed { status = .failed("Not approved on the Mac — try pairing again.") }
     }
 
     /// Try each candidate endpoint in order; return the first whose pinned QUIC handshake succeeds.
@@ -489,7 +589,10 @@ final class SessionViewModel: ObservableObject {
 
     /// Run the handshake then the inbound loop for one connection. Returns when the connection
     /// closes (`.streamed`/`.notStreamed`) or the host reports a terminal error (`.hostError`).
-    private func streamSession(_ connection: PortviewClientSession) async throws -> SessionEnd {
+    /// `pin`: the EXACT bytes this connection's pinned dial used (passed down from `connectFirst`'s
+    /// caller, never re-read from `sessionPinHex`) — the mutual-auth responder binds its signature
+    /// to these bytes (relay defense, spec §3).
+    private func streamSession(_ connection: PortviewClientSession, pin: Data) async throws -> SessionEnd {
         // Fresh inbound-transfer slate per attempt (incl. each reconnect): release any orphaned
         // partial transfer from a dropped session and clear its stale "Receiving…" status.
         incomingFiles.removeAll()
@@ -512,7 +615,26 @@ final class SessionViewModel: ObservableObject {
 
         for await message in connection.inbound {
             switch message {
+            case .serverChallenge(let challenge):
+                // Host's mutual-auth challenge (spec §3), sent right after `ClientHello`, before any
+                // session scaffolding. A load failure or a `nil` response ABORTS this connect
+                // attempt (thrown, not swallowed) — never proceed unauthenticated, never mint a
+                // fallback identity mid-flow.
+                guard case .success(let identity) = identityResult else {
+                    throw PortviewClientError.identityUnavailable
+                }
+                guard let response = ChallengeResponse.make(
+                    identity: identity, challenge: challenge, pinnedCertSHA256: pin
+                ) else {
+                    throw PortviewClientError.challengeResponseFailed
+                }
+                try await connection.send(.clientAuth(response))
             case .serverHello(let hello):
+                // A pairing-driven connect just proved it: the compare card's job (getting the human
+                // to approve on the Mac) is done, whether the host actually challenged this device or
+                // it was already enrolled.
+                enrollmentCompare = nil
+                enrollmentCompareSource = nil
                 guard let display = hello.displays.first else { continue }
                 let prefs = ClientSettings.load()
                 let start = try client.handle(
@@ -673,7 +795,7 @@ final class SessionViewModel: ObservableObject {
 
             if let (connection, _) = try? await connectFirst(candidates, pin: pin) {
                 bindConnection(connection)
-                let end = (try? await streamSession(connection)) ?? .notStreamed
+                let end = (try? await streamSession(connection, pin: pin)) ?? .notStreamed
                 unbindConnection()
                 stopSessionMedia()
                 if Task.isCancelled { return }
@@ -725,6 +847,20 @@ final class SessionViewModel: ObservableObject {
     }
 }
 
-private enum PortviewClientError: Error {
+private enum PortviewClientError: Error, CustomStringConvertible {
     case noReachableEndpoint
+    /// The device identity load threw (e.g. keychain unavailable) — this connect attempt aborts
+    /// rather than mint a fallback key (`ClientIdentity.loadOrCreate`'s contract).
+    case identityUnavailable
+    /// `ChallengeResponse.make` returned `nil` (defense-in-depth; `start` already validates the pin
+    /// length, so in practice this means the signing operation itself failed).
+    case challengeResponseFailed
+
+    var description: String {
+        switch self {
+        case .noReachableEndpoint: return "No reachable endpoint."
+        case .identityUnavailable: return "Device identity unavailable — unlock and retry."
+        case .challengeResponseFailed: return "Could not verify this device with the Mac."
+        }
+    }
 }

@@ -118,7 +118,9 @@ struct ContentView: View {
                 armed: $armed,
                 showFileImporter: $showFileImporter)
         case .connecting:
-            ConnectingView(hostName: session.hostName ?? "Mac", onCancel: { session.disconnect() })
+            ConnectingView(hostName: session.hostName ?? "Mac",
+                           compareFingerprint: session.enrollmentCompare,
+                           onCancel: { session.disconnect() })
         case .idle, .failed:
             DeckHomeView(
                 session: session,
@@ -139,8 +141,26 @@ struct ContentView: View {
         }
     }
 
+    /// Keeps the SAS sheet up across the pinned re-dial: `sasPairing` tears down (→ nil) the instant
+    /// the code matches (`SASClientCoordinator.submitCode`), but the persistent compare card still
+    /// needs the sheet's surface until the ceremony resolves. Gated on `enrollmentCompareSource ==
+    /// .sas` (not just `enrollmentCompare != nil`) so a QR-driven card — which presents on
+    /// `ConnectingView` instead — never pops this sheet open.
     private var sasPairingPresented: Binding<Bool> {
-        Binding(get: { session.sasPairing != nil }, set: { if !$0 { session.cancelSASPairing() } })
+        Binding(
+            get: { session.sasPairing != nil || session.enrollmentCompareSource == .sas },
+            set: { isPresented in
+                guard !isPresented else { return }
+                // Post-match, `cancelSASPairing()` has nothing left to tear down (the coordinator
+                // already handed off) — a swipe-dismiss here must stop the pinned re-dial/retry and
+                // clear the card itself, or the binding's `get` immediately flips back to true and
+                // SwiftUI snaps the sheet back open.
+                if session.enrollmentCompareSource == .sas {
+                    session.disconnect()
+                } else {
+                    session.cancelSASPairing()
+                }
+            })
     }
 
     private var manualConnectSheet: some View {
