@@ -28,6 +28,8 @@ struct PortviewHostApp {
                 break
             case .sasCode, .sasConfirmed:
                 break  // never print/log the SAS code (secret hygiene); the CLI has no pairing-window UI
+            case .enrollmentRequest, .enrollmentResolved:
+                break  // the CLI wires no EnrollmentAuthority yet (han.3 ceremony UI is Task 8/9)
             }
         }
     }

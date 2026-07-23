@@ -51,6 +51,12 @@ public enum HostRunnerEvent: Equatable, Sendable {
     /// confirmed" signal only — it must NOT close the (single, shared) pairing window; the window
     /// closes via the pinned re-dial's `.deviceConnected`, the app timeout, the cap, or stop.
     case sasConfirmed
+    /// An unknown-but-validly-signed key asked to enroll while the pairing window was open (han.3):
+    /// surfaces ONLY the human-compare fingerprint, the claimed (sanitized) device name, the attempt
+    /// id, and its deadline — NEVER the raw public key (key-material hygiene).
+    case enrollmentRequest(attemptID: UUID, fingerprint: String, claimedName: String, expiresAt: Date)
+    /// The enrollment ceremony for `attemptID` resolved — approved (enrolled) or not.
+    case enrollmentResolved(attemptID: UUID, approved: Bool)
 }
 
 public struct HostRunner: Sendable {
@@ -74,11 +80,12 @@ public struct HostRunner: Sendable {
     public func events(identity: HostPermissionIdentity, control: HostControl? = nil,
                        sasControl: SASPairingControl? = nil,
                        authPolicy: MutualAuthPolicy = .required,
-                       pairings: PairingStore) -> AsyncStream<HostRunnerEvent> {
+                       pairings: PairingStore,
+                       enrollment: EnrollmentAuthority? = nil) -> AsyncStream<HostRunnerEvent> {
         AsyncStream { continuation in
             let task = Task {
                 await run(identity: identity, control: control, sasControl: sasControl,
-                          authPolicy: authPolicy, pairings: pairings) { event in
+                          authPolicy: authPolicy, pairings: pairings, enrollment: enrollment) { event in
                     continuation.yield(event)
                 }
                 continuation.finish()
@@ -93,6 +100,7 @@ public struct HostRunner: Sendable {
         sasControl: SASPairingControl? = nil,
         authPolicy: MutualAuthPolicy = .required,
         pairings: PairingStore,
+        enrollment: EnrollmentAuthority? = nil,
         onEvent: @escaping @Sendable (HostRunnerEvent) -> Void
     ) async {
         guard CGRequestScreenCaptureAccess() else {
@@ -186,7 +194,8 @@ public struct HostRunner: Sendable {
                         await Self.serveConnections(listener.connections) { connection in
                             await Self.serve(connection, registry: registry, hostCertSHA256: hostCertBytes,
                                              authPolicy: authPolicy, pairings: pairings,
-                                             emit: onEvent, control: control, sas: sasControl)
+                                             emit: onEvent, control: control, sas: sasControl,
+                                             enrollment: enrollment)
                         }
                     }
                     // serveConnections returns only on cancellation; tear down the refresh loop with it.
@@ -482,12 +491,13 @@ public struct HostRunner: Sendable {
         pairings: PairingStore,
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in },
         control: HostControl? = nil,
-        sas: SASPairingControl? = nil
+        sas: SASPairingControl? = nil,
+        enrollment: EnrollmentAuthority? = nil
     ) async {
         await withTaskCancellationHandler {
             await serveSession(connection, registry: registry, hostCertSHA256: hostCertSHA256,
                                authPolicy: authPolicy, pairings: pairings,
-                               emit: emit, control: control, sas: sas)
+                               emit: emit, control: control, sas: sas, enrollment: enrollment)
         } onCancel: {
             connection.close()
         }
@@ -506,6 +516,7 @@ public struct HostRunner: Sendable {
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in },
         control: HostControl? = nil,
         sas: SASPairingControl? = nil,
+        enrollment: EnrollmentAuthority? = nil,
         onAuthGateOutcome: (@Sendable (AuthGateOutcome) -> Void)? = nil,
         didBuildScaffolding: (@Sendable () -> Void)? = nil
     ) async {
@@ -529,7 +540,11 @@ public struct HostRunner: Sendable {
         // The first frame must be exactly SASClientCommit or ClientHello (spec §4-RESOLVED, §3
         // corrections); any other opener is a protocol violation and closes before a challenge is
         // even issued.
-        guard case .clientHello = firstMessage else { connection.close(); return }
+        guard case .clientHello(let hello) = firstMessage else { connection.close(); return }
+        // Sanitized ONCE here (must-fix 4) and reused everywhere the name flows from this point on:
+        // the enrollment-ceremony event, the persisted `enroll`, and `.deviceConnected` below — never
+        // re-derived from the raw wire value again.
+        let sanitizedDeviceName = DeviceNameSanitizer.sanitize(hello.deviceName)
 
         // Mutual-auth gate (spec §3): challenge/verify BEFORE any scaffolding — and before the
         // display guard below, because authorization is a connection-level decision that must not
@@ -552,12 +567,18 @@ public struct HostRunner: Sendable {
             connection.close()
             return
         case .unknownKey(let publicKey):
-            // Task 6 wires the enrollment-ceremony authority here; until then, close exactly as
-            // the old `.rejected(.unknownKey)` path did. Log ONLY the fingerprint — never the
-            // outcome or the raw key bytes (key-material hygiene).
-            logger.notice("auth gate: unknown key (fingerprint \(KeyFingerprint.short(forPublicKey: Data(publicKey)), privacy: .public))")
-            connection.close()
-            return
+            // han.3 enrollment ceremony (spec §4-RESOLVED must-fix 1): a validly-signed but
+            // unenrolled key gets ONE chance to enroll, gated on an open pairing window. Log ONLY
+            // the fingerprint in either outcome — never the raw key bytes (key-material hygiene).
+            let enrolled = await runEnrollmentCeremony(
+                publicKey: publicKey, deviceName: sanitizedDeviceName, connection: connection,
+                enrollment: enrollment, sas: sas, control: control, pairings: pairings, emit: emit)
+            guard enrolled else {
+                logger.notice("auth gate: unknown key not enrolled (fingerprint \(KeyFingerprint.short(forPublicKey: Data(publicKey)), privacy: .public))")
+                connection.close()
+                return
+            }
+            logger.info("auth gate: unknown key enrolled (fingerprint \(KeyFingerprint.short(forPublicKey: Data(publicKey)), privacy: .public))")
         case .legacyAdmitted:
             emit(.message("⚠️ Legacy client connected without device authentication (bootstrap policy — enroll this device to tighten)."))
         case .authenticated(let deviceID):
@@ -682,7 +703,7 @@ public struct HostRunner: Sendable {
                         let sessionID = UUID().uuidString
                         connectedDeviceID = sessionID
                         control?.register(sessionID, connection, outbound: outbound, authClass: sessionAuthClass)
-                        emit(.deviceConnected(id: sessionID, name: hello.deviceName))
+                        emit(.deviceConnected(id: sessionID, name: sanitizedDeviceName))
                         // Seed this client with the current lock state (the live broadcast only reaches
                         // already-connected clients), so one that connects while locked pauses at once.
                         if LockMonitor.currentlyLocked() {
@@ -816,12 +837,68 @@ public struct HostRunner: Sendable {
         }
         guard let record = await pairings.authorizedClient(forPublicKey: Data(auth.publicKey)) else {
             // han.3 hook: unknown key + VALID signature becomes the enrollment-ceremony snapshot
-            // (spec §4-RESOLVED must-fix 1). Task 6 wires the ceremony authority; until then the
-            // caller closes on this outcome exactly as it did on the old `.rejected(.unknownKey)`.
+            // (spec §4-RESOLVED must-fix 1). The caller (`serveSession`) hands this to
+            // `runEnrollmentCeremony`, which is the ONLY path by which a new device enrolls.
             return .unknownKey(publicKey: auth.publicKey)
         }
         try? await pairings.touch(id: record.id)  // lastSeen is best-effort
         return .authenticated(deviceID: record.id)
+    }
+
+    /// Runs the han.3 enrollment ceremony for an `.unknownKey` gate outcome (spec §4-RESOLVED
+    /// must-fix 1): the gate has already verified the signature, so this is the sole path by which
+    /// a new device becomes enrolled. Returns `true` iff the connection should proceed into the
+    /// streaming loop as `.authenticated`; `false` means the caller must close with no further
+    /// action — every applicable `HostRunnerEvent` has already been emitted before returning.
+    ///
+    /// No wire messages are sent here: the client just waits on the still-open connection for a
+    /// ServerHello or a close. The pending/resolved state is host-local UI only, surfaced via
+    /// `emit` (never a wire message, and never the raw key — only its fingerprint).
+    ///
+    /// Requires ALL of `enrollment`, an OPEN pairing window (`sas?.isOpen()`), and `control`
+    /// (eviction needs it) to even attempt the ceremony — any missing dependency closes with no
+    /// ceremony, matching the pre-Task-6 `.unknownKey` behavior exactly. Deliberately does NOT wrap
+    /// `awaitDecision` in any extra cancellation machinery: the connection's own serve task is
+    /// already cancelled by `serve`'s `withTaskCancellationHandler` on teardown, and
+    /// `EnrollmentAuthority.awaitDecision`'s own cancellation handler resolves `false` (without
+    /// blocking the source) when that happens — a second cancellation path here would only race it.
+    private static func runEnrollmentCeremony(
+        publicKey: [UInt8],
+        deviceName: String,
+        connection: PortviewConnection,
+        enrollment: EnrollmentAuthority?,
+        sas: SASPairingControl?,
+        control: HostControl?,
+        pairings: PairingStore,
+        emit: @escaping @Sendable (HostRunnerEvent) -> Void
+    ) async -> Bool {
+        guard let enrollment, let control, await sas?.isOpen() == true else { return false }
+        let source = SASPairingControl.sourceKey(for: connection.resolvedRemoteEndpoint)
+        guard let request = await enrollment.begin(
+            publicKey: Data(publicKey), claimedName: deviceName, source: source, now: Date()) else { return false }
+        emit(.enrollmentRequest(attemptID: request.attemptID, fingerprint: request.fingerprint,
+                                claimedName: request.claimedName, expiresAt: request.expiresAt))
+        // Re-check the window AT the decision point, not just at `begin` time (mirrors the gate's
+        // own decision-time TOCTOU fix): an `approve()` that raced past an intervening window close
+        // must not enroll — treated exactly like a deny.
+        guard await enrollment.awaitDecision(request.attemptID), await sas?.isOpen() == true else {
+            emit(.enrollmentResolved(attemptID: request.attemptID, approved: false))
+            return false
+        }
+        do {
+            try await pairings.enroll(publicKey: Data(publicKey), deviceName: deviceName)
+        } catch {
+            // Fail closed: an unpersistable enrollment must never proceed as authenticated — no
+            // ServerHello, no scaffolding.
+            emit(.enrollmentResolved(attemptID: request.attemptID, approved: false))
+            emit(.message("Enrollment failed — keychain unavailable…"))
+            return false
+        }
+        // Eager sweep (vs. the lazy one at the top of `serveSession`): a device just enrolled, so
+        // any session still admitted under the now-superseded bootstrap policy loses access at once.
+        control.evictLegacyAdmitted()
+        emit(.enrollmentResolved(attemptID: request.attemptID, approved: true))
+        return true
     }
 
     /// Serve the SAS pairing PREAMBLE on an unpinned connection: two-sided commit-then-reveal, then
