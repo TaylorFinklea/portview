@@ -29,13 +29,14 @@ import PortviewProtocol
         pairings: PairingStore,
         hostCertSHA256: [UInt8] = [UInt8](repeating: 0x3C, count: 32),
         deadline: Duration = .seconds(2),
+        sasWindowOpen: Bool = false,
         respond: @escaping @Sendable (ServerChallenge) -> [AnyMessage]
     ) async -> HostRunner.AuthGateOutcome {
         let (stream, continuation) = AsyncStream.makeStream(of: AnyMessage.self)
         let inbound = HostRunner.MessageReader(stream)
         return await HostRunner.serveAuthGate(
             inbound: inbound, hostCertSHA256: hostCertSHA256, mode: mode,
-            pairings: pairings, deadline: deadline,
+            sasWindowOpen: sasWindowOpen, pairings: pairings, deadline: deadline,
             sendChallenge: { challenge in
                 for message in respond(challenge) { continuation.yield(message) }
             })
@@ -92,26 +93,41 @@ import PortviewProtocol
         #expect(outcome == .rejected(.invalidSignature))
     }
 
-    @Test func validSignatureFromUnknownKeyIsRejected() async throws {
-        // Possession alone is not authorization: an un-enrolled key fails closed. (han.3 turns
-        // exactly this case — valid sig, unknown key, open pairing window — into the enrollment
-        // prompt; until then it must close.)
+    @Test func validSignatureFromUnknownKeyReturnsKeySnapshot() async throws {
+        // Possession alone is not authorization: an un-enrolled key does not authenticate. Instead
+        // of failing closed outright, the gate now hands back a snapshot of the (validly-signed,
+        // unenrolled) key — the han.3 enrollment-ceremony hook (spec §4-RESOLVED must-fix 1). Task
+        // 6 wires the ceremony; until then the caller closes on this outcome exactly as it did on
+        // the old `.rejected(.unknownKey)`.
         let key = Curve25519.Signing.PrivateKey()
         let pairings = PairingStore(store: MemoryPairingStore())  // nobody enrolled
 
         let outcome = await runGate(mode: .required, pairings: pairings) { challenge in
             [self.auth(for: key, challenge: challenge)]
         }
-        #expect(outcome == .rejected(.unknownKey))
+        #expect(outcome == .unknownKey(publicKey: Array(key.publicKey.rawRepresentation)))
     }
 
     @Test func silentClientIsLegacyAdmittedUnderBootstrap() async throws {
         // A pre-auth client skips the unknown challenge tag and sends nothing — under an ACTIVE
-        // bootstrap policy it is admitted as a warned legacy session after the deadline.
+        // bootstrap policy, with NO pairing window open, it is admitted as a warned legacy session
+        // after the deadline.
         let pairings = PairingStore(store: MemoryPairingStore())
         let outcome = await runGate(
-            mode: .bootstrap, pairings: pairings, deadline: .milliseconds(100)) { _ in [] }
+            mode: .bootstrap, pairings: pairings, deadline: .milliseconds(100),
+            sasWindowOpen: false) { _ in [] }
         #expect(outcome == .legacyAdmitted)
+    }
+
+    @Test func silentPeerUnderBootstrapWithWindowOpenIsClosed() async throws {
+        // Legacy barrier (design v2 H3): no legacy admissions while the ceremony window is open —
+        // a legacy peer could watch the screen and click Deny. A silent peer under `.bootstrap`
+        // WITH the pairing window open must close, not legacy-admit.
+        let pairings = PairingStore(store: MemoryPairingStore())
+        let outcome = await runGate(
+            mode: .bootstrap, pairings: pairings, deadline: .milliseconds(100),
+            sasWindowOpen: true) { _ in [] }
+        #expect(outcome == .rejected(.timeout))
     }
 
     @Test func silentClientIsRejectedUnderRequired() async throws {

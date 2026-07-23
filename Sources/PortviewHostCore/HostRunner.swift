@@ -540,13 +540,22 @@ public struct HostRunner: Sendable {
         // bootstrap era before doing anything else. This lazy sweep fires on the next connection;
         // the EAGER sweep at the instant of enrollment is han.3's enroll-ceremony hook.
         if mode == .required { control?.evictLegacyAdmitted() }
+        let sasWindowOpen = await sas?.isOpen() ?? false
         let outcome = await serveAuthGate(
-            inbound: inbound, hostCertSHA256: hostCertSHA256, mode: mode, pairings: pairings,
+            inbound: inbound, hostCertSHA256: hostCertSHA256, mode: mode, sasWindowOpen: sasWindowOpen,
+            pairings: pairings,
             sendChallenge: { try await connection.send(.serverChallenge($0)) })
         onAuthGateOutcome?(outcome)
         switch outcome {
         case .rejected(let reason):
             logger.notice("auth gate rejected connection: \(String(describing: reason), privacy: .public)")
+            connection.close()
+            return
+        case .unknownKey(let publicKey):
+            // Task 6 wires the enrollment-ceremony authority here; until then, close exactly as
+            // the old `.rejected(.unknownKey)` path did. Log ONLY the fingerprint — never the
+            // outcome or the raw key bytes (key-material hygiene).
+            logger.notice("auth gate: unknown key (fingerprint \(KeyFingerprint.short(forPublicKey: Data(publicKey)), privacy: .public))")
             connection.close()
             return
         case .legacyAdmitted:
@@ -735,12 +744,16 @@ public struct HostRunner: Sendable {
         case authenticated(deviceID: String)
         /// The peer never answered the challenge and the ACTIVE policy is legacy bootstrap.
         case legacyAdmitted
+        /// A validly-signed key that isn't enrolled — the han.3 enrollment-ceremony hook (spec
+        /// §4-RESOLVED must-fix 1). `publicKey` is the exact snapshot the caller may offer for
+        /// enrollment; until the ceremony is wired (Task 6), the caller closes on this outcome.
+        case unknownKey(publicKey: [UInt8])
         /// Fail closed: the caller must close the connection with no scaffolding built.
         case rejected(AuthGateRejection)
     }
 
     enum AuthGateRejection: Equatable, Sendable {
-        case missingHostCertHash, sendFailed, timeout, unexpectedMessage, invalidSignature, unknownKey
+        case missingHostCertHash, sendFailed, timeout, unexpectedMessage, invalidSignature
     }
 
     /// How long the gate waits for `ClientAuth` after issuing its challenge. Long enough for a
@@ -753,16 +766,20 @@ public struct HostRunner: Sendable {
     /// issue a fresh 32-byte CSPRNG nonce, read exactly ONE message under a single `deadline`, and
     /// require BOTH a valid signature over the frozen payload (nonce ‖ host-cert-hash — replay +
     /// relay defenses) AND an enrolled exact-match key. Everything else fails closed, except a
-    /// SILENT peer under `.bootstrap`, admitted as a warned legacy session. Exactly one read (Sol
-    /// han.1 review): the initial ClientHello was already consumed before this gate, so any further
-    /// message that isn't ClientAuth is a violation — granting a stray/duplicate frame a fresh
-    /// deadline would let paced duplicates starve the connection slots. The outbound side is a
-    /// closure seam (the caller binds it to `connection.send`) so the gate's decision logic is
-    /// testable without sockets.
+    /// SILENT peer under `.bootstrap` with NO pairing window open, admitted as a warned legacy
+    /// session. `sasWindowOpen` is the legacy barrier (design v2 H3): while a ceremony window is
+    /// open, a silent peer under `.bootstrap` is rejected (`.timeout`) rather than legacy-admitted —
+    /// a legacy peer could otherwise watch the host screen and click Deny on someone else's
+    /// enrollment prompt. Exactly one read (Sol han.1 review): the initial ClientHello was already
+    /// consumed before this gate, so any further message that isn't ClientAuth is a violation —
+    /// granting a stray/duplicate frame a fresh deadline would let paced duplicates starve the
+    /// connection slots. The outbound side is a closure seam (the caller binds it to
+    /// `connection.send`) so the gate's decision logic is testable without sockets.
     static func serveAuthGate(
         inbound: MessageReader,
         hostCertSHA256: [UInt8],
         mode: MutualAuthPolicy.Mode,
+        sasWindowOpen: Bool,
         pairings: PairingStore,
         deadline: Duration = authGateDeadline,
         sendChallenge: @Sendable (ServerChallenge) async throws -> Void
@@ -778,7 +795,8 @@ public struct HostRunner: Sendable {
         }
         guard let message = await inbound.next(deadline: deadline) else {
             // Silence: a pre-auth legacy client skips the unknown challenge tag and never replies.
-            return mode == .bootstrap ? .legacyAdmitted : .rejected(.timeout)
+            // Legacy barrier: no legacy admissions while the ceremony window is open.
+            return (mode == .bootstrap && !sasWindowOpen) ? .legacyAdmitted : .rejected(.timeout)
         }
         guard case .clientAuth(let auth) = message else {
             // Anything that isn't the expected auth (a stray/duplicate hello or any other frame) is
@@ -791,10 +809,10 @@ public struct HostRunner: Sendable {
             return .rejected(.invalidSignature)
         }
         guard let record = await pairings.authorizedClient(forPublicKey: Data(auth.publicKey)) else {
-            // han.3 hook: unknown key + VALID signature + an open pairing window becomes the
-            // enrollment prompt (spec §4-RESOLVED must-fix 1). Until that ceremony exists: fail
-            // closed.
-            return .rejected(.unknownKey)
+            // han.3 hook: unknown key + VALID signature becomes the enrollment-ceremony snapshot
+            // (spec §4-RESOLVED must-fix 1). Task 6 wires the ceremony authority; until then the
+            // caller closes on this outcome exactly as it did on the old `.rejected(.unknownKey)`.
+            return .unknownKey(publicKey: auth.publicKey)
         }
         try? await pairings.touch(id: record.id)  // lastSeen is best-effort
         return .authenticated(deviceID: record.id)

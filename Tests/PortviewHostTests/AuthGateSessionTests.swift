@@ -27,18 +27,26 @@ import PortviewProtocol
         func recordScaffolding() { scaffoldingBuilds += 1 }
     }
 
+    /// Collects every `HostRunnerEvent` a session emits, for the hygiene assertion that the
+    /// unknown-key path never leaks the raw public key via an emitted event.
+    private actor EventCollector {
+        private(set) var events: [HostRunnerEvent] = []
+        func record(_ event: HostRunnerEvent) { events.append(event) }
+    }
+
     /// Serve every accepted connection with the REAL serveSession (empty display registry — the
     /// gate must resolve before any display is needed), recording gate outcomes + scaffolding.
     private func runHost(_ listener: PortviewListener, hostCert: [UInt8],
                          policy: MutualAuthPolicy, pairings: PairingStore,
-                         probe: Probe) -> Task<Void, Never> {
+                         probe: Probe,
+                         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in }) -> Task<Void, Never> {
         Task {
             await withTaskGroup(of: Void.self) { group in
                 for await conn in listener.connections {
                     group.addTask {
                         await HostRunner.serveSession(
                             conn, registry: DisplayRegistry([]), hostCertSHA256: hostCert,
-                            authPolicy: policy, pairings: pairings,
+                            authPolicy: policy, pairings: pairings, emit: emit,
                             onAuthGateOutcome: { o in Task { await probe.record(o) } },
                             didBuildScaffolding: { Task { await probe.recordScaffolding() } })
                     }
@@ -90,8 +98,49 @@ import PortviewProtocol
         while let message = await it.next() {
             if case .serverHello = message { Issue.record("rejected peer must never see ServerHello") }
         }
-        #expect(await awaitOutcome(probe) == .rejected(.unknownKey))
+        #expect(await awaitOutcome(probe) == .unknownKey(publicKey: Array(key.publicKey.rawRepresentation)))
         #expect(await probe.scaffoldingBuilds == 0)
+    }
+
+    @Test func unknownKeyPathNeverLeaksPubkeyInEmittedEvents() async throws {
+        // Hygiene (design v2 M3): with no authority wired yet (Task 6), the unknown-key path must
+        // close exactly like the old `.rejected(.unknownKey)` — and it must never leak the raw
+        // public key via any emitted `HostRunnerEvent`. Only the `KeyFingerprint` is loggable, and
+        // that goes to `os.Logger`, never `emit`.
+        let identity = try TLSIdentity.makeEphemeralSelfSigned()
+        let hostCert = [UInt8](try identity.certificateSHA256())
+        let listener = try PortviewListener(quicIdentity: identity)
+        let port = try await listener.start()
+        let pairings = PairingStore(store: MemoryPairingStore())  // nobody enrolled
+        let probe = Probe()
+        let events = EventCollector()
+        let host = runHost(listener, hostCert: hostCert, policy: .required, pairings: pairings,
+                           probe: probe, emit: { event in Task { await events.record(event) } })
+        defer { host.cancel(); listener.cancel() }
+
+        let (conn, captured) = try await PortviewConnection.connectCapturingCert(
+            to: .hostPort(host: "127.0.0.1", port: port))
+        defer { conn.close() }
+        try await conn.send(hello())
+
+        var it = conn.inbound.makeAsyncIterator()
+        guard case .serverChallenge(let challenge)? = await it.next() else {
+            Issue.record("expected ServerChallenge after ClientHello"); return
+        }
+        let key = Curve25519.Signing.PrivateKey()
+        let signature = try ClientAuthCrypto.sign(
+            privateKey: key, nonce: challenge.nonce, hostCertSHA256: [UInt8](captured))
+        try await conn.send(.clientAuth(ClientAuth(
+            publicKey: Array(key.publicKey.rawRepresentation), signature: signature)))
+
+        while await it.next() != nil {}  // drain until the host closes
+        #expect(await awaitOutcome(probe) == .unknownKey(publicKey: Array(key.publicKey.rawRepresentation)))
+
+        let pubkeyHex = key.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+        let recordedEvents = await events.events
+        for event in recordedEvents {
+            #expect(!String(describing: event).lowercased().contains(pubkeyHex))
+        }
     }
 
     @Test func enrolledClientAuthenticatesPastTheGate() async throws {
