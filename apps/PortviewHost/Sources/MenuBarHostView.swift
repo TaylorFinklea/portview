@@ -166,9 +166,11 @@ struct MenuBarHostView: View {
             HStack(spacing: 10) {
                 Button("Deny") { model.denyEnrollment(prompt.attemptID) }
                     .buttonStyle(OutlineButtonStyle(tint: Glass.danger))
+                    .disabled(model.enrollmentDecisionInFlight)
                 Spacer()
                 Button("Allow") { model.approveEnrollment(prompt.attemptID) }
                     .buttonStyle(AccentButtonStyle())
+                    .disabled(model.enrollmentDecisionInFlight)
             }
         }
     }
