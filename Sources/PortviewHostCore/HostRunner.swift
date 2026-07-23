@@ -824,6 +824,12 @@ public struct HostRunner: Sendable {
         let source = SASPairingControl.sourceKey(for: connection.resolvedRemoteEndpoint)
         guard await sas.registerAttempt(source: source) else { return }
 
+        // Claim the HUD's single code-display slot BEFORE any reveal is sent (must-fix 6): a
+        // second concurrent preamble that loses the claim returns here, closing its connection,
+        // so its client never derives a code that isn't the one displayed. Released on every exit.
+        guard await sas.claimCodeDisplay(source: source) else { return }
+        defer { Task { await sas.releaseCodeDisplay(source: source) } }
+
         // Host: fresh nonce + commit, sent before any reveal.
         let hostNonce = SASCode.randomNonce()
         let hostCommit = SASCode.commit(nonce: hostNonce, role: .host, certSHA256: hostCertSHA256)

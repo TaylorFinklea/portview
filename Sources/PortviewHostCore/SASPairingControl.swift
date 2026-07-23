@@ -58,19 +58,42 @@ public struct SASAttemptLimiter: Sendable {
 /// callers are already in async contexts, so actor isolation replaces the hand-rolled lock.
 public actor SASPairingControl {
     private var limiter: SASAttemptLimiter
+    /// Source key of whichever preamble currently holds the HUD's single code-display slot. Only
+    /// the owner's derived code may be shown, so a second concurrent preamble (must-fix 6) fails to
+    /// claim and must close its connection before the host ever reveals its nonce to it.
+    private var codeDisplayOwner: String?
 
     public init(windowDuration: TimeInterval = 120, maxAttempts: Int = 5, maxTotalAttempts: Int = 20) {
         limiter = SASAttemptLimiter(windowDuration: windowDuration, maxAttempts: maxAttempts,
                                     maxTotalAttempts: maxTotalAttempts)
     }
 
-    /// User opened the pairing window (e.g. tapped "Pair" on the host).
-    public func openWindow(now: Date = Date()) { limiter.open(now: now) }
+    /// User opened the pairing window (e.g. tapped "Pair" on the host). Force-releases any
+    /// code-display claim left over from a previous window — a connection that never reached its
+    /// release (crash, forced close) must not wedge every future window's display slot shut.
+    public func openWindow(now: Date = Date()) { limiter.open(now: now); codeDisplayOwner = nil }
     public func closeWindow() { limiter.close() }
 
     func isOpen(now: Date = Date()) -> Bool { limiter.isOpen(now: now) }
     func registerAttempt(source: String, now: Date = Date()) -> Bool {
         limiter.registerAttempt(source: source, now: now)
+    }
+
+    /// Claim the HUD's single code-display slot for `source`. Returns true iff the slot was free
+    /// (now held by `source`); false if another source already holds it. Callers must acquire this
+    /// BEFORE sending the host's SAS reveal, so a losing concurrent preamble closes its connection
+    /// before its peer ever derives a code that isn't the one displayed.
+    func claimCodeDisplay(source: String) -> Bool {
+        guard codeDisplayOwner == nil else { return false }
+        codeDisplayOwner = source
+        return true
+    }
+
+    /// Release the code-display slot if `source` is its current owner; a non-owner release is a
+    /// no-op so a stale/late caller can't evict the connection actually holding the slot.
+    func releaseCodeDisplay(source: String) {
+        guard codeDisplayOwner == source else { return }
+        codeDisplayOwner = nil
     }
 
     /// Per-source key for the attempt limiter: the connection's resolved remote HOST (IP), dropping
@@ -84,8 +107,11 @@ public actor SASPairingControl {
     /// (`IPv6Address.rawValue` carries no zone — it lives in `.interface`), so two addresses
     /// differing only in scope bucket together. IPv4-mapped/compatible IPv6 (dual-stack listeners
     /// surface v4 peers as ::ffff:a.b.c.d, whose upper 64 bits are all zero) keys as its embedded
-    /// IPv4 address rather than collapsing every v4 client into one all-zeros /64 bucket.
-    /// Unresolved/non-hostPort endpoints share a single bucket.
+    /// IPv4 address rather than collapsing every v4 client into one all-zeros /64 bucket. Plain
+    /// IPv4 addresses in 169.254.0.0/16 (APIPA — self-assigned when DHCP fails) all bucket into one
+    /// shared key: many distinct devices on a segment can each mint one, so per-address keying
+    /// would hand each an independent budget instead of the single-source-class treatment they
+    /// warrant. Unresolved/non-hostPort endpoints share a single bucket.
     static func sourceKey(for endpoint: NWEndpoint?) -> String {
         guard case .hostPort(let host, _) = endpoint else { return "unresolved" }
         if case .ipv6(let address) = host {
@@ -96,6 +122,14 @@ public actor SASPairingControl {
             }
             return groups.joined(separator: ":") + "::/64"
         }
+        if case .ipv4(let address) = host, isLinkLocalIPv4(address) { return linkLocalIPv4Bucket }
         return String(describing: host)
+    }
+
+    private static let linkLocalIPv4Bucket = "169.254.0.0/16"
+
+    private static func isLinkLocalIPv4(_ address: IPv4Address) -> Bool {
+        let bytes = [UInt8](address.rawValue)
+        return bytes.count == 4 && bytes[0] == 169 && bytes[1] == 254
     }
 }

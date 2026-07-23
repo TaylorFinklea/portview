@@ -256,4 +256,54 @@ import Network
         #expect(aCapped == false)
         #expect(bFirst)
     }
+
+    // MARK: - IPv4 link-local bucketing (169.254.0.0/16 is APIPA — self-assigned when DHCP fails —
+    // so many distinct devices on a segment can each mint one, and per-address keying would hand
+    // each an independent budget; all such addresses share one bucket instead)
+
+    @Test func sourceKeyBucketsIPv4LinkLocalTogether() {
+        let addr1 = NWEndpoint.hostPort(host: "169.254.1.2", port: 50_001)
+        let addr2 = NWEndpoint.hostPort(host: "169.254.9.9", port: 50_002)
+        #expect(SASPairingControl.sourceKey(for: addr1) == SASPairingControl.sourceKey(for: addr2))
+    }
+
+    @Test func sourceKeyLeavesRoutableIPv4Unchanged() {
+        let linkLocal = NWEndpoint.hostPort(host: "169.254.1.2", port: 50_001)
+        let routable = NWEndpoint.hostPort(host: "10.0.0.2", port: 50_002)
+        #expect(SASPairingControl.sourceKey(for: linkLocal) != SASPairingControl.sourceKey(for: routable))
+        #expect(SASPairingControl.sourceKey(for: routable) == "10.0.0.2")
+    }
+}
+
+/// Claims the HUD's single code-display slot so a second concurrent SAS preamble can't overwrite
+/// the code the user is looking at (must-fix 6): only one connection may hold the slot at a time,
+/// non-owner release is a no-op (a losing/late connection can't evict the real owner), and opening
+/// a fresh pairing window force-releases any claim left over from a previous window.
+@Suite struct SASCodeDisplayClaimTests {
+    @Test func firstClaimSucceedsSecondFailsUntilRelease() async {
+        let sas = SASPairingControl()
+        let first = await sas.claimCodeDisplay(source: "10.0.0.2")
+        let second = await sas.claimCodeDisplay(source: "10.0.0.3")
+        #expect(first)
+        #expect(second == false)
+        await sas.releaseCodeDisplay(source: "10.0.0.2")
+        let afterRelease = await sas.claimCodeDisplay(source: "10.0.0.3")
+        #expect(afterRelease)
+    }
+
+    @Test func releaseByNonOwnerIsANoOp() async {
+        let sas = SASPairingControl()
+        _ = await sas.claimCodeDisplay(source: "10.0.0.2")
+        await sas.releaseCodeDisplay(source: "10.0.0.3")   // not the owner — must not release
+        let stillHeld = await sas.claimCodeDisplay(source: "10.0.0.3")
+        #expect(stillHeld == false)
+    }
+
+    @Test func openWindowForceReleasesStaleClaim() async {
+        let sas = SASPairingControl()
+        _ = await sas.claimCodeDisplay(source: "10.0.0.2")
+        await sas.openWindow()
+        let afterOpen = await sas.claimCodeDisplay(source: "10.0.0.3")
+        #expect(afterOpen)
+    }
 }
