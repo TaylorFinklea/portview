@@ -2,6 +2,7 @@
 import Testing
 import Foundation
 import CryptoKit
+import PortviewProtocol
 @testable import PortviewTransport
 
 /// The host-side revocable PairingStore (mutual-auth spec §2). The invariant that matters most:
@@ -219,6 +220,17 @@ import CryptoKit
         try? await pairing.touch(id: c.id)
         let seen = await pairing.list().first?.lastSeen
         #expect(seen == Date(timeIntervalSince1970: 5000))
+    }
+
+    @Test func fingerprintIsPrefixOfDeviceID() {
+        // KeyFingerprint (han.3, shared human-compare view) and PairingStore.deviceID both derive
+        // from SHA256(publicKey); the fingerprint's hex (stripped of grouping spaces, lowercased)
+        // must equal the leading 20 hex chars of the full device id.
+        let key = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation
+        let fingerprint = KeyFingerprint.short(forPublicKey: key)
+            .replacingOccurrences(of: " ", with: "")
+            .lowercased()
+        #expect(fingerprint == String(PairingStore.deviceID(forPublicKey: key).prefix(20)))
     }
 
     @Test func reEnrollUpdatesNameKeepsEnrolledAt() async {
