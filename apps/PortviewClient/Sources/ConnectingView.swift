@@ -6,10 +6,16 @@ import SwiftUI
 /// pin → QUIC → HEVC negotiation); the last step stays in-progress until streaming begins.
 struct ConnectingView: View {
     let hostName: String
-    /// Non-nil while this is a pairing-driven connect (QR path; the SAS path shows this on its own
-    /// sheet instead) that may raise the host's enrollment prompt — this device's own key
-    /// fingerprint, for the human to compare against the Mac (design v2 step 2).
+    /// Non-nil for EVERY connect attempt (review Finding B), not just pairing-driven ones — this
+    /// device's own key fingerprint, for the human to compare if the Mac raises its enrollment
+    /// prompt (design v2 step 2). The SAS path shows this on its own sheet instead, so it never
+    /// surfaces here for `.sas`.
     var compareFingerprint: String? = nil
+    /// Selects the card's copy. `.qr` (a genuinely pairing-driven connect) uses the imperative
+    /// "Approve on the Mac" copy; `.reconnect` (manual entry / saved-host reconnect) uses soft "if
+    /// the Mac asks" copy — it's only actionable if an enrollment prompt actually appears, which an
+    /// already-enrolled device won't trigger.
+    var compareSource: SessionViewModel.PairingSource? = nil
     let onCancel: () -> Void
 
     var body: some View {
@@ -35,7 +41,7 @@ struct ConnectingView: View {
 
                 if let compareFingerprint {
                     VStack(spacing: 6) {
-                        Text("Approve on the Mac — compare ALL FIVE groups:")
+                        Text(compareHeadline)
                             .font(.mono(11))
                             .foregroundStyle(Glass.text2)
                             .multilineTextAlignment(.center)
@@ -73,6 +79,15 @@ struct ConnectingView: View {
             }
             .frame(maxWidth: .infinity)
         }
+    }
+
+    /// `.reconnect` (manual/saved — not itself pairing-driven) gets soft, conditional copy so an
+    /// ordinary already-enrolled reconnect (no prompt) doesn't read as alarming; every other source
+    /// (a genuinely pairing-driven connect) keeps the imperative "Approve on the Mac" copy.
+    private var compareHeadline: String {
+        compareSource == .reconnect
+            ? "If the Mac asks to pair this device, compare ALL FIVE groups:"
+            : "Approve on the Mac — compare ALL FIVE groups:"
     }
 
     private func checklistRow(_ text: String, done: Bool) -> some View {

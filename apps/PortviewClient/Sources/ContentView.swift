@@ -120,6 +120,7 @@ struct ContentView: View {
         case .connecting:
             ConnectingView(hostName: session.hostName ?? "Mac",
                            compareFingerprint: session.enrollmentCompare,
+                           compareSource: session.enrollmentCompareSource,
                            onCancel: { session.disconnect() })
         case .idle, .failed:
             DeckHomeView(
