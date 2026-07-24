@@ -15,6 +15,17 @@ import PortviewProtocol
 @Suite struct EnrollmentAuthorityTests {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
 
+    /// Thread-safe mutable `Date` for driving Finding D's post-deadline-approve race: a test
+    /// advances the authority's injected clock past `expiresAt` directly (rather than waiting out
+    /// a real `Task.sleep`), simulating a late-firing internal timeout racing a late `approve()`.
+    private final class LockingDateBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Date
+        init(_ value: Date) { self.value = value }
+        func get() -> Date { lock.lock(); defer { lock.unlock() }; return value }
+        func set(_ newValue: Date) { lock.lock(); defer { lock.unlock() }; value = newValue }
+    }
+
     /// Runs one attempt to resolution via `deny`, so callers can cheaply free the pending slot
     /// (and, incidentally, block `source`) without caring about the returned value.
     private func denyAndDrain(_ authority: EnrollmentAuthority, _ attemptID: UUID) async {
@@ -122,6 +133,68 @@ import PortviewProtocol
         #expect(sameSource == nil)
     }
 
+    @Test func approvePastDeadlineIsNoOpAndBlocksSource() async throws {
+        // Finding D: `expiresAt` must be authoritative, not merely advisory. A real `deadline` long
+        // enough that the internal `Task.sleep` timeout timer can't fire before this test's
+        // assertions run, paired with an injectable `now` the test advances past `expiresAt`
+        // directly, simulates a late-firing timeout racing a late `approve()` call — the approve
+        // must lose, exactly as if the timeout had won the race.
+        let clockBox = LockingDateBox(now)
+        let authority = EnrollmentAuthority(deadline: .seconds(30), now: { clockBox.get() })
+        let request = try #require(await authority.begin(
+            publicKey: Data([1]), claimedName: "A", source: "s1", now: now))
+
+        clockBox.set(request.expiresAt.addingTimeInterval(1))
+
+        async let result = authority.awaitDecision(request.attemptID)
+        await authority.approve(request.attemptID)
+        #expect(await result == false)
+
+        // Blocked exactly like a timeout/deny (must-fix 5's blocking semantics extend to this path
+        // — a post-deadline approve is treated as a no-op enrollment, not a successful one).
+        let sameSource = await authority.begin(
+            publicKey: Data([2]), claimedName: "B", source: "s1", now: now)
+        #expect(sameSource == nil)
+    }
+
+    @Test func denyBlocksKeyAcrossRotatedSources() async throws {
+        // Finding H: deny must block the presented KEY, not just the network source — an attacker
+        // rotating source (IPv4/IPv6) with the SAME key must not get to re-prompt-grind by simply
+        // dialing from a different address.
+        let authority = EnrollmentAuthority()
+        let key = Data([0xAB, 0xCD])
+        let request = try #require(await authority.begin(
+            publicKey: key, claimedName: "A", source: "s1", now: now))
+        await denyAndDrain(authority, request.attemptID)
+
+        // Same key, DIFFERENT source: still blocked (the key, not the source, is what's denied).
+        let rotatedSource = await authority.begin(
+            publicKey: key, claimedName: "A-retry", source: "s2", now: now)
+        #expect(rotatedSource == nil)
+
+        // A DIFFERENT key from the same rotated source succeeds — only the offending key is blocked.
+        let differentKey = await authority.begin(
+            publicKey: Data([0x11]), claimedName: "B", source: "s2", now: now)
+        #expect(differentKey != nil)
+    }
+
+    @Test func windowOpenedClearsKeyBlocksToo() async throws {
+        let authority = EnrollmentAuthority()
+        let key = Data([0xAB, 0xCD])
+        let request = try #require(await authority.begin(
+            publicKey: key, claimedName: "A", source: "s1", now: now))
+        await denyAndDrain(authority, request.attemptID)
+        #expect(await authority.begin(
+            publicKey: key, claimedName: "A-retry", source: "s2", now: now) == nil)
+
+        await authority.windowOpened()
+
+        // The key block is a fresh-epoch reset just like the source block.
+        let reopened = await authority.begin(
+            publicKey: key, claimedName: "A-again", source: "s2", now: now)
+        #expect(reopened != nil)
+    }
+
     @Test func windowClosedInvalidatesPendingAndBlocks() async throws {
         let authority = EnrollmentAuthority()
         let request = try #require(await authority.begin(
@@ -162,20 +235,20 @@ import PortviewProtocol
         #expect(await authority.begin(
             publicKey: Data([9]), claimedName: "X", source: "blocked-src", now: now) == nil)
 
-        // Consume 3 more of the shared per-window cap (4 used so far).
-        for i in 0..<3 {
+        // Consume 2 more of the shared per-window cap (3 used so far; cap is 4 — Finding GLM1).
+        for i in 0..<2 {
             let r = try #require(await authority.begin(
                 publicKey: Data([UInt8(i + 2)]), claimedName: "C\(i)", source: "cap-src-\(i)", now: now))
             await denyAndDrain(authority, r.attemptID)
         }
 
-        // 5th (final cap slot) is left pending/unresolved on purpose, to prove windowOpened()
+        // 4th (final cap slot) is left pending/unresolved on purpose, to prove windowOpened()
         // clears a stale pending attempt.
         let stale = try #require(await authority.begin(
             publicKey: Data([77]), claimedName: "Stale", source: "stale-src", now: now))
         async let staleResult = authority.awaitDecision(stale.attemptID)
 
-        // Cap now exhausted (5/5) — a 6th begin (fresh, unblocked source) is nil.
+        // Cap now exhausted (4/4) — a 5th begin (fresh, unblocked source) is nil.
         #expect(await authority.begin(
             publicKey: Data([88]), claimedName: "Over", source: "fresh-src", now: now) == nil)
 
@@ -190,9 +263,9 @@ import PortviewProtocol
             publicKey: Data([9]), claimedName: "X", source: "blocked-src", now: now))
         await denyAndDrain(authority, reopened.attemptID)
 
-        // Cap reset: the reopened-source begin above already used 1 of 5 post-reset slots; 4 more
-        // fresh begins succeed (5 total), then a 6th is nil again.
-        for i in 0..<4 {
+        // Cap reset: the reopened-source begin above already used 1 of 4 post-reset slots; 3 more
+        // fresh begins succeed (4 total), then a 5th is nil again.
+        for i in 0..<3 {
             let r = try #require(await authority.begin(
                 publicKey: Data([UInt8(100 + i)]), claimedName: "Fresh\(i)", source: "post-src-\(i)", now: now))
             await denyAndDrain(authority, r.attemptID)
@@ -203,19 +276,40 @@ import PortviewProtocol
 
     @Test func requestCapPerWindow() async throws {
         let authority = EnrollmentAuthority()
-        for i in 0..<5 {
+        for i in 0..<4 {
             let r = try #require(await authority.begin(
                 publicKey: Data([UInt8(i)]), claimedName: "N\(i)", source: "src-\(i)", now: now))
             await denyAndDrain(authority, r.attemptID)
         }
-        let sixth = await authority.begin(
-            publicKey: Data([99]), claimedName: "Sixth", source: "src-6", now: now)
-        #expect(sixth == nil)
+        let overCap = await authority.begin(
+            publicKey: Data([99]), claimedName: "OverCap", source: "src-over", now: now)
+        #expect(overCap == nil)
 
         await authority.windowOpened()
         let afterReset = await authority.begin(
             publicKey: Data([100]), claimedName: "Reset", source: "src-reset", now: now)
         #expect(afterReset != nil)
+    }
+
+    @Test func requestCapTimesDeadlineStaysUnderThePairingWindow() async throws {
+        // Finding GLM1: cap × deadline must stay < the SAS pairing window (120s) by construction —
+        // otherwise an attacker serializing `cap` parked attempts starves the legit phone's
+        // enrollment slot for the whole window (slot-occupation DoS). `cap` is proven behaviorally
+        // (the first begin that returns nil is one past it) and `deadlineSeconds` is read off a
+        // real request's advertised expiry, so this pins the ACTUAL runtime defaults rather than
+        // duplicating hardcoded literals that could silently drift from the real values.
+        let authority = EnrollmentAuthority()
+        var cap = 0
+        var deadlineSeconds: TimeInterval = 0
+        while let request = await authority.begin(
+            publicKey: Data([UInt8(cap)]), claimedName: "N\(cap)", source: "src-\(cap)", now: now) {
+            deadlineSeconds = request.expiresAt.timeIntervalSince(request.createdAt)
+            await denyAndDrain(authority, request.attemptID)
+            cap += 1
+            if cap > 20 { break }  // safety valve against an infinite loop on a regression
+        }
+        let windowSeconds = SASAttemptLimiter().windowDuration
+        #expect(Double(cap) * deadlineSeconds < windowSeconds)
     }
 
     @Test func cancellationResolvesFalseWithoutBlockingSource() async throws {

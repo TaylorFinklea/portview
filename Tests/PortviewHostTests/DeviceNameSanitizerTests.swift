@@ -39,14 +39,22 @@ import Testing
     }
 
     @Test func truncatesByGraphemeClusterNotScalar() {
-        // Family emoji: 4 code points joined by ZWJ (U+200D, not banned) forming ONE Character.
-        // Truncating by scalar count would slice mid-cluster and corrupt the emoji; truncating by
-        // Character count must not.
+        // Family emoji: 4 code points originally joined by ZWJ (U+200D) into ONE Character. Since
+        // Finding G+ (2), U+200D is stripped as a `.format`-category scalar (invisible-char
+        // name-spoofing vector) — for a device NAME, decomposing a ZWJ sequence into its
+        // individual emoji is an acceptable tradeoff; the test's actual intent (truncating by
+        // grapheme cluster, not raw scalar, so a cluster is never sliced in half) still holds for
+        // whatever clusters remain after stripping. Finding G+ (1)'s byte budget (256 bytes,
+        // applied to the INPUT before any of this) is what actually bounds the result here: only
+        // ~10 family-emoji repeats' worth of scalars fit under the budget, well short of the
+        // 64-character truncation this test originally exercised — so the expected value below is
+        // the OBSERVED bounded-then-ZWJ-stripped output (10 whole families, decomposed, plus one
+        // leftover lone scalar), not the original 64-Character-truncation value.
         let family = "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}"
         let input = String(repeating: family, count: 70)
         let result = DeviceNameSanitizer.sanitize(input)
-        #expect(result.count == 64)
-        #expect(result == String(repeating: family, count: 64))
+        let decomposedFamily = "\u{1F468}\u{1F469}\u{1F467}\u{1F466}"
+        #expect(result == String(repeating: decomposedFamily, count: 10) + "\u{1F468}")
     }
 
     @Test func emptyOrWhitespaceOnlyFallsBackToUnnamedDevice() {
@@ -62,5 +70,27 @@ import Testing
         // never converted to spaces — they are not in the control category but are a line-injection
         // vector if they survive into display UI. This test pins the invariant explicitly.
         #expect(DeviceNameSanitizer.sanitize("A\u{2028}B\u{2029}C") == "ABC")
+    }
+
+    @Test func boundsInputToAFixedByteBudgetBeforeGraphemeWork() {
+        // Finding G+ (1): `prefix(64)` (below) truncates by EXTENDED GRAPHEME CLUSTER, and a
+        // single base scalar followed by an unboundedly long run of combining marks is ONE
+        // grapheme cluster — it sails through that cap as "64 characters" while actually costing
+        // up to ~16 MiB. The INPUT must be capped to a fixed UTF-8 byte budget (256 bytes) BEFORE
+        // any grapheme/whitespace work, so sanitization stays bounded no matter how many
+        // combining marks trail the input.
+        let combiningMark = "\u{0301}"  // COMBINING ACUTE ACCENT
+        let input = "A" + String(repeating: combiningMark, count: 100_000)
+        let result = DeviceNameSanitizer.sanitize(input)
+        #expect(result.utf8.count <= 256)
+    }
+
+    @Test func stripsFormatCategoryScalars() {
+        // Finding G+ (2): Unicode `.format`-category scalars not already covered by the explicit
+        // `bannedScalars` set — U+FEFF (ZWNBSP/BOM), U+200D (ZWJ), U+00AD (SOFT HYPHEN) — survive
+        // the old `.control`-only filter, an invisible-char name-spoofing vector. They must be
+        // stripped alongside control characters.
+        let input = "A\u{FEFF}B\u{200D}C\u{00AD}D"
+        #expect(DeviceNameSanitizer.sanitize(input) == "ABCD")
     }
 }

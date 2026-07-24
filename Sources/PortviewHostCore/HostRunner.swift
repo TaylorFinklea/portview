@@ -549,14 +549,18 @@ public struct HostRunner: Sendable {
         // Mutual-auth gate (spec §3): challenge/verify BEFORE any scaffolding — and before the
         // display guard below, because authorization is a connection-level decision that must not
         // depend on a display being attached. The policy is HOST-LOCAL, never wire-negotiated.
-        let mode = authPolicy.effectiveMode(now: Date(), enrollment: await pairings.enrollmentSnapshot())
+        // Entry-level snapshot, used ONLY for the eviction sweep below — evicting on entry is fine
+        // (Finding A review). The gate's own admission DECISION must never trust this snapshot: see
+        // `effectiveMode` passed to `serveAuthGate`.
+        let entryMode = authPolicy.effectiveMode(now: Date(), enrollment: await pairings.enrollmentSnapshot())
         // If the policy has tightened to `.required` (a device enrolled, the window expired, or the
         // store is unreadable → fail closed), terminate any sessions still lingering from the
         // bootstrap era before doing anything else. This lazy sweep fires on the next connection;
         // the EAGER sweep at the instant of enrollment is han.3's enroll-ceremony hook.
-        if mode == .required { control?.evictLegacyAdmitted() }
+        if entryMode == .required { control?.evictLegacyAdmitted() }
         let outcome = await serveAuthGate(
-            inbound: inbound, hostCertSHA256: hostCertSHA256, mode: mode,
+            inbound: inbound, hostCertSHA256: hostCertSHA256,
+            effectiveMode: { authPolicy.effectiveMode(now: Date(), enrollment: await pairings.enrollmentSnapshot()) },
             isSASWindowOpen: { await sas?.isOpen() ?? false },
             pairings: pairings,
             sendChallenge: { try await connection.send(.serverChallenge($0)) })
@@ -795,15 +799,21 @@ public struct HostRunner: Sendable {
     /// at gate entry (review TOCTOU fix): a silent peer already in-flight when the user opens the
     /// pairing window must still be caught by the barrier, even though the window wasn't open yet
     /// when the gate started waiting — the window-open evict sweep can't catch it, since the
-    /// admission would only register after the sweep runs. Exactly one read (Sol han.1 review): the
-    /// initial ClientHello was already consumed before this gate, so any further message that isn't
-    /// ClientAuth is a violation — granting a stray/duplicate frame a fresh deadline would let paced
-    /// duplicates starve the connection slots. The outbound side is a closure seam (the caller binds
-    /// it to `connection.send`) so the gate's decision logic is testable without sockets.
+    /// admission would only register after the sweep runs. `effectiveMode` gets the SAME
+    /// decision-time treatment (Finding A, adversarial review CRITICAL): the ACTIVE policy mode is
+    /// evaluated at the timeout decision, never sampled once before the wait — a peer that holds a
+    /// silent connection through the whole wait while a first enrollment promotes the store from
+    /// `.bootstrap` to `.required` must be rejected against the CURRENT mode, not legacy-admitted
+    /// against a now-stale `.bootstrap` snapshot (and a now-closed window). Exactly one read (Sol
+    /// han.1 review): the initial ClientHello was already consumed before this gate, so any further
+    /// message that isn't ClientAuth is a violation — granting a stray/duplicate frame a fresh
+    /// deadline would let paced duplicates starve the connection slots. The outbound side is a
+    /// closure seam (the caller binds it to `connection.send`) so the gate's decision logic is
+    /// testable without sockets.
     static func serveAuthGate(
         inbound: MessageReader,
         hostCertSHA256: [UInt8],
-        mode: MutualAuthPolicy.Mode,
+        effectiveMode: @Sendable () async -> MutualAuthPolicy.Mode,
         isSASWindowOpen: @Sendable () async -> Bool,
         pairings: PairingStore,
         deadline: Duration = authGateDeadline,
@@ -820,6 +830,9 @@ public struct HostRunner: Sendable {
         }
         guard let message = await inbound.next(deadline: deadline) else {
             // Silence: a pre-auth legacy client skips the unknown challenge tag and never replies.
+            // Read the ACTIVE mode HERE, at the decision point, not before the wait (Finding A) — a
+            // policy that tightens to `.required` mid-wait must still catch this peer.
+            let mode = await effectiveMode()
             // Legacy barrier: no legacy admissions while the ceremony window is open. Read HERE, at
             // the decision point, not before the wait — a window opened mid-wait must still trip it.
             guard mode == .bootstrap else { return .rejected(.timeout) }

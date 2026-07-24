@@ -38,16 +38,27 @@ public actor EnrollmentAuthority {
         var decided: Bool?
     }
 
-    private static let requestCapPerWindow = 5
+    /// Finding GLM1 (adversarial review — slot-occupation DoS): must satisfy
+    /// `requestCapPerWindow * deadline < SASAttemptLimiter.windowDuration` (120s default) by
+    /// construction, or an attacker serializing `requestCapPerWindow` parked attempts can occupy
+    /// the single enrollment slot for the ENTIRE pairing window, starving the legit device.
+    /// 4 * 25s = 100s < 120s.
+    private static let requestCapPerWindow = 4
 
     private var pending: PendingAttempt?
     private var blockedSources: Set<String> = []
+    /// Finding H (adversarial review): deny/timeout/windowClosed block the presented KEY too, not
+    /// just the network source — a source alone lets an attacker re-prompt-grind the SAME key by
+    /// simply rotating address (IPv4/IPv6). `begin()` refuses a blocked key regardless of source.
+    private var blockedKeys: Set<Data> = []
     private var requestsThisWindow = 0
     private var windowOpen = true
     private let deadline: Duration
+    private let now: () -> Date
 
-    public init(deadline: Duration = .seconds(25)) {
+    public init(deadline: Duration = .seconds(25), now: @escaping () -> Date = Date.init) {
         self.deadline = deadline
+        self.now = now
     }
 
     /// `Duration` -> `TimeInterval` so `expiresAt` can be derived directly from the injected
@@ -57,14 +68,16 @@ public actor EnrollmentAuthority {
         return TimeInterval(components.seconds) + TimeInterval(components.attoseconds) / 1e18
     }
 
-    /// Admits a new attempt, or returns nil if: one is already pending, `source` is blocked for
-    /// this window, the window's request cap is exhausted, or `windowClosed()` was the last window
-    /// event received. Captures `publicKey` as an independent snapshot (Swift `Data` value/COW
-    /// semantics: the caller mutating its own copy afterward never touches this one).
+    /// Admits a new attempt, or returns nil if: one is already pending, `source` OR `publicKey` is
+    /// blocked for this window (Finding H), the window's request cap is exhausted, or
+    /// `windowClosed()` was the last window event received. Captures `publicKey` as an independent
+    /// snapshot (Swift `Data` value/COW semantics: the caller mutating its own copy afterward never
+    /// touches this one).
     func begin(publicKey: Data, claimedName: String, source: String, now: Date) -> EnrollmentRequest? {
         guard windowOpen else { return nil }
         guard pending == nil else { return nil }
         guard !blockedSources.contains(source) else { return nil }
+        guard !blockedKeys.contains(publicKey) else { return nil }
         guard requestsThisWindow < Self.requestCapPerWindow else { return nil }
         let request = EnrollmentRequest(
             attemptID: UUID(),
@@ -124,8 +137,19 @@ public actor EnrollmentAuthority {
     }
 
     /// Exact-attempt approval; a stale/unknown `attemptID` (no longer — or never — the pending one)
-    /// is a no-op. Does not block the source.
+    /// is a no-op. Does not block the source. `expiresAt` is authoritative here (Finding D,
+    /// adversarial review): the 25 s deadline is otherwise enforced only by a relative
+    /// `Task.sleep` racer inside `awaitDecision`, and a late-firing timer plus a late `approve()`
+    /// could otherwise enroll past the advertised deadline. Checked against the injected `now`
+    /// clock so it's a pure, testable comparison rather than trusting the timer to have already
+    /// fired — an approve at or past `expiresAt` is treated exactly like a timeout (resolves false,
+    /// blocks the source) instead of enrolling.
     public func approve(_ attemptID: UUID) {
+        if let entry = pending, entry.request.attemptID == attemptID, entry.decided == nil,
+           now() >= entry.request.expiresAt {
+            resolve(attemptID, outcome: false, blockSource: true)
+            return
+        }
         resolve(attemptID, outcome: true, blockSource: false)
     }
 
@@ -135,11 +159,13 @@ public actor EnrollmentAuthority {
         resolve(attemptID, outcome: false, blockSource: true)
     }
 
-    /// Fresh window epoch: resets blocked sources and the request cap, and invalidates (resolves
-    /// false, without blocking) any stale pending attempt left over from before this call.
+    /// Fresh window epoch: resets blocked sources AND blocked keys (Finding H), and the request
+    /// cap, and invalidates (resolves false, without blocking) any stale pending attempt left over
+    /// from before this call.
     public func windowOpened() {
         windowOpen = true
         blockedSources.removeAll()
+        blockedKeys.removeAll()
         requestsThisWindow = 0
         invalidatePending(blockSource: false)
     }
@@ -176,6 +202,9 @@ public actor EnrollmentAuthority {
         guard var entry = pending, entry.request.attemptID == attemptID, entry.decided == nil else { return }
         if blockSource {
             blockedSources.insert(entry.request.source)
+            // Finding H: block the presented KEY too, not just the source — otherwise an attacker
+            // rotating source (IPv4/IPv6) with the SAME key just re-prompts.
+            blockedKeys.insert(entry.request.publicKey)
         }
         if let continuation = entry.continuation {
             pending = nil
@@ -199,6 +228,8 @@ public actor EnrollmentAuthority {
         pending = nil
         if blockSource {
             blockedSources.insert(entry.request.source)
+            // Finding H: block the key alongside the source (see `resolve`).
+            blockedKeys.insert(entry.request.publicKey)
         }
         entry.continuation?.resume(returning: false)
     }

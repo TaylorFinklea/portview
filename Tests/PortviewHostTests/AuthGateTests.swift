@@ -32,10 +32,23 @@ import PortviewProtocol
         func set(_ newValue: Bool) { lock.lock(); defer { lock.unlock() }; value = newValue }
     }
 
+    /// Thread-safe mutable `MutualAuthPolicy.Mode` for driving a Finding-A TOCTOU race: a test
+    /// flips it mid-gate-wait to prove the gate re-reads the ACTIVE mode at the decision point
+    /// (via `effectiveMode`) rather than trusting a mode sampled once before the wait began.
+    private final class LockingModeBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: MutualAuthPolicy.Mode
+        init(_ value: MutualAuthPolicy.Mode) { self.value = value }
+        func get() -> MutualAuthPolicy.Mode { lock.lock(); defer { lock.unlock() }; return value }
+        func set(_ newValue: MutualAuthPolicy.Mode) { lock.lock(); defer { lock.unlock() }; value = newValue }
+    }
+
     /// One scripted gate run: `respond` maps the issued challenge to the client's scripted reply
-    /// messages (empty = a silent/legacy client). Returns the outcome.
+    /// messages (empty = a silent/legacy client). `effectiveMode` is evaluated AT the gate's
+    /// timeout decision point (Finding A), never sampled once at entry — tests that don't care
+    /// about a mid-wait mode change pass a fixed-value closure (`{ .bootstrap }` / `{ .required }`).
     private func runGate(
-        mode: MutualAuthPolicy.Mode,
+        effectiveMode: @escaping @Sendable () async -> MutualAuthPolicy.Mode,
         pairings: PairingStore,
         hostCertSHA256: [UInt8] = [UInt8](repeating: 0x3C, count: 32),
         deadline: Duration = .seconds(2),
@@ -45,7 +58,7 @@ import PortviewProtocol
         let (stream, continuation) = AsyncStream.makeStream(of: AnyMessage.self)
         let inbound = HostRunner.MessageReader(stream)
         return await HostRunner.serveAuthGate(
-            inbound: inbound, hostCertSHA256: hostCertSHA256, mode: mode,
+            inbound: inbound, hostCertSHA256: hostCertSHA256, effectiveMode: effectiveMode,
             isSASWindowOpen: isSASWindowOpen, pairings: pairings, deadline: deadline,
             sendChallenge: { challenge in
                 for message in respond(challenge) { continuation.yield(message) }
@@ -68,7 +81,7 @@ import PortviewProtocol
         try await pairings.enroll(publicKey: key.publicKey.rawRepresentation, deviceName: "phone")
         let expectedID = PairingStore.deviceID(forPublicKey: key.publicKey.rawRepresentation)
 
-        let outcome = await runGate(mode: .required, pairings: pairings) { challenge in
+        let outcome = await runGate(effectiveMode: { .required }, pairings: pairings) { challenge in
             [self.auth(for: key, challenge: challenge)]
         }
         #expect(outcome == .authenticated(deviceID: expectedID))
@@ -81,7 +94,7 @@ import PortviewProtocol
         let pairings = PairingStore(store: MemoryPairingStore())
         try await pairings.enroll(publicKey: key.publicKey.rawRepresentation, deviceName: "phone")
 
-        let outcome = await runGate(mode: .required, pairings: pairings) { _ in
+        let outcome = await runGate(effectiveMode: { .required }, pairings: pairings) { _ in
             let stale = ServerChallenge(nonce: [UInt8](repeating: 0xEE, count: 32))
             return [self.auth(for: key, challenge: stale)]
         }
@@ -96,7 +109,7 @@ import PortviewProtocol
         let pairings = PairingStore(store: MemoryPairingStore())
         try await pairings.enroll(publicKey: key.publicKey.rawRepresentation, deviceName: "phone")
 
-        let outcome = await runGate(mode: .bootstrap, pairings: pairings) { _ in
+        let outcome = await runGate(effectiveMode: { .bootstrap }, pairings: pairings) { _ in
             let stale = ServerChallenge(nonce: [UInt8](repeating: 0xEE, count: 32))
             return [self.auth(for: key, challenge: stale)]
         }
@@ -112,7 +125,7 @@ import PortviewProtocol
         let key = Curve25519.Signing.PrivateKey()
         let pairings = PairingStore(store: MemoryPairingStore())  // nobody enrolled
 
-        let outcome = await runGate(mode: .required, pairings: pairings) { challenge in
+        let outcome = await runGate(effectiveMode: { .required }, pairings: pairings) { challenge in
             [self.auth(for: key, challenge: challenge)]
         }
         #expect(outcome == .unknownKey(publicKey: Array(key.publicKey.rawRepresentation)))
@@ -124,7 +137,7 @@ import PortviewProtocol
         // after the deadline.
         let pairings = PairingStore(store: MemoryPairingStore())
         let outcome = await runGate(
-            mode: .bootstrap, pairings: pairings, deadline: .milliseconds(100),
+            effectiveMode: { .bootstrap }, pairings: pairings, deadline: .milliseconds(100),
             isSASWindowOpen: { false }) { _ in [] }
         #expect(outcome == .legacyAdmitted)
     }
@@ -135,7 +148,7 @@ import PortviewProtocol
         // WITH the pairing window open must close, not legacy-admit.
         let pairings = PairingStore(store: MemoryPairingStore())
         let outcome = await runGate(
-            mode: .bootstrap, pairings: pairings, deadline: .milliseconds(100),
+            effectiveMode: { .bootstrap }, pairings: pairings, deadline: .milliseconds(100),
             isSASWindowOpen: { true }) { _ in [] }
         #expect(outcome == .rejected(.timeout))
     }
@@ -150,7 +163,7 @@ import PortviewProtocol
         let box = LockingBoolBox(false)
         let pairings = PairingStore(store: MemoryPairingStore())
         async let outcome = runGate(
-            mode: .bootstrap, pairings: pairings, deadline: .milliseconds(100),
+            effectiveMode: { .bootstrap }, pairings: pairings, deadline: .milliseconds(100),
             isSASWindowOpen: { box.get() }) { _ in [] }
         try await Task.sleep(for: .milliseconds(30))
         box.set(true)
@@ -158,10 +171,27 @@ import PortviewProtocol
         #expect(result == .rejected(.timeout))
     }
 
+    @Test func staleModeAtEntryDoesNotBypassPromotionDuringGateWait() async throws {
+        // Finding A (CRITICAL): the gate must re-evaluate the ACTIVE policy mode AT the timeout
+        // decision point, not trust a `.bootstrap` mode sampled once before the wait began —
+        // mirroring the `isSASWindowOpen` TOCTOU fix above. A silent peer already in-flight when a
+        // first enrollment promotes the store to `.required` mid-wait (window closed) must be
+        // rejected, never legacy-admitted against the stale snapshot.
+        let box = LockingModeBox(.bootstrap)
+        let pairings = PairingStore(store: MemoryPairingStore())
+        async let outcome = runGate(
+            effectiveMode: { box.get() }, pairings: pairings, deadline: .milliseconds(100),
+            isSASWindowOpen: { false }) { _ in [] }
+        try await Task.sleep(for: .milliseconds(30))
+        box.set(.required)
+        let result = await outcome
+        #expect(result == .rejected(.timeout))
+    }
+
     @Test func silentClientIsRejectedUnderRequired() async throws {
         let pairings = PairingStore(store: MemoryPairingStore())
         let outcome = await runGate(
-            mode: .required, pairings: pairings, deadline: .milliseconds(100)) { _ in [] }
+            effectiveMode: { .required }, pairings: pairings, deadline: .milliseconds(100)) { _ in [] }
         #expect(outcome == .rejected(.timeout))
     }
 
@@ -170,7 +200,7 @@ import PortviewProtocol
         // else is a protocol violation and closes, even under bootstrap: a live message that
         // isn't auth means the peer is NOT a silent legacy client.
         let pairings = PairingStore(store: MemoryPairingStore())
-        let outcome = await runGate(mode: .bootstrap, pairings: pairings) { _ in
+        let outcome = await runGate(effectiveMode: { .bootstrap }, pairings: pairings) { _ in
             [.ping(Ping(sendMicros: 1))]
         }
         #expect(outcome == .rejected(.unexpectedMessage))
@@ -188,7 +218,7 @@ import PortviewProtocol
 
         let hello = AnyMessage.clientHello(ClientHello(
             protocolVersion: 1, deviceID: "dup", deviceName: "dup", codecs: [.hevc]))
-        let outcome = await runGate(mode: .required, pairings: pairings) { challenge in
+        let outcome = await runGate(effectiveMode: { .required }, pairings: pairings) { challenge in
             [hello, self.auth(for: key, challenge: challenge)]
         }
         #expect(outcome == .rejected(.unexpectedMessage))
@@ -202,7 +232,7 @@ import PortviewProtocol
         let pairings = PairingStore(store: MemoryPairingStore())
         try await pairings.enroll(publicKey: key.publicKey.rawRepresentation, deviceName: "phone")
 
-        let outcome = await runGate(mode: .required, pairings: pairings, hostCertSHA256: []) { _ in
+        let outcome = await runGate(effectiveMode: { .required }, pairings: pairings, hostCertSHA256: []) { _ in
             Issue.record("challenge must not be issued without a bindable host cert hash")
             return []
         }
