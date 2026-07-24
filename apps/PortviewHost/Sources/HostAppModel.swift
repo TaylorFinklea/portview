@@ -71,7 +71,8 @@ final class HostAppModel {
     /// The 6-digit SAS code to show the user (never logged); nil unless a preamble derived one.
     private(set) var displayedSASCode: String?
     /// Transient "✓ a client confirmed" signal (Guardrail E). Does NOT close the window — the window
-    /// closes only via the pinned re-dial's `.deviceConnected`, the timeout, the cap, or stop.
+    /// closes only via a CORRELATED `.enrollmentResolved(approved: true)` (review Finding E — see
+    /// `handle(_:)`), the timeout, the cap, or stop.
     private(set) var clientConfirmed = false
     /// How long a pairing window stays open before auto-closing.
     private static let pairingWindowSeconds: TimeInterval = 120
@@ -139,6 +140,11 @@ final class HostAppModel {
         state = .idle
         sessions = HostSessions()
         connectedSince = nil
+        // Sol#3a: a stale, actionable enrollment prompt must not survive hosting stopping — clear it
+        // (and the in-flight/authenticating state that gates its buttons) alongside the pairing window.
+        enrollmentPrompt = nil
+        enrollmentDecisionInFlight = false
+        approvalInFlightID = nil
         endPairing()
     }
 
@@ -215,11 +221,22 @@ final class HostAppModel {
         }
     }
 
-    /// Deny: no local-presence check — a user can always reject a prompt outright.
+    /// Deny: gated behind the SAME local-presence check as Allow (review Finding GLM2). Evicting
+    /// legacy-admitted sessions at `beginPairing()` does not remove an AUTHENTICATED streaming peer —
+    /// it stays connected for the whole ceremony, can see the prompt on the shared screen, and
+    /// (before this fix) could inject a CGEvent click on Deny with zero local presence, since only
+    /// Allow was LAContext-gated. Requiring the same positive LAContext result here closes that gap:
+    /// a remote click on either button now does nothing without someone physically at the Mac.
+    /// Failure or cancel leaves the prompt exactly as-is (no false action) — a stale/expired
+    /// `attemptID` is a safe no-op on the actor side (`EnrollmentAuthority.deny`) regardless.
     func denyEnrollment(_ attemptID: UUID) {
         enrollmentDecisionInFlight = true
         Task { [authority] in
             defer { self.enrollmentDecisionInFlight = false }
+            let context = LAContext()
+            let confirmed = (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
+                                                                localizedReason: "Confirm you're at this Mac to dismiss the pairing request")) ?? false
+            guard confirmed else { return }
             await authority.deny(attemptID)
         }
     }
@@ -329,9 +346,17 @@ final class HostAppModel {
             if isPairing { displayedSASCode = code }  // shown on the HUD; never logged
         case .sasConfirmed:
             // Positive signal only — do NOT close the shared window (a relayed confirm from any peer
-            // must not be able to close it). The window closes via .deviceConnected/timeout/cap/stop.
+            // must not be able to close it). The window closes via a correlated
+            // `.enrollmentResolved(approved: true)`, the timeout, the cap, or stop (Finding E).
             if isPairing { clientConfirmed = true }
         case .deviceConnected, .deviceDisconnected, .sessionStats:
+            // Review Finding E: this branch used to call `endPairing()` on ANY `.deviceConnected` —
+            // but that event also fires for an already-enrolled device merely RECONNECTING (e.g.
+            // re-wake) during a second-device enrollment, which would close the window and invalidate
+            // an unrelated pending enrollment request out from under it. The window now closes only
+            // on the CORRELATED `.enrollmentResolved(approved: true)` below; `.deviceConnected` here
+            // is session tracking only. A re-pairing already-enrolled device produces no enrollment
+            // event, so its window closes on the 120s timeout instead — acceptable per the review.
             let wasConnected = sessions.count > 0
             sessions.apply(event)
             let nowConnected = sessions.count > 0
@@ -339,21 +364,31 @@ final class HostAppModel {
             if !nowConnected { connectedSince = nil }
             if case .deviceConnected(_, let name) = event {
                 messages.append("device connected · \(name)")
-                endPairing()  // a client paired → close the window + clear the code
             }
             if case .deviceDisconnected = event { messages.append("device disconnected") }
         case .enrollmentRequest(let attemptID, let fingerprint, let claimedName, let expiresAt):
             enrollmentPrompt = (attemptID: attemptID, fingerprint: fingerprint, claimedName: claimedName, expiresAt: expiresAt)
         case .enrollmentResolved(let attemptID, let approved):
             // Only clear if this resolution is for the prompt currently shown — a prompt must
-            // never outlive its own request (L1 no-false-success path).
-            if enrollmentPrompt?.attemptID == attemptID { enrollmentPrompt = nil }
+            // never outlive its own request (L1 no-false-success path). Sol#3b: clear
+            // `enrollmentDecisionInFlight` alongside it (not only at the end of an approve/deny
+            // call) — otherwise a stale in-flight LAContext from THIS resolved attempt would leave a
+            // LATER prompt's buttons disabled until (or unless) that old LAContext call ever returns.
+            if enrollmentPrompt?.attemptID == attemptID {
+                enrollmentPrompt = nil
+                enrollmentDecisionInFlight = false
+            }
+            // The correlated close (Finding E): an APPROVED enrollment is the one event that should
+            // end the pairing ceremony — the device just enrolled, so there's nothing left to pair.
+            if approved { endPairing() }
             // If this resolved-not-approved WHILE an Allow tap's LAContext is still running for the
             // same attemptID, tell the user now rather than leaving them in silence until (or
-            // unless) LAContext ever returns. Clearing approvalInFlightID here also stops
-            // `approveEnrollment`'s own post-LAContext check from appending the same message again.
+            // unless) LAContext ever returns. Also clears `enrollmentDecisionInFlight` here (Sol#3b)
+            // even when a NEWER prompt has since replaced this one, so that newer prompt's buttons
+            // aren't left disabled by a decision belonging to this now-resolved attempt.
             if !approved, approvalInFlightID == attemptID {
                 approvalInFlightID = nil
+                enrollmentDecisionInFlight = false
                 messages.append("That pairing request expired before approval completed — reopen pairing and try again.")
             }
         }

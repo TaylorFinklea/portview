@@ -9,9 +9,13 @@ struct PortviewHostApp {
         // terminal QR, and the permission help must land in the terminal, not the unified log —
         // the os.Logger sweep covers the PortviewHostCore library (diagnosability inside the
         // GUI-launched .app); a developer running `swift run portview-host` reads the terminal.
-        // Legacy-bootstrap until the enrollment ceremony (han.3) exists — see HostAppModel.
+        // `.required` with no `enrollment:` authority (review Finding C): the CLI has no Allow/Deny
+        // ceremony UI, so it must never legacy-admit a silent, unauthenticated client. A fresh CLI
+        // against an empty store refuses EVERYONE until a device is enrolled via the macOS app —
+        // this shares the same keychain `PairingStore`, so an app-enrolled device IS recognized here.
+        // The CLI is a developer fallback, not the pairing path.
         await HostRunner().run(identity: .terminal,
-                               authPolicy: .legacyBootstrap(expiresAt: .distantFuture),
+                               authPolicy: .required,
                                pairings: PairingStore()) { event in
             switch event {
             case .message(let message):

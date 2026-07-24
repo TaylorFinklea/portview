@@ -147,8 +147,9 @@ struct MenuBarHostView: View {
     /// The Allow/Deny ceremony prompt (han.3): fingerprint in 5 monospaced groups (already
     /// space-grouped by `KeyFingerprint.short`), the claimed device name, and the full-compare
     /// instruction — mirrors design v2's copy ("a device calling itself 'X'" / "compare ALL FIVE
-    /// groups"). Allow is gated behind LAContext inside `HostAppModel.approveEnrollment`; this view
-    /// never touches LocalAuthentication directly.
+    /// groups"). Both Allow and Deny are gated behind LAContext (`HostAppModel.approveEnrollment` /
+    /// `denyEnrollment` — review Finding GLM2: a remote-injected click on either button must do
+    /// nothing without local presence); this view never touches LocalAuthentication directly.
     private func enrollmentPromptView(
         _ prompt: (attemptID: UUID, fingerprint: String, claimedName: String, expiresAt: Date)
     ) -> some View {
