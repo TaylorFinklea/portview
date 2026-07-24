@@ -374,13 +374,19 @@ final class HostAppModel {
             // `enrollmentDecisionInFlight` alongside it (not only at the end of an approve/deny
             // call) — otherwise a stale in-flight LAContext from THIS resolved attempt would leave a
             // LATER prompt's buttons disabled until (or unless) that old LAContext call ever returns.
-            if enrollmentPrompt?.attemptID == attemptID {
+            let wasShownPrompt = (enrollmentPrompt?.attemptID == attemptID)
+            if wasShownPrompt {
                 enrollmentPrompt = nil
                 enrollmentDecisionInFlight = false
             }
-            // The correlated close (Finding E): an APPROVED enrollment is the one event that should
-            // end the pairing ceremony — the device just enrolled, so there's nothing left to pair.
-            if approved { endPairing() }
+            // The correlated close (Finding E, tightened per review Important #1): an APPROVED
+            // enrollment ends the pairing ceremony only when it's the attempt that was actually on
+            // screen. `EnrollmentAuthority.pending` clears synchronously the instant `approve()` is
+            // called — well before `runEnrollmentCeremony` finishes the keychain enroll and emits
+            // this event — so a second unknown device can `begin()` its own attempt in that gap. A
+            // late `.enrollmentResolved(approved: true)` for the FIRST attempt must not close the
+            // window on that second, unrelated, still-pending enrollment.
+            if approved && wasShownPrompt { endPairing() }
             // If this resolved-not-approved WHILE an Allow tap's LAContext is still running for the
             // same attemptID, tell the user now rather than leaving them in silence until (or
             // unless) LAContext ever returns. Also clears `enrollmentDecisionInFlight` here (Sol#3b)
