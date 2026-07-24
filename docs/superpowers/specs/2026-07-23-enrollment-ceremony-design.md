@@ -130,3 +130,14 @@ device-post-promotion on hardware.
 
 In-flight admission TOCTOU close-out, cross-process authority, revoke UI, rotation ceremony
 (han.4); mTLS upgrade (future).
+
+## Implementation addendum (2026-07-23, shipped + triple-reviewed)
+
+Implemented via SDD (10 tasks) + a 4-commit final-review fix wave (`a3caf46..e3eb46c`). Final
+adversarial implementation review: Sol×2 (RETURN, converging) + GLM-5.2 (SHIP-WITH-FIXES); Kimi K3
+was weekly-capped. All load-bearing findings folded (see decisions.md 2026-07-23). Headline fix
+beyond v2: the auth gate re-evaluates `effectiveMode` AT the timeout decision, not just the window
+state — v2/Task-5 closed the window-state TOCTOU but left the bootstrap/required MODE sampled at
+gate entry, a first-enrollment-promotion race. Deferred to han.4 (its epoch/registry): base
+gate-admit→register admission TOCTOU, full SAS window-epoch binding, attempt-scoping the host
+in-flight decision flags. Deny/timeout stays a silent close (no-oracle design tradeoff).

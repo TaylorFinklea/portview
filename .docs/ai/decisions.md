@@ -2,6 +2,51 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-23] Enrollment ceremony (han.3): local-presence prompt + dual-fingerprint compare (ACCEPTED)
+
+**Context**: spec §4-RESOLVED Option (a), implemented via the brainstorming → design-v2 → plan →
+subagent-driven-development pipeline. Design `docs/superpowers/specs/2026-07-23-enrollment-
+ceremony-design.md` (v2), plan `docs/superpowers/plans/2026-07-23-enrollment-ceremony.md`.
+User decisions (2026-07-23): local presence = **LAContext/Touch ID**; migration window stays
+**`.distantFuture`** (first-enroll auto-promotion is the bound); scope = **full ceremony, UI
+device-gated**; fingerprint = **grouped hex** (5×4, 80 bits).
+
+**Shipped** (10 plan tasks + a 4-commit review fix wave, all TDD, 19 commits `a3caf46..e3eb46c`):
+`KeyFingerprint` (PortviewProtocol, shared host/client derivation), `DeviceNameSanitizer`,
+`EnrollmentAuthority` (single-request-per-window state machine), the `serveSession` ceremony
+(unknown-key → prompt-pending → LAContext Allow → exact-snapshot enroll → eager evict), the HUD
+code-display owner-token lease, `ChallengeResponse` + the client responder, and both app UIs.
+
+**Reviewed to convergence.** Pre-implementation DESIGN review (Sol REDESIGN + Kimi K3
+BUILD-WITH-CHANGES) rebuilt the flow before any code (design v1 lost the first-prompt race →
+window-open legacy barrier + persistent client compare card + bounded pairing retry). Every task
+had its own implementer→review→fix→re-review loop. The final IMPLEMENTATION review ran **three**
+adversarial passes — Sol×2 (RETURN, converging) + GLM-5.2 (SHIP-WITH-FIXES) — after Kimi K3 hit its
+weekly cap; the union was the safe set.
+
+1. **Security core holds** across all reviewers (must-fixes 1 + 3): the displayed fingerprint ==
+   the signature-verified key == the enrolled key, by a single immutable `[UInt8]` snapshot
+   end-to-end; LAContext gates the Allow; the window-open legacy barrier + eager eviction stand.
+2. **Fix wave folded (user chose "fix load-bearing set now"):** (A, CRITICAL) the gate re-evaluates
+   `effectiveMode` AT the timeout decision — Task 5 had fixed only the window check to decision-time,
+   leaving the bootstrap/required mode sampled at gate entry, so a first-enrollment promotion could
+   be raced by a silent peer; (C) the CLI now runs `.required` (was `.legacyBootstrap(.distantFuture)`
+   + nil authority — a silent-client fail-open that contradicted its own "existing-enrolled-only"
+   doc); (D) `EnrollmentAuthority.approve` checks an authoritative deadline (a late timer could
+   otherwise enroll past `expiresAt`); (F) the client caches identity load success-only (a thrown
+   keychain read was memoized forever — a bug introduced in the Task 8 brief; the han.2 no-mint
+   invariant is preserved by re-calling `loadOrCreate`); plus key-ID blocking, the 256-byte name
+   bound + `.format`-scalar stripping, the slot-DoS cap (`cap × deadline < window`), the
+   correlated window-close (any `.deviceConnected` → only the shown attempt's `.enrollmentResolved`),
+   the `pairingRetryLoop` lifecycle rejoin, LAContext-gated Deny (an authenticated peer could
+   remote-click it), and the compare card on all pre-`ServerHello` connect paths.
+3. **Deferred to han.4** (needs its generation/epoch registry): the base gate-admit→register
+   in-flight admission TOCTOU; full window-epoch binding of SAS leases/events; attempt-scoping the
+   host's in-flight decision flags (`enrollmentDecisionInFlight`/`approvalInFlightID` are global).
+4. **Design tradeoff (no code change):** deny/timeout close silently (no typed terminal signal) —
+   the design's deliberate no-oracle rule; the client retries a bounded ~38s then reports
+   "Not approved." A typed result is a protocol decision for a later bead, not a defect.
+
 ## [2026-07-22] Mutual-auth gate wiring (han.1): host-local policy, display-independent auth, durable promotion + legacy eviction (ACCEPTED)
 
 **Context**: spec §3 gate + §4-RESOLVED rollout policy wired into `serveSession`. DUAL adversarial
