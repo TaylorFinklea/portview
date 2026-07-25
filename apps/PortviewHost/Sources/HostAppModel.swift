@@ -133,6 +133,17 @@ final class HostAppModel {
     /// authenticated Cancel lifts it. A row in this map renders Retry / Cancel instead of Revoke.
     private(set) var revokeFailures: [String: RevokeLease] = [:]
 
+    /// True when the host has been through enrollment but now has ZERO paired devices — the
+    /// last-device lockout (product decision 2): Portview accepts no one until an in-person re-pair.
+    /// Derived from the DURABLE `enrollmentSnapshot()` in `refreshEnrolledDevices` (NOT bare
+    /// `enrolledDevices.isEmpty`, which is also true on a fresh never-enrolled install), so it survives
+    /// an app restart and drives the menu-bar locked-out banner in the surface where revoke happens.
+    private(set) var lockedOut = false
+    /// Device ids with a revoke/retry/cancel op in flight — a reentrancy guard so a rapid double-tap
+    /// can't launch a second `LAContext` prompt for the same device (mirrors the enrollment Allow/Deny
+    /// `DecisionTokenRegistry.beginIfIdle` guard). Cleared in each op's `defer`, covering every exit.
+    @ObservationIgnored private var revokeInFlight: Set<String> = []
+
     /// Reload `enrolledDevices` from the shared `pairings` store, precomputing each row's compare
     /// fingerprint here so the view never imports `PortviewProtocol` or sees the raw `publicKey`.
     func refreshEnrolledDevices() async {
@@ -142,6 +153,15 @@ final class HostAppModel {
                                    fingerprint: KeyFingerprint.short(forPublicKey: $0.publicKey),
                                    lastSeen: $0.lastSeen) }
             .sorted { $0.lastSeen > $1.lastSeen }
+        // Locked-out (decision 2): distinguish enrolled-then-emptied from a fresh never-enrolled
+        // install. `.populated` = migration completed (a device was enrolled at some point), so zero
+        // devices now is the in-person-re-pair lockout; `.empty`/`.unreadable` → no banner. Only hit
+        // the durable snapshot when the set is actually empty (`await` can't ride an `&&` autoclosure).
+        if enrolledDevices.isEmpty {
+            lockedOut = await pairings.enrollmentSnapshot() == .populated
+        } else {
+            lockedOut = false
+        }
     }
 
     /// Revoke a paired device (design §1a steps 2–6). The confirmation dialog (product decision 1)
@@ -153,7 +173,10 @@ final class HostAppModel {
     /// FAILURE do NOT `endRevoke` — keep the fence (fail closed) and retain the lease so the row can
     /// offer Retry / an LAContext-gated Cancel.
     func revoke(_ id: String) {
+        guard !revokeInFlight.contains(id) else { return }  // reentrancy: no second LAContext for this id
+        revokeInFlight.insert(id)
         Task {
+            defer { self.revokeInFlight.remove(id) }
             let context = LAContext()
             let approved = (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
                                                               localizedReason: "Revoke this device's access to this Mac")) ?? false
@@ -178,8 +201,10 @@ final class HostAppModel {
     /// removal under the SAME retained lease. On success, lift the fence and drop the row; on a
     /// repeated failure, keep the fence + lease so the row stays "incomplete".
     func retryRevoke(_ id: String) {
-        guard let lease = revokeFailures[id] else { return }
+        guard let lease = revokeFailures[id], !revokeInFlight.contains(id) else { return }
+        revokeInFlight.insert(id)
         Task {
+            defer { self.revokeInFlight.remove(id) }
             do {
                 try await self.pairings.revoke(id: id)
                 self.control.endRevoke(lease: lease)
@@ -196,8 +221,10 @@ final class HostAppModel {
     /// fence WITHOUT a durable revoke, deliberately re-admitting the still-enrolled device (the owner
     /// accepts the risk for a permanently-locked keychain). Only a POSITIVE LAContext result proceeds.
     func cancelRevoke(_ id: String) {
-        guard let lease = revokeFailures[id] else { return }
+        guard let lease = revokeFailures[id], !revokeInFlight.contains(id) else { return }
+        revokeInFlight.insert(id)
         Task {
+            defer { self.revokeInFlight.remove(id) }
             let context = LAContext()
             let approved = (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
                                                               localizedReason: "Confirm you're at this Mac to re-admit this device")) ?? false

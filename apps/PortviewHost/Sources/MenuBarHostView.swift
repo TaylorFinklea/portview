@@ -231,6 +231,16 @@ struct MenuBarHostView: View {
                     }
                 }
             }
+        } else if model.lockedOut {
+            // Last-device lockout (product decision 2): the section that just held the revoked device
+            // is gone, so surface the locked-out copy HERE, in the popover where the revoke happened —
+            // not only in the main-window activity log.
+            Divider().overlay(Glass.text3.opacity(0.2))
+            HStack(alignment: .top, spacing: 6) {
+                StatusDot(kind: .amber, size: 6)
+                Text("No paired devices — Portview accepts no one until you re-pair in person.")
+                    .font(.mono(10)).foregroundStyle(Glass.text2)
+            }
         }
     }
 
