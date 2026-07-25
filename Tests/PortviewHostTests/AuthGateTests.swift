@@ -47,19 +47,25 @@ import PortviewProtocol
     /// messages (empty = a silent/legacy client). `effectiveMode` is evaluated AT the gate's
     /// timeout decision point (Finding A), never sampled once at entry — tests that don't care
     /// about a mid-wait mode change pass a fixed-value closure (`{ .bootstrap }` / `{ .required }`).
+    /// `admissionTicket` defaults to always granting a fresh (generation 0) ticket for whatever key
+    /// is asked — the tests below that don't care about the reservation seam (rejected/unknownKey/
+    /// legacy paths) don't need to pass it. Tests that DO care (ticket-at-authorization, the fence)
+    /// override it to drive a specific generation or `nil` (fenced).
     private func runGate(
         effectiveMode: @escaping @Sendable () async -> MutualAuthPolicy.Mode,
         pairings: PairingStore,
         hostCertSHA256: [UInt8] = [UInt8](repeating: 0x3C, count: 32),
         deadline: Duration = .seconds(2),
         isSASWindowOpen: @escaping @Sendable () async -> Bool = { false },
+        admissionTicket: @escaping @Sendable (ClientKeyID) -> AdmissionTicket? = { AdmissionTicket(keyID: $0, generation: 0) },
         respond: @escaping @Sendable (ServerChallenge) -> [AnyMessage]
     ) async -> HostRunner.AuthGateOutcome {
         let (stream, continuation) = AsyncStream.makeStream(of: AnyMessage.self)
         let inbound = HostRunner.MessageReader(stream)
         return await HostRunner.serveAuthGate(
             inbound: inbound, hostCertSHA256: hostCertSHA256, effectiveMode: effectiveMode,
-            isSASWindowOpen: isSASWindowOpen, pairings: pairings, deadline: deadline,
+            isSASWindowOpen: isSASWindowOpen, pairings: pairings, admissionTicket: admissionTicket,
+            deadline: deadline,
             sendChallenge: { challenge in
                 for message in respond(challenge) { continuation.yield(message) }
             })
@@ -84,7 +90,42 @@ import PortviewProtocol
         let outcome = await runGate(effectiveMode: { .required }, pairings: pairings) { challenge in
             [self.auth(for: key, challenge: challenge)]
         }
-        #expect(outcome == .authenticated(deviceID: expectedID))
+        #expect(outcome == .authenticated(deviceID: expectedID, ticket: AdmissionTicket(keyID: expectedID, generation: 0)))
+    }
+
+    @Test func authenticatedKeyCarriesTheSeamsTicketGeneration() async throws {
+        // Ticket-at-authorization (design §3, finding 1): the ticket the outcome carries is
+        // EXACTLY what the `admissionTicket` seam handed back for this key — including a non-zero
+        // generation — never re-derived or defaulted inside the gate.
+        let key = Curve25519.Signing.PrivateKey()
+        let pairings = PairingStore(store: MemoryPairingStore())
+        try await pairings.enroll(publicKey: key.publicKey.rawRepresentation, deviceName: "phone")
+        let expectedID = PairingStore.deviceID(forPublicKey: key.publicKey.rawRepresentation)
+
+        let outcome = await runGate(
+            effectiveMode: { .required }, pairings: pairings,
+            admissionTicket: { keyID in AdmissionTicket(keyID: keyID, generation: 7) }
+        ) { challenge in
+            [self.auth(for: key, challenge: challenge)]
+        }
+        #expect(outcome == .authenticated(deviceID: expectedID, ticket: AdmissionTicket(keyID: expectedID, generation: 7)))
+    }
+
+    @Test func fencedKeyIsRejectedEvenWithValidSignatureAndEnrollment() async throws {
+        // Order-A (design §3/§5): a key mid-revoke (the seam returns nil — the fence) is rejected
+        // at the gate itself, BEFORE the durable `authorizedClient` lookup even runs — a valid
+        // signature over an enrolled key is not enough while the fence is held.
+        let key = Curve25519.Signing.PrivateKey()
+        let pairings = PairingStore(store: MemoryPairingStore())
+        try await pairings.enroll(publicKey: key.publicKey.rawRepresentation, deviceName: "phone")
+
+        let outcome = await runGate(
+            effectiveMode: { .required }, pairings: pairings,
+            admissionTicket: { _ in nil }
+        ) { challenge in
+            [self.auth(for: key, challenge: challenge)]
+        }
+        #expect(outcome == .rejected(.revoking))
     }
 
     @Test func forgedSignatureIsRejected() async throws {

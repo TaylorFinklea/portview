@@ -563,6 +563,11 @@ public struct HostRunner: Sendable {
             effectiveMode: { authPolicy.effectiveMode(now: Date(), enrollment: await pairings.enrollmentSnapshot()) },
             isSASWindowOpen: { await sas?.isOpen() ?? false },
             pairings: pairings,
+            // Bound to the live registry's fence/generation (design §3). No `control` (the CLI's
+            // current default) means no registry exists to fence against, so admit unconditionally
+            // at generation 0 — same as today's un-fenced behavior; `HostRunner.run` minting a
+            // process-local `HostControl` for the `nil` case is a separate, not-yet-landed item.
+            admissionTicket: { keyID in control?.admissionTicket(for: keyID) ?? AdmissionTicket(keyID: keyID, generation: 0) },
             sendChallenge: { try await connection.send(.serverChallenge($0)) })
         onAuthGateOutcome?(outcome)
         switch outcome {
@@ -585,7 +590,11 @@ public struct HostRunner: Sendable {
             logger.info("auth gate: unknown key enrolled (fingerprint \(KeyFingerprint.short(forPublicKey: Data(publicKey)), privacy: .public))")
         case .legacyAdmitted:
             emit(.message("⚠️ Legacy client connected without device authentication (bootstrap policy — enroll this device to tighten)."))
-        case .authenticated(let deviceID):
+        case .authenticated(let deviceID, _):
+            // MINIMAL han.4 Task-7 compile-fix: the gate now carries the admission ticket captured
+            // at authorization (Order-A), but `control?.register` further down still uses its own
+            // Task-4 placeholder ticket — threading THIS ticket into register for real (plus the
+            // durable + post-await recheck) is Task 8's job (design §5).
             logger.info("auth gate: authenticated device \(deviceID, privacy: .public)")
         }
         // The session's auth class is carried into `control.register` so a later policy tightening
@@ -792,8 +801,10 @@ public struct HostRunner: Sendable {
 
     /// The mutual-auth gate's decision for one streaming connection.
     enum AuthGateOutcome: Equatable, Sendable {
-        /// The peer proved possession of an enrolled key; `deviceID` = SHA256(pubkey) hex.
-        case authenticated(deviceID: String)
+        /// The peer proved possession of an enrolled key; `deviceID` = SHA256(pubkey) hex. `ticket`
+        /// is the admission ticket captured at authorization (design §3, Order-A) — its generation
+        /// reflects the instant of THIS authorization, never the later `register` instant.
+        case authenticated(deviceID: String, ticket: AdmissionTicket)
         /// The peer never answered the challenge and the ACTIVE policy is legacy bootstrap.
         case legacyAdmitted
         /// A validly-signed key that isn't enrolled — the han.3 enrollment-ceremony hook (spec
@@ -806,6 +817,10 @@ public struct HostRunner: Sendable {
 
     enum AuthGateRejection: Equatable, Sendable {
         case missingHostCertHash, sendFailed, timeout, unexpectedMessage, invalidSignature
+        /// The key is fenced (mid-revoke, design §4/H-c): the `admissionTicket` seam returned `nil`
+        /// for it. Rejected here even for a valid signature over a still-enrolled key — Order-A
+        /// (design §3): the fence must win over a durable record that hasn't caught up yet.
+        case revoking
     }
 
     /// How long the gate waits for `ClientAuth` after issuing its challenge. Long enough for a
@@ -843,6 +858,12 @@ public struct HostRunner: Sendable {
         effectiveMode: @Sendable () async -> MutualAuthPolicy.Mode,
         isSASWindowOpen: @Sendable () async -> Bool,
         pairings: PairingStore,
+        // Reservation seam (design §2/§3, Order-A): captures the admission ticket AT
+        // authorization — immediately after signature verify, before the durable `authorizedClient`
+        // lookup — so the ticket's generation reflects this instant, never the later `register`
+        // instant (finding 1). Bound in production to `control.admissionTicket`; `nil` means the key
+        // is fenced (mid-revoke).
+        admissionTicket: @Sendable (ClientKeyID) -> AdmissionTicket?,
         deadline: Duration = authGateDeadline,
         sendChallenge: @Sendable (ServerChallenge) async throws -> Void
     ) async -> AuthGateOutcome {
@@ -875,6 +896,14 @@ public struct HostRunner: Sendable {
                                       nonce: nonce, hostCertSHA256: hostCertSHA256) else {
             return .rejected(.invalidSignature)
         }
+        // Order-A (design §3): capture the ticket HERE — immediately after signature verify,
+        // BEFORE the durable `authorizedClient` lookup below — so its generation reflects THIS
+        // authorization instant. A ticket stamped at register (after enrollment ceremony,
+        // scaffolding, ServerHello) would read a generation that already absorbed a revoke+re-enroll
+        // that happened in between, defeating the whole point of finding 1. `nil` = fenced
+        // (mid-revoke): reject before the durable lookup even runs.
+        let keyID = PairingStore.deviceID(forPublicKey: Data(auth.publicKey))
+        guard let ticket = admissionTicket(keyID) else { return .rejected(.revoking) }
         guard let record = await pairings.authorizedClient(forPublicKey: Data(auth.publicKey)) else {
             // han.3 hook: unknown key + VALID signature becomes the enrollment-ceremony snapshot
             // (spec §4-RESOLVED must-fix 1). The caller (`serveSession`) hands this to
@@ -882,7 +911,7 @@ public struct HostRunner: Sendable {
             return .unknownKey(publicKey: auth.publicKey)
         }
         try? await pairings.touch(id: record.id)  // lastSeen is best-effort
-        return .authenticated(deviceID: record.id)
+        return .authenticated(deviceID: record.id, ticket: ticket)
     }
 
     /// Runs the han.3 enrollment ceremony for an `.unknownKey` gate outcome (spec §4-RESOLVED

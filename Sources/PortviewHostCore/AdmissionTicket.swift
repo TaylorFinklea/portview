@@ -18,7 +18,7 @@ typealias SessionID = String
 ///
 /// A `nil` `keyID` marks a legacy bootstrap-admitted session (no device key proven): it skips the
 /// fence/generation check at register and is governed by `evictLegacyAdmitted` instead of revoke.
-struct AdmissionTicket: Sendable {
+struct AdmissionTicket: Sendable, Equatable {
     let keyID: ClientKeyID?
     let generation: UInt64
 }

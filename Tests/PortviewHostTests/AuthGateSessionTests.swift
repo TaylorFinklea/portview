@@ -283,7 +283,9 @@ import PortviewProtocol
 
         // Gate wiring proof: the outcome is authenticated with the enrolled id. (The empty test
         // registry then ends the session at the display guard — scaffolding is display-gated.)
-        #expect(await awaitOutcome(probe) == .authenticated(deviceID: expectedID))
+        // No `control` is passed to `runHost` here (nil), so the production seam's fallback grants
+        // a generation-0 ticket (see `serveSession`'s `admissionTicket` binding).
+        #expect(await awaitOutcome(probe) == .authenticated(deviceID: expectedID, ticket: AdmissionTicket(keyID: expectedID, generation: 0)))
     }
 
     @Test func nonHelloFirstFrameClosesWithoutAChallenge() async throws {
@@ -381,7 +383,8 @@ import PortviewProtocol
         // gate outright as `.authenticated`, since the enrollment persisted.
         let secondConn = try await dialAndAuthenticate(port: port, key: key, deviceName: "ignored")
         defer { secondConn.close() }
-        #expect(await awaitOutcome(probe, at: 1) == .authenticated(deviceID: expectedID))
+        // `control` is real here (never revoked) → the live registry's generation-0 ticket.
+        #expect(await awaitOutcome(probe, at: 1) == .authenticated(deviceID: expectedID, ticket: AdmissionTicket(keyID: expectedID, generation: 0)))
     }
 
     @Test func ceremonyDenyClosesSilentlyAndBlocksSource() async throws {
