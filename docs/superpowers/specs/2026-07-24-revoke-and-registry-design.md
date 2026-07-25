@@ -166,20 +166,39 @@ authorities — the shared durable `PairingStore` actor and the in-process `Host
    revoking the last device keeps the host `.required` (decision 2). Internally `revoke` records a
    **durable revocation intent** for K in its own keychain item **before** attempting the removal, and
    clears it only once the removal has landed (§6d) — that intent, not the in-memory fence, is what
-   makes step 5's fail-closed claim survive a process restart.
+   makes step 5's fail-closed claim survive a process restart, **when the intent write lands.**
+   `revoke` reports which of the two it got: `RevokeIncomplete.fencedDurably` or `.notDurable`.
 5. **Finalize — CONDITIONAL on durable success (H-c, fail CLOSED).**
    - **Durable revoke succeeded** → `control.endRevoke(lease: receipt.lease)`. `endRevoke` lifts the
      fence **iff** the lease it is handed is the current lease for K (matching-lease-required — a
      stale lease never lifts a newer op's fence). The generation stays bumped forever. The durable
-     intent is cleared by `revoke` itself, so a completed revoke leaves no fence of either kind.
-   - **Durable revoke threw** (keychain error) → **do NOT call `endRevoke`.** K is unauthorizable via
-     **two independent fences**, and the second is what makes the claim true beyond this process:
-     - the retained in-process fence (K ∈ `revoking`) — dies with the process;
-     - the **durable revocation intent** recorded in step 4 (§6d, Sol review I5) — `isAuthorized` /
-       `authorizedClient` fail closed for K while it exists, even from a FRESH `PairingStore` in a
-       brand-new process, and even though K's authorization record is still present. Without it, the
-       sequence "revoke → durable write throws → app quit/crash before Retry or Cancel" silently
-       re-admitted K at generation 0 on the next launch, with the UI showing nothing.
+     intent clear is *attempted* by `revoke` itself. **Honest bound (Sol re-review):** that final clear
+     is best-effort, so a successful revoke guarantees K is *gone from the authorization item* — it
+     does **not** guarantee "no intent left". A failed clear leaves an inert ORPHAN intent for a key
+     that is no longer enrolled: it authorizes nobody, `pendingRevocations()` filters it out, and the
+     next `enroll`/`revoke` of that id discharges it — but nothing sweeps it, and `enroll` now THROWS
+     rather than reporting success if it cannot discharge it (§6d item 8, R11).
+   - **Durable revoke threw** (keychain error) → **do NOT call `endRevoke`.** How many fences K is
+     behind depends on whether the intent write landed, and the two cases are **materially different**
+     — the UI must not render them as one state:
+     - **`.fencedDurably`** — the intent write landed. K is unauthorizable via **two independent
+       fences**: the retained in-process fence (K ∈ `revoking`, dies with the process) *and* the
+       **durable revocation intent** from step 4 (§6d, Sol review I5), for which `isAuthorized` /
+       `authorizedClient` fail closed even from a FRESH `PairingStore` in a brand-new process, and
+       even though K's authorization record is still present. Without it, "revoke → durable write
+       throws → app quit/crash before Retry or Cancel" silently re-admitted K at generation 0 on the
+       next launch with the UI showing nothing.
+     - **`.notDurable`** — the intent write ALSO failed. This is the natural CORRELATED case: both
+       items live in the same keychain, so whatever broke the authorization write usually broke the
+       intent write. **Nothing durable was recorded.** The ONLY thing denying K is the in-process
+       fence, and a quit/crash/restart **re-admits K**. This is not fixable by writing somewhere else
+       (if nothing durable can be written, nothing durable can deny from a cold store — an
+       implementation cannot conjure a restart-surviving denial out of a failed write), so the
+       requirement is to **fail LOUD**: `PairingStore.revoke` throws `.notDurable`,
+       `HostAppModel.nonDurableRevokes` records the id, and the row reads *"revoke NOT saved — regains
+       access if Portview restarts / blocked only while Portview runs"* instead of the plain "revoke
+       incomplete". Retry re-attempts the intent write on every call, so a transient keychain failure
+       **self-heals** into `.fencedDurably` and the warning clears (with a message saying so).
      The op is surfaced as **incomplete** with two authenticated actions, both of which must work with
      OR without an in-process lease (after a restart there is none to reuse):
      - **Retry** — re-run step 4. Same process: on success, `endRevoke(lease:)` under the *same*
@@ -195,10 +214,16 @@ authorities — the shared durable `PairingStore` actor and the in-process `Host
    The live kill in step 3 already happened and the generation bump is permanent regardless, so a
    failed durable step can never resurrect a killed session — it only leaves K live-*re-admittable*,
    which the retained fence blocks in-process and the durable intent blocks across restarts
-   (new-risk R5, now fail-closed *durably*).
+   (new-risk R5, fail-closed *durably* **iff** the intent write landed; `.notDurable` is
+   process-lifetime only and is reported as such).
 6. **UI refresh.** Reload `pairings.list()` **and** `pairings.pendingRevocations()` → the revoked row
    disappears (on durable success); a row whose intent is still recorded stays visible in the
-   incomplete state, on this launch and every later one until Retry or Cancel resolves it. **If
+   incomplete state, on this launch and every later one until Retry or Cancel resolves it. A
+   `.notDurable` row is visible only for THIS process's lifetime (there is nothing durable to rebuild
+   it from) — which is exactly why its copy has to say so while the user can still act on it.
+   `pendingRevocations()` returns `.unreadable` rather than an empty set when the intent item cannot be
+   read, and the surface renders "Pairing store unreadable — no device can connect…": on that read the
+   store denies EVERY device, so a clean empty list would be a lie in the reassuring direction. **If
    it was the last device (product decision 2):** surface the locked-out copy — e.g. "That was your
    last paired device. Portview now accepts no one until you re-pair in person." The host stays
    `.required`; bootstrap never reopens; there is no remote self-recovery. Intended fail-closed
@@ -906,32 +931,75 @@ set):
 2. While K's intent is recorded, `isAuthorized(K)` / `authorizedClient(K)` are **false** even though
    K's record still exists. This is what makes the step-5 claim true across a restart.
 3. The intent is cleared **only** on a durably-successful removal (or when K turns out not to be
-   enrolled — nothing to complete). A revoke that succeeds leaves no intent behind.
+   enrolled — nothing to complete). **Stated precisely (Sol re-review):** a revoke that succeeds
+   *attempts* the clear; the attempt is best-effort, so what a successful revoke guarantees is that K
+   is gone from the authorization item, **not** that no intent is left. A clear that fails leaves an
+   inert orphan — see the Residual below and item 8.
 4. `list()` remains the INVENTORY view and still shows an intent-fenced device (it IS still enrolled),
    with `pendingRevocations()` marking which rows are mid-revoke — so a fresh launch renders the
    "revoke incomplete" row with **Retry** (re-attempt the removal; no lease needed) and an
    **LAContext-gated Cancel** (`cancelRevocationIntent`, deliberately re-admitting the still-enrolled
-   key). Where the in-process lease still exists it is used exactly as before.
-5. Intent recording is **best-effort**: if the intent item cannot be read or written, the removal is
-   still attempted (no worse than before) — but a failed removal is always reported, never a false
-   success. A read failure writes nothing (a lone-entry write would drop another key's intent and
-   thereby re-admit it).
+   key). Where the in-process lease still exists it is used exactly as before. `pendingRevocations()`
+   returns `PendingRevocations.unreadable` — NOT an empty set — when the intent item cannot be read,
+   because authorization fails closed on that same read: reporting "nothing pending" while nothing is
+   authorized is the reassuring-direction lie this whole item exists to eliminate.
+5. Intent recording does not ABORT the revoke — if the intent item cannot be read or written the
+   removal is still attempted (no worse than before) — but the outcome is **reported, not swallowed**
+   (Sol re-review). When the removal then fails, `revoke` throws `RevokeIncomplete.fencedDurably` if
+   the intent landed and `.notDurable` if it did not, and the app renders the two differently (§1a
+   step 5). The correlated both-writes-fail case is the one the earlier best-effort code reported as a
+   clean fenced-incomplete while a restart re-admitted K; it cannot be fixed by writing elsewhere, so
+   the contract is the loud report plus a Retry that **re-attempts the intent write every time**, so a
+   transient failure self-heals into a durable fence. A read failure still writes nothing (a
+   lone-entry write would drop another key's intent and thereby re-admit it).
 6. `enroll` clears a pending intent for the key it enrolls: an attended, LAContext-gated re-pair is an
    explicit decision to admit, so a wedged revoke can never permanently lock out a device the owner
    just re-paired in person.
 7. Fail-closed reads: an unreadable or undecodable intent item authorizes **nobody** (symmetric with an
    unreadable authorization item, which already denies everyone); once read successfully the set is
    warm-cached, so a mid-session keychain lock does not brick a live host.
+8. **`enroll`'s clear THROWS; it is not best-effort** (Sol re-review, enroll-false-success). Because
+   the authorization view subtracts the intent set, an intent that cannot be re-read or re-written
+   leaves the key that was just enrolled **unauthorizable** — and the best-effort version let
+   `runEnrollmentCeremony` emit `.enrollmentResolved(approved: true)` for exactly that device, so the
+   UI claimed an authorization outcome the gate then refused. `enroll` now throws
+   `PairingStoreError.enrollmentStillFenced`, which `runEnrollmentCeremony` already handles by failing
+   closed (no ServerHello, no scaffolding). The authorization record stays written — the clear is
+   deliberately ordered after `persist` — so the device keeps a visible row to Cancel or repair from
+   rather than vanishing.
+9. **Not built here: recovery from a corrupt/unreadable intent item.** With the item unreadable there
+   is no in-app exit — `cancelRevocationIntent` re-reads the same broken item and throws, and `enroll`
+   now (correctly) refuses. An attended, LAContext-gated store-wide repair that OVERWRITES the item
+   without reading it — explicitly discarding every pending intent, i.e. re-admitting every wedged
+   revoke — is bead **`portview-oj5`**. Until it lands, the recovery is manual keychain deletion, and
+   the UI's job is limited to saying the store is unreadable.
 
 **Cross-process side-effect (a bonus, still not a live kill).** Because the intent lives in the shared
 keychain, the OTHER process (the CLI host) also denies K once it reads the intent item — so a wedged
 revoke fails closed beyond the app process too. It is not synchronous: a CLI whose intent set is
 already warm keeps serving it, so §6c's "no cross-process live invalidation" claim stands unchanged.
 
-**Residual (accepted, inert).** If the final clear fails, an ORPHAN intent for a no-longer-enrolled key
-remains: it authorizes nobody (the key is gone), `pendingRevocations()` filters it out (it intersects
-with the enrolled set), and the next `enroll`/`revoke` of that id clears it. Same shape as §6c/R7's
-orphan-lastSeen residual.
+**Residual 1 (accepted, inert).** If the final clear fails, an ORPHAN intent for a no-longer-enrolled
+key remains: it authorizes nobody (the key is gone), `pendingRevocations()` filters it out (it
+intersects with the enrolled set), and the next `enroll`/`revoke` of that id discharges it. Same shape
+as §6c/R7's orphan-lastSeen residual — **including the unbounded-growth part**: nothing sweeps orphan
+intents either, so the item grows across revoke churn where the clear keeps failing. Cosmetic, and the
+filtering keeps it inert; a sweep is out of scope for this wave alongside R7's (`portview-1z1`).
+
+**Residual 2 (accepted, REPORTED, not fixable here) — the correlated double-write failure.** The intent
+item and the authorization item live in one keychain, so the realistic failure mode breaks both writes
+at once. Then nothing durable is recorded, and a restart re-admits K — which recreates the exact bug
+the intent was introduced to fix. **No implementation closes this**: a denial that survives a restart
+has to be *written somewhere*, and the premise is that nothing can be written (inventing a second
+storage location outside the keychain trades one durability dependency for a weaker one and is
+explicitly rejected). The reviewer's proposed decisive test — fail both writes, reset the injections,
+construct a fresh store, assert K still denied — is therefore **unsatisfiable by construction**, and
+chasing it would only produce a fake mechanism. What IS required, and is implemented and tested:
+`revoke` distinguishes the case (`.notDurable` vs `.fencedDurably`), the app records it
+(`HostAppModel.nonDurableRevokes`) and the row says *"revoke NOT saved — regains access if Portview
+restarts"*, and every Retry re-attempts the intent write so a transient failure self-heals. Regression:
+`PairingStoreTests.revokeSurfacesANonDurableFenceWhenTheIntentWriteAlsoFails` (which asserts the honest
+re-admission outcome too) and `…/retryRecordsTheIntentTheFirstAttemptCouldNotWrite`.
 
 ---
 
@@ -998,15 +1066,29 @@ orphan-lastSeen residual.
    `RevokeReceipt`. `endRevoke`/`cancelRevoke` require the **matching** lease. A durable-write failure
    **retains** the fence (K stays unauthorizable) with Retry + an authenticated Cancel — never a silent
    fence-lift that re-admits a still-enrolled key.
-6b. **…and its fail-closed state is DURABLE, not process-lifetime (§6d, Sol review I5).** A revocation
-   intent for K is recorded in its own keychain item **before** the durable removal is attempted and
-   cleared only once that removal lands; while it is recorded, `isAuthorized`/`authorizedClient` deny K
-   even from a fresh `PairingStore` in a new process, and even though K's record still exists. So
-   "revoke → durable write throws → quit/crash before Retry or Cancel" cannot silently re-admit K on
-   the next launch. The incomplete state is visible to the UI (`pendingRevocations()`), Retry works
-   without a lease, and Cancel re-admits only by durably removing the intent (LAContext-gated). An
-   attended re-enrollment of the same key supersedes a pending intent, so no wedged revoke can
-   permanently lock out a device the owner re-paired in person.
+6b. **…and its fail-closed state is DURABLE — IFF the intent write landed; otherwise it is
+   process-lifetime and SAID SO (§6d, Sol review I5 + re-review).** A revocation intent for K is
+   recorded in its own keychain item **before** the durable removal is attempted and cleared only once
+   that removal lands. Split precisely, because the unconditional phrasing was false:
+   - **Intent write succeeded** → while it is recorded, `isAuthorized`/`authorizedClient` deny K even
+     from a fresh `PairingStore` in a new process, and even though K's record still exists. So
+     "revoke → durable write throws → quit/crash before Retry or Cancel" cannot silently re-admit K on
+     the next launch. `revoke` reports this as `RevokeIncomplete.fencedDurably`.
+   - **Intent write failed too** (the correlated one-keychain case) → **nothing durable exists** and a
+     restart DOES re-admit K; the in-process fence is the only thing holding it. The invariant here is
+     not a denial — it is **honesty**: `revoke` throws `RevokeIncomplete.notDurable`, and the row must
+     render the distinct "regains access if Portview restarts" copy rather than the same "revoke
+     incomplete" the durable case shows. Silence, or a shared rendering, would be the original bug.
+     Every Retry re-attempts the intent write, so a transient failure promotes the row to durable.
+   - **A successful revoke does not guarantee "no intent left"** — the final clear is best-effort and a
+     failure leaves an inert orphan (§6d Residual 1, R11). What it guarantees is that K is gone from
+     the authorization item.
+   The incomplete state is visible to the UI (`pendingRevocations()`, which reports `.unreadable`
+   rather than an empty set when the item can't be read), Retry works without a lease, and Cancel
+   re-admits only by durably removing the intent (LAContext-gated). An attended re-enrollment of the
+   same key supersedes a pending intent, so no wedged revoke can permanently lock out a device the
+   owner re-paired in person — and if that clear cannot be made durable, `enroll` **throws** instead of
+   reporting an enrollment the gate would refuse (§6d item 8).
 6c. **Authorization mutations never write from a warm cache (§6d, Sol review C2).** `enroll`/`revoke`
    and every intent write re-read their durable item immediately before the read-modify-write and
    propagate a read failure. The authorization READ path keeps its warm cache on purpose (mid-session
@@ -1153,7 +1235,8 @@ orphan-lastSeen residual.
   throw so `revoke(K)` fails, then build a **FRESH** `PairingStore` over the same items (= the next
   process): `isAuthorized(K)`/`authorizedClient(K)` are false, `pendingRevocations() == [K]`, and
   `list()` still contains K so the UI can finish the op
-  (`recordedRevocationIntentSurvivesARestartAndFailsClosed`). Then: Retry with **no lease** completes it
+  (`recordedRevocationIntentSurvivesARestartAndFailsClosed`, which also pins that this failure reports
+  `RevokeIncomplete.fencedDurably`). Then: Retry with **no lease** completes it
   and clears the intent (`retryAfterARestartCompletesTheRevokeAndClearsTheIntent`);
   `cancelRevocationIntent` re-admits durably (`cancelRevocationIntentReAdmitsTheStillEnrolledDevice`)
   and **throws rather than reporting a false re-admission** when the intent item can't be written
@@ -1165,6 +1248,30 @@ orphan-lastSeen residual.
   (`aPendingIntentForOneKeyNeverFencesAnother`); a cold unreadable or corrupt intent item authorizes
   nobody (`unreadableIntentItemFailsClosedOnAColdRead`, `corruptIntentBlobFailsClosed`) while a WARM
   set survives a mid-session lock (`warmIntentCacheKeepsAuthorizingWhenTheIntentItemLocksMidSession`).
+
+  **Test-honesty note (Sol re-review; five of the above previously passed for the wrong reason).**
+  "Leaves no intent behind" must be asserted against the DURABLE intent blob (`durableIntents(_:)`
+  decodes the injected item directly), never inferred from a re-enroll — `enroll` clears the intent
+  itself, so a re-enroll-based assertion holds whether or not `revoke` ever cleared anything. Likewise
+  `pendingRevocations()` cannot prove clear-on-completion (it intersects with the enrolled set, so an
+  orphan for the just-removed key is filtered away), the restart tests must check the restarted store
+  **before** the Retry (that is the only assertion the durable-intent mechanism is load-bearing for),
+  and the "a second wedged revoke doesn't drop the first's intent" counterexample needs a **SECOND
+  actor warmed BEFORE the first actor's intent write** — with one actor its intent cache already holds
+  the first id, so a `mutableIntents()` that wrongly served the cache still passed.
+- **Non-durable revoke, reported not swallowed (§6d item 5, Sol re-review):** fail the intent write AND
+  the authorization write → `revoke` throws `RevokeIncomplete.notDurable` (distinct from
+  `.fencedDurably`), and a fresh instance genuinely re-admits K — the honest outcome, asserted rather
+  than papered over (`revokeSurfacesANonDurableFenceWhenTheIntentWriteAlsoFails`). Then let the intent
+  write recover while the authorization write keeps failing: the next `revoke` (= the UI's Retry)
+  promotes the same op to `.fencedDurably` and a fresh instance denies K
+  (`retryRecordsTheIntentTheFirstAttemptCouldNotWrite`).
+- **No false enrollment success (§6d item 8, Sol re-review):** with a pending intent that cannot be
+  written, `enroll` **throws** instead of persisting the record and reporting approval for a key the
+  gate still denies (`enrollThrowsRatherThanReportingSuccessForAKeyThatStaysFenced`); same when the
+  intent item is undecodable so the clear cannot even be attempted
+  (`enrollThrowsWhenAPendingIntentCannotEvenBeRead`). And the UI view never launders an unreadable
+  intent item into a reassuring empty set (`pendingRevocationsReportsUnreadableRatherThanACleanEmptySet`).
 - **Window lease (finding 9a/9b, CONFIRMED):** a `.sasCode` stamped with a prior `WindowLease` is
   ignored while a newer window is open; `claimCodeDisplay` rejects a claim whose lease is not the
   current open window's.
@@ -1193,16 +1300,33 @@ orphan-lastSeen residual.
 
 - **Cross-process live invalidation** (shared IPC authority / cache-invalidation signal) — §6c
   documents the semantic; synchronous cross-process kill is not built.
-- **A genuine cross-process CAS for the pairings item** — tracked as bead **`portview-auf`**. The H-a
-  fix removes `touch` from the authorization-write path entirely (separate lastSeen storage) and the C2
-  fix (§6d) makes every remaining mutation re-read the durable item immediately before its
-  read-modify-write, so what is left is genuinely last-writer-wins **over a fresh read**: two
-  `enroll`/`revoke` RMWs that interleave *inside* that narrow window can still lose one update, and a
-  lost `revoke` update means a revoked key stays enrolled (the UI reported success). Accepted for this
-  wave because those operations are attended, rare, and serialized in practice — and because a failed
-  revoke now leaves a durable intent (§6d), so the fail-closed denial does not depend on the write
-  landing. What is NOT built: a compare-and-swap (generation/etag on the blob, or a lock item) that
-  would make the RMW atomic across processes. `portview-auf` owns that.
+- **A genuine cross-process CAS for the pairings items — BOTH the authorization blob AND the
+  revocation-intent blob** — tracked as bead **`portview-auf`**. The H-a fix removes `touch` from the
+  authorization-write path entirely (separate lastSeen storage) and the C2 fix (§6d) makes every
+  remaining mutation re-read the durable item immediately before its read-modify-write, so what is left
+  is genuinely last-writer-wins **over a fresh read**: two `enroll`/`revoke` RMWs that interleave
+  *inside* that narrow window can still lose one update, and a lost `revoke` update means a revoked key
+  stays enrolled (the UI reported success).
+
+  **The intent item does not rescue this, and is subject to the same defect (Sol re-review).** The
+  earlier text claimed a lost authorization update was still covered because the intent denies K. That
+  reasoning is INVALID: the intent set is also a whole-blob RMW with no CAS, so it loses concurrent
+  writes in exactly the same shape — P1 reads `{}`, P2 reads `{}`, P1 writes `{K}`, P2 writes `{J}`,
+  and **K's intent is gone**. Both writes reported success and K is neither removed nor fenced. So the
+  honest statement is: a lost update on the authorization blob is *usually* covered by the intent,
+  except when the intent write is the one that loses — and nothing in this wave orders the two. Still
+  accepted for this wave because these operations are attended, rare, and serialized in practice (one
+  human, one app, at one Mac), but `portview-auf` must cover **both items**, not just the authorization
+  one. What is NOT built: a compare-and-swap (generation/etag on the blob, or a lock item) that would
+  make either RMW atomic across processes.
+- **Releasing OS input state stranded by a revoke** — bead **`portview-5a5`**. Input is gated
+  per-CGEvent, so a revoke landing BETWEEN a key-down and its key-up (or a mouse-down and its up) lets
+  the down through and refuses the up, leaving a stuck/repeating key or a still-pressed drag on the
+  host after the device is gone. §4's "one irreducible effect" bound is per-event and does **not**
+  cover paired-edge state — this is a named residual of the revoke design, not an oversight in it. The
+  remediation (track pressed edges per injector; emit the matching ups as a teardown pass that is
+  deliberately NOT gated by the now-invalid capability, because the release IS the remediation) is
+  owned by `portview-5a5`.
 - **A typed "revoked" wire signal** to the client — revoke is a silent synchronous close by design
   (invariant 5, no-oracle stance). The client infers it from the drop + gate failure.
 - **Key rotation ceremony** and **mTLS upgrade** (future beads).
@@ -1236,7 +1360,9 @@ orphan-lastSeen residual.
   `touch`.
 - **R5 — durable-revoke failure after a successful live kill, now FAIL-CLOSED (H-c).** If
   `pairings.revoke` throws, the live sessions are already dead and the generation stays bumped, and the
-  fence is **retained** (K unauthorizable) instead of lifted — so K cannot re-admit. Verify: the UI
+  fence is **retained** (K unauthorizable) instead of lifted — so K cannot re-admit *in this process*.
+  Beyond it, see invariant 6b: durable iff the revocation intent landed (`.fencedDurably`); when it did
+  not (`.notDurable`) a restart re-admits K and the UI is required to say so. Verify: the UI
   surfaces the incomplete state, Retry re-attempts under the same lease and lifts on success, and the
   LAContext-gated Cancel is the only path that lifts the fence without a durable revoke (deliberate,
   authenticated re-admission of a still-enrolled key).
@@ -1248,9 +1374,20 @@ orphan-lastSeen residual.
   processes racing `touch` on the lastSeen item lose one update (last-writer-wins on the whole
   lastSeen blob) — **cosmetic**, `lastSeen` never gates authorization. A `touch(K)` racing a `revoke(K)`
   can leave an **orphan** `lastSeen[K]` for a no-longer-authorized key — harmless because `list()`
-  surfaces only keys present in the *authorization* item and can prune orphans. Verify: the lastSeen
-  item is read strictly best-effort and never on the authorization path; `list()`/a sweep prunes
-  lastSeen keys absent from the auth set so the item cannot grow unboundedly across enroll/revoke churn.
+  surfaces only keys present in the *authorization* item.
+
+  **Correction (Sol re-review): nothing prunes, so the item CAN grow unboundedly.** The earlier
+  sentence claimed "`list()`/a sweep prunes lastSeen keys absent from the auth set so the item cannot
+  grow unboundedly" — `list()` does no such thing. It iterates the enrolled set and joins values out of
+  the lastSeen map (`PairingStore.list()`), filtering the *rendered inventory* only; it never writes a
+  pruned map back, and there is no sweep anywhere. So every orphan produced by a `touch(K)` racing a
+  `revoke(K)`, or by a failed best-effort `deleteLastSeen`, is **permanent**. It stays cosmetic — an
+  orphan can never re-authorize, because authorization reads a different item entirely — but the growth
+  bound does not exist today. The deferred work is bead **`portview-1z1`** (prune in `list()` or a
+  periodic sweep, keeping `list()` cheap and never letting a lastSeen failure touch authorization); the
+  same gap applies to orphan revocation *intents* (§6d Residual 1). Verify what is actually true: the
+  lastSeen item is read strictly best-effort and never on the authorization path, and no orphan is ever
+  surfaced (`PairingStoreTests.listDoesNotSurfaceOrphanLastSeenForARevokedKey`).
 - **R8 — out-of-lock mark window, now split mark/drain (H-b × H-d interaction; REVISED by Sol review
   C1).** Moving withdrawal out of `HostControl.lock` (R3-of-H-b) opens a brief window between the
   under-lock snapshot/unlink and the out-of-lock withdrawal, during which one already-in-flight
@@ -1319,13 +1456,33 @@ orphan-lastSeen residual.
   warm-cached after the first successful read (a mid-session lock does not brick a live host), it is
   read-only on the authorization path (writes happen only in `revoke`/`enroll`/`cancelRevocationIntent`,
   all attended and rare), and an intent write can never add or drop an enrolled key (separate item).
+
+  **Three honest consequences of putting it on the authorization path (Sol re-review):**
+  - **An orphan intent after a SUCCESSFUL revoke is real, and is not swept.** The final clear is
+    best-effort, so "a completed revoke leaves no intent behind" is a *goal*, not a guarantee. The
+    orphan authorizes nobody (its key is no longer enrolled) and `pendingRevocations()` filters it out
+    by intersecting with the enrolled set, but it persists until the next `enroll`/`revoke` of that id
+    — and it accumulates, exactly like R7's orphan lastSeen entries (`portview-1z1` covers the sweep).
+  - **A corrupt/unreadable intent item is a LOCKOUT with no in-app exit today.** It denies everyone,
+    `cancelRevocationIntent` cannot help (it re-reads the same broken item and throws), and `enroll`
+    now correctly refuses rather than reporting a false success — which is right, and also means the
+    only recovery is manual keychain deletion. The attended, LAContext-gated store-wide repair that
+    overwrites the item without reading it is bead **`portview-oj5`**; the UI's job until then is to
+    say the store is unreadable (`PendingRevocations.unreadable` → the popover banner) instead of
+    rendering a clean list.
+  - **The intent item is a whole-blob RMW with no CAS**, so two concurrent intent writes lose one —
+    including one that carries a pending fence (§9, `portview-auf` now scoped to both items).
+
   Verify: no authorization path writes the intent item; a warm set survives a locked keychain; an
-  orphan intent (clear failed after a successful removal) authorizes nobody, is filtered out of
-  `pendingRevocations()`, and is cleared by the next `enroll`/`revoke` of that id; an attended
-  re-enrollment clears a pending intent so a wedged revoke cannot permanently lock out a re-paired
-  device. Regressions: `PairingStoreTests.recordedRevocationIntentSurvivesARestartAndFailsClosed`,
+  unreadable item is reported as `.unreadable` and never as an empty pending set; an enrollment over an
+  undischargeable intent THROWS rather than reporting approval; an attended re-enrollment clears a
+  pending intent so a wedged revoke cannot permanently lock out a re-paired device. Regressions:
+  `PairingStoreTests.recordedRevocationIntentSurvivesARestartAndFailsClosed`,
   `…/attendedReEnrollClearsAStaleRevocationIntent`,
-  `…/warmIntentCacheKeepsAuthorizingWhenTheIntentItemLocksMidSession`.
+  `…/warmIntentCacheKeepsAuthorizingWhenTheIntentItemLocksMidSession`,
+  `…/enrollThrowsRatherThanReportingSuccessForAKeyThatStaysFenced`,
+  `…/enrollThrowsWhenAPendingIntentCannotEvenBeRead`,
+  `…/pendingRevocationsReportsUnreadableRatherThanACleanEmptySet`.
 - **R10 — NEW: shutdown-path withdrawal is a MARK, not a drain (Sol review I3).** `serve`'s
   cancellation handler now marks the session capability (through `SessionCapabilityBox`) before
   `connection.close()`, so Invalidate-First holds on host shutdown. It deliberately does **not**

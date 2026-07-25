@@ -141,11 +141,31 @@ final class HostAppModel {
     /// `revokeIncomplete`).
     private(set) var pendingRevocations: Set<String> = []
 
+    /// Devices whose revoke could not be recorded DURABLY AT ALL — `PairingStore.revoke` threw
+    /// `RevokeIncomplete.notDurable`, meaning neither the removal nor the revocation intent landed
+    /// (the correlated one-keychain failure). These rows are NOT the same as `pendingRevocations`:
+    /// the only thing denying the device is this process's in-memory `HostControl` fence, so quitting
+    /// or crashing Portview RE-ADMITS it. The row and its copy must say that out loud (design §1a
+    /// step 5, §7 invariant 6b) — a silent "revoke incomplete" here would be the same false-assurance
+    /// bug the durable intent was introduced to fix.
+    private(set) var nonDurableRevokes: Set<String> = []
+
+    /// True when the intent item itself could not be read on the last refresh. Authorization fails
+    /// CLOSED on that read (`PairingStore.authorizedMap`), so every device is currently denied while
+    /// the paired list still renders — the surface must say the pairing store is unreadable rather
+    /// than show a clean, reassuring list (`PendingRevocations.unreadable`).
+    private(set) var pairingStoreUnreadable = false
+
     /// True when this device's revoke is incomplete and the row must offer Retry / Cancel instead of
-    /// Revoke: either this process holds the retained lease, or a durable intent survived a restart.
+    /// Revoke: this process holds the retained lease, a durable intent survived a restart, or the
+    /// revoke could not be recorded durably at all.
     func revokeIncomplete(_ id: String) -> Bool {
-        revokeFailures[id] != nil || pendingRevocations.contains(id)
+        revokeFailures[id] != nil || pendingRevocations.contains(id) || nonDurableRevokes.contains(id)
     }
+
+    /// True when this device's incomplete revoke is NOT durable — the row must warn that the device
+    /// regains access if Portview restarts, instead of the plain "revoke incomplete" copy.
+    func revokeNotDurable(_ id: String) -> Bool { nonDurableRevokes.contains(id) }
 
     /// True when the host has been through enrollment but now has ZERO paired devices — the
     /// last-device lockout (product decision 2): Portview accepts no one until an in-person re-pair.
@@ -170,7 +190,7 @@ final class HostAppModel {
         // Durable incomplete-revoke state (§6d): read on EVERY refresh — including the first one after
         // launch — so a revoke wedged in a previous process still surfaces Retry / Cancel on its row.
         // `list()` deliberately still contains those devices (they remain enrolled, just unauthorizable).
-        pendingRevocations = await pairings.pendingRevocations()
+        await refreshPendingRevocations()
         // Locked-out (decision 2): distinguish enrolled-then-emptied from a fresh never-enrolled
         // install. `.populated` = migration completed (a device was enrolled at some point), so zero
         // devices now is the in-person-re-pair lockout; `.empty`/`.unreadable` → no banner. Only hit
@@ -180,6 +200,26 @@ final class HostAppModel {
         } else {
             lockedOut = false
         }
+    }
+
+    /// Re-read the durable revocation-intent view. `.unreadable` is NOT folded into an empty set: on
+    /// that read `PairingStore` denies every device, so replacing `pendingRevocations` with `[]` would
+    /// silently drop every incomplete-revoke row (and its Retry / Cancel) at the moment nothing is
+    /// authorized. Keep the last known set and raise `pairingStoreUnreadable` so the surface says so.
+    private func refreshPendingRevocations() async {
+        switch await pairings.pendingRevocations() {
+        case .known(let ids):
+            pendingRevocations = ids
+            pairingStoreUnreadable = false
+        case .unreadable:
+            pairingStoreUnreadable = true
+        }
+    }
+
+    /// The display name for a device id, for user-facing copy; falls back to a generic noun when the
+    /// row is not in the current snapshot.
+    private func deviceName(_ id: String) -> String {
+        enrolledDevices.first { $0.id == id }?.name ?? "That device"
     }
 
     /// Revoke a paired device (design §1a steps 2–6). The confirmation dialog (product decision 1)
@@ -204,6 +244,7 @@ final class HostAppModel {
                 try await self.pairings.revoke(id: id)               // step 4: durable removal
                 self.control.endRevoke(lease: receipt.lease)         // step 5: finalize on success
                 self.revokeFailures[id] = nil
+                self.nonDurableRevokes.remove(id)
                 await self.refreshEnrolledDevices()                  // step 6: revoked row disappears
                 self.noteLastDeviceIfEmpty()
             } catch {
@@ -214,7 +255,8 @@ final class HostAppModel {
                 // Pick up the DURABLE intent `pairings.revoke` recorded before it attempted the
                 // removal (§6d): that is what keeps this row incomplete — and K denied — if the app
                 // never gets a Retry/Cancel and is quit or crashes before one lands.
-                self.pendingRevocations = await self.pairings.pendingRevocations()
+                await self.refreshPendingRevocations()
+                self.noteRevokeDurability(id, error: error)
             }
         }
     }
@@ -237,12 +279,37 @@ final class HostAppModel {
                 try await self.pairings.revoke(id: id)
                 if let lease = self.revokeFailures[id] { self.control.endRevoke(lease: lease) }
                 self.revokeFailures[id] = nil
+                self.nonDurableRevokes.remove(id)
                 await self.refreshEnrolledDevices()  // also refreshes `pendingRevocations`
                 self.noteLastDeviceIfEmpty()
             } catch {
-                // Still failing — keep the fence + lease + durable intent; the row remains in the
-                // Retry/Cancel state, and K stays denied even across a restart.
+                // Still failing — keep the fence + lease; the row remains in the Retry/Cancel state.
+                // But re-read the durability of the fence: `pairings.revoke` re-attempts the INTENT
+                // write on every call, so a Retry after a transient keychain failure can promote a
+                // not-durable revoke into a durably-fenced one even while the removal keeps failing.
+                // That promotion has to reach the row, or the user is left staring at a stale "this
+                // device regains access if Portview restarts" warning that is no longer true.
+                await self.refreshPendingRevocations()
+                self.noteRevokeDurability(id, error: error)
             }
+        }
+    }
+
+    /// Classify a failed durable revoke and tell the user the TRUTH about which fence they have
+    /// (Sol re-review I5 follow-up). `.fencedDurably` = denied across a restart, retry at leisure.
+    /// `.notDurable` = nothing durable was recorded, so only this process is holding the device out
+    /// and a quit/crash re-admits it — that must never render as a quiet "revoke incomplete". Any
+    /// other error type is treated as not-durable: unclassified means unproven, and the safe lie to
+    /// avoid is the reassuring one.
+    private func noteRevokeDurability(_ id: String, error: any Error) {
+        let durablyFenced = (error as? RevokeIncomplete)?.isDurablyFenced ?? false
+        if durablyFenced {
+            // Promotion (Retry recorded the intent this time): drop the warning and say so once.
+            if nonDurableRevokes.remove(id) != nil {
+                messages.append("\(deviceName(id)) is now blocked even if Portview restarts, but the revoke still hasn't finished — keep retrying.")
+            }
+        } else if nonDurableRevokes.insert(id).inserted {
+            messages.append("Couldn't record that revoke — \(deviceName(id)) is blocked right now, but it REGAINS ACCESS if Portview restarts. Retry until this warning clears.")
         }
     }
 
@@ -274,6 +341,9 @@ final class HostAppModel {
                 self.control.cancelRevoke(lease: lease)  // lift fence WITHOUT durable revoke: re-admit K
             }
             self.revokeFailures[id] = nil
+            // The device is deliberately re-admitted, so the not-durable warning is spent: there is no
+            // longer a revoke whose durability could be misreported.
+            self.nonDurableRevokes.remove(id)
             await self.refreshEnrolledDevices()       // the still-enrolled device reappears in the list
         }
     }

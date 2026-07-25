@@ -380,7 +380,12 @@ import PortviewProtocol
         try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
 
         auth.failWrite = true  // the durable removal throws — the record stays in the item
-        await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
+        var thrown: (any Error)?
+        do { try await pairing.revoke(id: c.id) } catch { thrown = error }
+        // The intent item is healthy here, so the failure must report the DURABLE fence — the case
+        // that is genuinely safe across a restart (contrast:
+        // `revokeSurfacesANonDurableFenceWhenTheIntentWriteAlsoFails`).
+        #expect(try #require(thrown as? RevokeIncomplete).isDurablyFenced == true)
         auth.failWrite = false
         #expect(await pairing.isAuthorized(id: c.id) == false)  // fenced in this process too
 
@@ -396,6 +401,15 @@ import PortviewProtocol
         #expect(await restarted.list().map(\.id) == [c.id])
     }
 
+    /// Decodes the DURABLE intent blob straight out of the injected item. Every "…leaves no intent
+    /// behind" assertion goes through this rather than through a re-enroll: `enroll` clears the intent
+    /// itself, so a re-enroll-based assertion passes even when the mechanism under test never ran
+    /// (Sol re-review, test-honesty finding). An item that was never written decodes as empty.
+    private func durableIntents(_ store: MemoryStore) throws -> Set<String> {
+        guard let raw = store.rawBlob() else { return [] }
+        return try JSONDecoder().decode(Set<String>.self, from: raw)
+    }
+
     @Test func retryAfterARestartCompletesTheRevokeAndClearsTheIntent() async throws {
         let auth = MemoryStore()
         let intents = MemoryStore()
@@ -407,20 +421,22 @@ import PortviewProtocol
         await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
         auth.failWrite = false
 
-        // Restart, then Retry WITHOUT a lease (there is none to reuse in a fresh process).
+        // Restart. Check the restarted store BEFORE the Retry: without the durable intent mechanism
+        // this fresh instance would happily authorize K (its record is still in the auth item and no
+        // in-process fence survived), so these two assertions are what make the test require the
+        // mechanism at all — the post-Retry ones pass with or without it.
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: c.id) == false)
+        #expect(await restarted.pendingRevocations() == .known([c.id]))
+
+        // Retry WITHOUT a lease (there is none to reuse in a fresh process).
         try await restarted.revoke(id: c.id)
         #expect(await restarted.isAuthorized(id: c.id) == false)
         #expect(await restarted.list().isEmpty)
-
-        // The completed revoke left NO intent behind: re-enrolling the same key re-admits it (a
-        // lingering intent would silently fence a legitimately re-paired device forever).
-        try await restarted.enroll(publicKey: c.publicKey, deviceName: "iPhone again")
-        #expect(await restarted.isAuthorized(id: c.id) == true)
-        let afterRestartAgain = PairingStore(store: auth, revokeIntentStore: intents,
-                                             now: { Date(timeIntervalSince1970: 4000) })
-        #expect(await afterRestartAgain.isAuthorized(id: c.id) == true)
+        // The completed revoke left NO intent behind — read from the durable item, NOT inferred from
+        // a re-enroll (which would clear the intent itself and mask a lingering one).
+        #expect(try durableIntents(intents).isEmpty)
     }
 
     @Test func successfulRevokeLeavesNoIntentBehind() async throws {
@@ -431,12 +447,14 @@ import PortviewProtocol
         let c = newClient()
         try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
         try await pairing.revoke(id: c.id)
-        // Observable proof from a FRESH instance: a re-enroll of the same key is authorized, which a
-        // lingering intent would block.
+        // Direct evidence from the DURABLE intent item: `revoke` recorded an intent on entry and must
+        // have discharged it. Deliberately NOT a re-enroll assertion — `enroll` clears the intent, so
+        // that version passed even when `revoke` never cleared anything.
+        #expect(try durableIntents(intents).isEmpty)
+        // ...and a fresh instance (cold intent cache) reads the same empty set.
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
-        try await restarted.enroll(publicKey: c.publicKey, deviceName: "iPhone")
-        #expect(await restarted.isAuthorized(id: c.id) == true)
+        #expect(await restarted.pendingRevocations() == .known([]))
     }
 
     @Test func attendedReEnrollClearsAStaleRevocationIntent() async throws {
@@ -477,6 +495,137 @@ import PortviewProtocol
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
         #expect(await restarted.isAuthorized(id: c.id) == false)
+    }
+
+    /// THE honest I5 regression (Sol re-review). When the intent write AND the authorization write
+    /// both fail — the natural CORRELATED case, since both items live in the same keychain — nothing
+    /// durable was recorded and a host restart re-admits the device. No implementation can deny from
+    /// a cold store when nothing could be written, so the contract is that `revoke` must SAY SO:
+    /// `.notDurable`, distinguishable from the `.fencedDurably` it reports when the intent landed.
+    /// Reporting a clean fenced-incomplete here is the false assurance the intent item exists to kill.
+    @Test func revokeSurfacesANonDurableFenceWhenTheIntentWriteAlsoFails() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+
+        intents.failWrite = true  // the intent cannot be recorded...
+        auth.failWrite = true     // ...and neither can the removal (one keychain, correlated failure)
+        var thrown: (any Error)?
+        do { try await pairing.revoke(id: c.id) } catch { thrown = error }
+        #expect(try #require(thrown as? RevokeIncomplete).isDurablyFenced == false)
+        intents.failWrite = false
+        auth.failWrite = false
+
+        // ...and the report is TRUE, which is why it has to be surfaced: nothing durable exists, so a
+        // fresh process re-admits the device. This assertion documents the honest residual — the fix
+        // is the loud report + the self-healing Retry below, not a denial that cannot be persisted.
+        #expect(try durableIntents(intents).isEmpty)
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: c.id) == true)
+    }
+
+    /// Ruling item 2: Retry must RE-ATTEMPT the intent write, so a transient keychain failure heals
+    /// into a durable fence instead of staying non-durable until the app quits.
+    @Test func retryRecordsTheIntentTheFirstAttemptCouldNotWrite() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+
+        intents.failWrite = true
+        auth.failWrite = true
+        var first: (any Error)?
+        do { try await pairing.revoke(id: c.id) } catch { first = error }
+        #expect(try #require(first as? RevokeIncomplete).isDurablyFenced == false)
+
+        // The keychain recovers enough for the INTENT write but not the authorization write: the same
+        // `revoke` call the UI's Retry makes must promote the row to a durable fence.
+        intents.failWrite = false
+        var second: (any Error)?
+        do { try await pairing.revoke(id: c.id) } catch { second = error }
+        #expect(try #require(second as? RevokeIncomplete).isDurablyFenced == true)
+        auth.failWrite = false
+
+        #expect(try durableIntents(intents) == [c.id])
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: c.id) == false)
+        #expect(await restarted.pendingRevocations() == .known([c.id]))
+    }
+
+    /// The enroll-false-success finding. `authorizedMap()` subtracts pending intents, so a clear that
+    /// cannot be made durable leaves the key that was JUST enrolled unauthorizable — and the
+    /// best-effort clear let `runEnrollmentCeremony` emit `.enrollmentResolved(approved: true)` for it.
+    /// Enrollment must fail closed instead: the UI never claims an authorization outcome the gate
+    /// contradicts.
+    @Test func enrollThrowsRatherThanReportingSuccessForAKeyThatStaysFenced() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        auth.failWrite = true
+        await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
+        auth.failWrite = false
+        #expect(await pairing.isAuthorized(id: c.id) == false)  // fenced by the durable intent
+
+        intents.failWrite = true  // the attended re-pair cannot lift the fence
+        await #expect(throws: (any Error).self) {
+            try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone re-paired")
+        }
+        intents.failWrite = false
+        // The refusal was honest: the key really is still denied, in this process and the next.
+        #expect(await pairing.isAuthorized(id: c.id) == false)
+        #expect(try durableIntents(intents) == [c.id])
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: c.id) == false)
+        #expect(await restarted.pendingRevocations() == .known([c.id]))
+    }
+
+    /// Same false success via the UNREADABLE intent item rather than a failed write: a cold
+    /// thrown/undecodable intent read makes `authorizedMap()` deny EVERYONE (correct, fail closed), so
+    /// an enrollment completed over it would be reported as approved and then refused at the gate.
+    @Test func enrollThrowsWhenAPendingIntentCannotEvenBeRead() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore(Data([0xDE, 0xAD]))  // undecodable intent blob
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        await #expect(throws: (any Error).self) {
+            try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        }
+        #expect(await pairing.isAuthorized(id: c.id) == false)
+        // The authorization record WAS written (the clear is deliberately ordered after `persist`), so
+        // the device keeps a visible row the owner can act on rather than vanishing — and the surface
+        // is told the store is unreadable rather than shown a clean, empty pending list.
+        #expect(await pairing.list().map(\.id) == [c.id])
+        #expect(await pairing.pendingRevocations() == .unreadable)
+    }
+
+    /// `pendingRevocations()` must not launder an unreadable intent item into a reassuring empty set:
+    /// authorization fails closed on that same read, so "nothing pending" would be shown at the exact
+    /// moment nothing is authorized.
+    @Test func pendingRevocationsReportsUnreadableRatherThanACleanEmptySet() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        intents.failRead = true  // cold intent cache + throwing read
+        #expect(await restarted.isAuthorized(id: c.id) == false)
+        #expect(await restarted.pendingRevocations() == .unreadable)
     }
 
     @Test func unreadableIntentItemFailsClosedOnAColdRead() async throws {
@@ -533,7 +682,7 @@ import PortviewProtocol
         let other = newClient()
         try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
         try await pairing.enroll(publicKey: other.publicKey, deviceName: "iPad")
-        #expect(await pairing.pendingRevocations().isEmpty)
+        #expect(await pairing.pendingRevocations() == .known([]))
 
         auth.failWrite = true
         await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
@@ -541,10 +690,15 @@ import PortviewProtocol
 
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
-        #expect(await restarted.pendingRevocations() == [c.id])          // only the wedged one
+        #expect(await restarted.pendingRevocations() == .known([c.id]))  // only the wedged one
         #expect(await restarted.isAuthorized(id: other.id) == true)      // its sibling is unaffected
         try await restarted.revoke(id: c.id)                              // Retry, no lease needed
-        #expect(await restarted.pendingRevocations().isEmpty)
+        // Clear-on-completion is asserted against the DURABLE item. `pendingRevocations()` alone
+        // cannot prove it: it intersects with the enrolled set, and the completed removal already
+        // took K out of that set — so a lingering intent for K would be filtered away and the old
+        // `.isEmpty` assertion passed whether or not the clear ever ran.
+        #expect(try durableIntents(intents).isEmpty)
+        #expect(await restarted.pendingRevocations() == .known([]))
     }
 
     @Test func cancelRevocationIntentReAdmitsTheStillEnrolledDevice() async throws {
@@ -565,7 +719,7 @@ import PortviewProtocol
         #expect(await restarted.isAuthorized(id: c.id) == false)
         try await restarted.cancelRevocationIntent(id: c.id)
         #expect(await restarted.isAuthorized(id: c.id) == true)
-        #expect(await restarted.pendingRevocations().isEmpty)
+        #expect(await restarted.pendingRevocations() == .known([]))
         // The re-admission was DURABLE, not just this instance's cache.
         let afterAnotherRestart = PairingStore(store: auth, revokeIntentStore: intents,
                                                now: { Date(timeIntervalSince1970: 4000) })
@@ -590,7 +744,7 @@ import PortviewProtocol
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
         #expect(await restarted.isAuthorized(id: c.id) == false)
-        #expect(await restarted.pendingRevocations() == [c.id])
+        #expect(await restarted.pendingRevocations() == .known([c.id]))
     }
 
     @Test func aPendingIntentForOneKeyNeverFencesAnother() async throws {
@@ -602,20 +756,35 @@ import PortviewProtocol
         let b = newClient()
         try await pairing.enroll(publicKey: a.publicKey, deviceName: "A")
         try await pairing.enroll(publicKey: b.publicKey, deviceName: "B")
+
+        // A SECOND actor over the same items (the app/CLI shape), warmed BEFORE any intent is written.
+        // This is what makes the second half a real counterexample: with one actor, the intent cache
+        // already holds A by the time B's revoke runs, so a `mutableIntents()` that wrongly served the
+        // warm cache still produced {A, B} and the test passed for the wrong reason.
+        let secondProcess = PairingStore(store: auth, revokeIntentStore: intents,
+                                         now: { Date(timeIntervalSince1970: 2500) })
+        #expect(await secondProcess.isAuthorized(id: a.id) == true)  // warms its intent cache with {}
+        #expect(await secondProcess.isAuthorized(id: b.id) == true)
+
         auth.failWrite = true
         await #expect(throws: (any Error).self) { try await pairing.revoke(id: a.id) }
         auth.failWrite = false
+        #expect(try durableIntents(intents) == [a.id])
         #expect(await pairing.isAuthorized(id: a.id) == false)
         #expect(await pairing.isAuthorized(id: b.id) == true)
         #expect(await pairing.authorizedClient(forPublicKey: b.publicKey)?.id == b.id)
-        // ...and a second wedged revoke does not drop the first one's intent (the intent mutation path
-        // re-reads the durable set instead of writing a lone-entry snapshot).
+
+        // The second, stale-warm actor now wedges its own revoke of B. Its intent read-modify-write
+        // must re-read the durable set ({A}) rather than write a lone-entry {B} from its warm {} —
+        // dropping A's fence would silently re-admit A.
         auth.failWrite = true
-        await #expect(throws: (any Error).self) { try await pairing.revoke(id: b.id) }
+        await #expect(throws: (any Error).self) { try await secondProcess.revoke(id: b.id) }
         auth.failWrite = false
+        #expect(try durableIntents(intents) == Set([a.id, b.id]))
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
-        #expect(await restarted.pendingRevocations() == Set([a.id, b.id]))
+        #expect(await restarted.pendingRevocations() == .known(Set([a.id, b.id])))
+        #expect(await restarted.isAuthorized(id: a.id) == false)
     }
 
     @Test func revokingANeverEnrolledIdLeavesNoLingeringIntent() async throws {
@@ -625,13 +794,14 @@ import PortviewProtocol
                                    now: { Date(timeIntervalSince1970: 2000) })
         let c = newClient()
         try await pairing.revoke(id: c.id)  // no-op: never enrolled
-        // A later enrollment of that same key must be authorized — the no-op must not have left a
-        // fence behind.
-        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
-        #expect(await pairing.isAuthorized(id: c.id) == true)
+        // The no-op recorded an intent on entry and must have discharged it. Asserted against the
+        // DURABLE item: the old version enrolled the key next and checked `isAuthorized`, but `enroll`
+        // clears the intent itself, so it passed even with a lingering fence. `pendingRevocations()`
+        // can't prove it either — it intersects with the enrolled set, and the key is not enrolled.
+        #expect(try durableIntents(intents).isEmpty)
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
-        #expect(await restarted.isAuthorized(id: c.id) == true)
+        #expect(await restarted.pendingRevocations() == .known([]))
     }
 
     // MARK: - lastSeen split (§6c, han.4 H-a): touch can never resurrect a revoked key

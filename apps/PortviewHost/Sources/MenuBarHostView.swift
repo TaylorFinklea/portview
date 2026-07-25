@@ -225,6 +225,17 @@ struct MenuBarHostView: View {
                 }
                 .buttonStyle(.plain)
 
+                // The intent item is on the authorization path (§6d/R11): when it can't be read,
+                // `PairingStore` denies EVERY device while this list still renders from the warm
+                // authorization cache. Showing the rows with no explanation would read as "all fine".
+                if model.pairingStoreUnreadable {
+                    HStack(alignment: .top, spacing: 6) {
+                        StatusDot(kind: .amber, size: 6)
+                        Text("Pairing store unreadable — no device can connect until the keychain is available.")
+                            .font(.mono(10)).foregroundStyle(Glass.text2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 if showPairedDevices {
                     ForEach(model.enrolledDevices) { row in
                         pairedDeviceRow(row)
@@ -256,8 +267,18 @@ struct MenuBarHostView: View {
                 // Durable revoke threw — the fence is held (K unauthorizable), by this process's
                 // retained lease and/or the durable revocation intent that survives a restart. Retry
                 // re-runs the durable removal; Cancel is the LAContext-gated re-admit hatch.
+                //
+                // The two incomplete states are NOT interchangeable (Sol re-review I5 follow-up): when
+                // even the revocation intent could not be written, nothing durable is holding this
+                // device out and a restart re-admits it. Say that explicitly instead of the same
+                // reassuring "revoke incomplete" the durably-fenced case shows.
+                if model.revokeNotDurable(row.id) {
+                    Text("revoke NOT saved — regains access if Portview restarts")
+                        .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 HStack(spacing: 8) {
-                    Text("revoke incomplete")
+                    Text(model.revokeNotDurable(row.id) ? "blocked only while Portview runs" : "revoke incomplete")
                         .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
                     Spacer()
                     Button("Retry") { model.retryRevoke(row.id) }
