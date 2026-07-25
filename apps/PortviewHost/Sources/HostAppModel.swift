@@ -79,6 +79,14 @@ final class HostAppModel {
     /// `endPairing()`. A `.sasCode`/`.sasConfirmed` is applied to the HUD only when its stamped lease
     /// equals this, so a prior window's async emit can never mutate a newer window's HUD.
     private(set) var currentWindowLease: WindowLease?
+    /// Monotonic epoch bumped SYNCHRONOUSLY on every window transition (`beginPairing`/`endPairing`).
+    /// `beginPairing`'s deferred `currentWindowLease` write (which lands only after two `await`s inside
+    /// the serialized `windowTransition`) commits ONLY if this epoch is still the one it captured at
+    /// call time — otherwise a delayed resume of a superseded begin could write a stale window's lease
+    /// back over a newer window's, re-opening the exact stale-lease-matches-newer-HUD hole the lease
+    /// exists to close (task-9 review Important). The synchronous clear/bump makes the async set as
+    /// authoritative as the sync clear.
+    @ObservationIgnored private var windowEpoch: UInt64 = 0
     /// How long a pairing window stays open before auto-closing.
     private static let pairingWindowSeconds: TimeInterval = 120
 
@@ -163,13 +171,18 @@ final class HostAppModel {
     func beginPairing() {
         guard isRunning else { return }
         control.evictLegacyAdmitted()
+        windowEpoch += 1
+        let epoch = windowEpoch
         windowTransition = Task { [weak self, authority, sasControl, previous = windowTransition] in
             await previous?.value
             await authority.windowOpened()
             let lease = await sasControl.openWindow()
             // Back on the main actor after the awaits: record the epoch this transition minted, so
-            // `handle(_:)` can bind `.sasCode`/`.sasConfirmed` to it.
-            self?.currentWindowLease = lease
+            // `handle(_:)` can bind `.sasCode`/`.sasConfirmed` to it — but ONLY if no later
+            // begin/end superseded us (each bumps `windowEpoch` synchronously). A stale commit here
+            // would let a prior window's lease match a newer window's HUD.
+            guard let self, self.windowEpoch == epoch else { return }
+            self.currentWindowLease = lease
         }
         isPairing = true
         displayedSASCode = nil
@@ -186,6 +199,7 @@ final class HostAppModel {
     func endPairing() {
         pairingTimeoutTask?.cancel()
         pairingTimeoutTask = nil
+        windowEpoch += 1  // supersede any pending begin's deferred `currentWindowLease` commit
         windowTransition = Task { [authority, sasControl, previous = windowTransition] in
             await previous?.value
             await sasControl.closeWindow()
