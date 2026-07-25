@@ -252,9 +252,10 @@ struct MenuBarHostView: View {
                 .font(.mono(10)).foregroundStyle(Glass.text2)
             Text("last seen \(row.lastSeen, format: .relative(presentation: .named))")
                 .font(.mono(9)).foregroundStyle(Glass.text3)
-            if model.revokeFailures[row.id] != nil {
-                // Durable revoke threw — the fence is held (K unauthorizable). Retry re-runs the
-                // durable removal under the same lease; Cancel is the LAContext-gated re-admit hatch.
+            if model.revokeIncomplete(row.id) {
+                // Durable revoke threw — the fence is held (K unauthorizable), by this process's
+                // retained lease and/or the durable revocation intent that survives a restart. Retry
+                // re-runs the durable removal; Cancel is the LAContext-gated re-admit hatch.
                 HStack(spacing: 8) {
                     Text("revoke incomplete")
                         .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)

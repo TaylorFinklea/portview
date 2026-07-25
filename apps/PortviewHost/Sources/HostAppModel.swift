@@ -128,10 +128,24 @@ final class HostAppModel {
     /// successful enroll (`.enrollmentResolved(approved: true)`), and after a revoke/retry/cancel.
     private(set) var enrolledDevices: [PairedDeviceRow] = []
 
-    /// Devices whose durable revoke THREW (design §1a step 5, fail closed): id → the retained
-    /// `RevokeLease`. The fence stays set (K unauthorizable) until a successful Retry or an
-    /// authenticated Cancel lifts it. A row in this map renders Retry / Cancel instead of Revoke.
+    /// Devices whose durable revoke THREW *in this process* (design §1a step 5, fail closed): id → the
+    /// retained `RevokeLease`. The in-process fence stays set (K unauthorizable) until a successful
+    /// Retry or an authenticated Cancel lifts it.
     private(set) var revokeFailures: [String: RevokeLease] = [:]
+
+    /// Devices whose revoke is DURABLY recorded but not durably completed, read from
+    /// `pairings.pendingRevocations()` (design §6d, Sol review I5). This is the half that survives a
+    /// process restart: `control`'s fence and `revokeFailures` above are in-memory only, so after a
+    /// quit/crash the incomplete state — and the fail-closed denial that goes with it — comes from the
+    /// durable intent item instead. A row in EITHER collection renders Retry / Cancel (see
+    /// `revokeIncomplete`).
+    private(set) var pendingRevocations: Set<String> = []
+
+    /// True when this device's revoke is incomplete and the row must offer Retry / Cancel instead of
+    /// Revoke: either this process holds the retained lease, or a durable intent survived a restart.
+    func revokeIncomplete(_ id: String) -> Bool {
+        revokeFailures[id] != nil || pendingRevocations.contains(id)
+    }
 
     /// True when the host has been through enrollment but now has ZERO paired devices — the
     /// last-device lockout (product decision 2): Portview accepts no one until an in-person re-pair.
@@ -153,6 +167,10 @@ final class HostAppModel {
                                    fingerprint: KeyFingerprint.short(forPublicKey: $0.publicKey),
                                    lastSeen: $0.lastSeen) }
             .sorted { $0.lastSeen > $1.lastSeen }
+        // Durable incomplete-revoke state (§6d): read on EVERY refresh — including the first one after
+        // launch — so a revoke wedged in a previous process still surfaces Retry / Cancel on its row.
+        // `list()` deliberately still contains those devices (they remain enrolled, just unauthorizable).
+        pendingRevocations = await pairings.pendingRevocations()
         // Locked-out (decision 2): distinguish enrolled-then-emptied from a fresh never-enrolled
         // install. `.populated` = migration completed (a device was enrolled at some point), so zero
         // devices now is the in-person-re-pair lockout; `.empty`/`.unreadable` → no banner. Only hit
@@ -193,26 +211,37 @@ final class HostAppModel {
                 // (fail closed, H-c). Retain the lease so the row surfaces Retry / an authenticated
                 // Cancel. `enrolledDevices` is left un-refreshed, so the row stays visible.
                 self.revokeFailures[id] = receipt.lease
+                // Pick up the DURABLE intent `pairings.revoke` recorded before it attempted the
+                // removal (§6d): that is what keeps this row incomplete — and K denied — if the app
+                // never gets a Retry/Cancel and is quit or crashes before one lands.
+                self.pendingRevocations = await self.pairings.pendingRevocations()
             }
         }
     }
 
     /// Retry a durable revoke that previously threw (design §1a step 5), re-running the durable
-    /// removal under the SAME retained lease. On success, lift the fence and drop the row; on a
-    /// repeated failure, keep the fence + lease so the row stays "incomplete".
+    /// removal. On success, lift the fence and drop the row; on a repeated failure, keep the fence +
+    /// lease so the row stays "incomplete".
+    ///
+    /// Works with OR without an in-process lease (§6d, Sol review I5). Same process: the retained
+    /// lease is still here, and a successful removal finalizes it through `endRevoke` exactly as
+    /// before (matching-lease semantics unchanged). After a RESTART there is no lease to reuse — the
+    /// row came from the durable intent — so this re-attempts the durable removal alone; there is no
+    /// fence to lift in a fresh process, and `pairings.revoke` clears the intent on success.
     func retryRevoke(_ id: String) {
-        guard let lease = revokeFailures[id], !revokeInFlight.contains(id) else { return }
+        guard revokeIncomplete(id), !revokeInFlight.contains(id) else { return }
         revokeInFlight.insert(id)
         Task {
             defer { self.revokeInFlight.remove(id) }
             do {
                 try await self.pairings.revoke(id: id)
-                self.control.endRevoke(lease: lease)
+                if let lease = self.revokeFailures[id] { self.control.endRevoke(lease: lease) }
                 self.revokeFailures[id] = nil
-                await self.refreshEnrolledDevices()
+                await self.refreshEnrolledDevices()  // also refreshes `pendingRevocations`
                 self.noteLastDeviceIfEmpty()
             } catch {
-                // Still failing — keep the fence + lease; the row remains in the Retry/Cancel state.
+                // Still failing — keep the fence + lease + durable intent; the row remains in the
+                // Retry/Cancel state, and K stays denied even across a restart.
             }
         }
     }
@@ -220,8 +249,14 @@ final class HostAppModel {
     /// Cancel a wedged revoke (design §1a step 5): the LAContext-gated escape hatch that lifts the
     /// fence WITHOUT a durable revoke, deliberately re-admitting the still-enrolled device (the owner
     /// accepts the risk for a permanently-locked keychain). Only a POSITIVE LAContext result proceeds.
+    ///
+    /// Two fences must come down and the DURABLE one goes first (§6d, Sol review I5): the recorded
+    /// revocation intent (which survives a restart and denies K on its own) and — only when this
+    /// process still holds it — the in-process `RevokeLease` fence. If the durable clear throws we
+    /// return with BOTH still in place: a Cancel that cannot be made durable must fail closed, not
+    /// half-re-admit a device that the next launch would deny again anyway.
     func cancelRevoke(_ id: String) {
-        guard let lease = revokeFailures[id], !revokeInFlight.contains(id) else { return }
+        guard revokeIncomplete(id), !revokeInFlight.contains(id) else { return }
         revokeInFlight.insert(id)
         Task {
             defer { self.revokeInFlight.remove(id) }
@@ -229,7 +264,15 @@ final class HostAppModel {
             let approved = (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
                                                               localizedReason: "Confirm you're at this Mac to re-admit this device")) ?? false
             guard approved else { return }
-            self.control.cancelRevoke(lease: lease)  // lift fence WITHOUT durable revoke: re-admit K
+            do {
+                try await self.pairings.cancelRevocationIntent(id: id)
+            } catch {
+                self.messages.append("Couldn't re-admit that device — the keychain is unavailable. It stays revoked; try again.")
+                return
+            }
+            if let lease = self.revokeFailures[id] {
+                self.control.cancelRevoke(lease: lease)  // lift fence WITHOUT durable revoke: re-admit K
+            }
             self.revokeFailures[id] = nil
             await self.refreshEnrolledDevices()       // the still-enrolled device reappears in the list
         }

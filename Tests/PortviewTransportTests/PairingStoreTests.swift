@@ -297,6 +297,343 @@ import PortviewProtocol
         #expect(entries.first?.enrolledAt == firstEnrolledAt)  // enrolledAt preserved across re-enroll
     }
 
+    // MARK: - mutations re-read the durable item (Sol re-review C2)
+
+    @Test func staleWarmCacheCannotResurrectAKeyRevokedByAnotherInstance() async throws {
+        // Two PairingStore actors over ONE backing item — the app/CLI shape, or two windows of the
+        // same process. Both warm their caches with {K, J}. Instance A revokes K (durable = {J}).
+        // Instance B — still warm and now STALE — revokes J. If B's read-modify-write started from
+        // its warm snapshot it would persist {K}, durably RESURRECTING a revoked key while both
+        // calls reported success. The mutation path must re-read the durable item first.
+        let shared = MemoryStore()
+        let instanceA = PairingStore(store: shared, now: { Date(timeIntervalSince1970: 2000) })
+        let instanceB = PairingStore(store: shared, now: { Date(timeIntervalSince1970: 2000) })
+        let k = newClient()
+        let j = newClient()
+        try await instanceA.enroll(publicKey: k.publicKey, deviceName: "K")
+        try await instanceA.enroll(publicKey: j.publicKey, deviceName: "J")
+        #expect(await instanceB.isAuthorized(id: k.id) == true)  // warms B's cache with {K, J}
+        #expect(await instanceB.isAuthorized(id: j.id) == true)
+
+        try await instanceA.revoke(id: k.id)  // durable set is now {J}
+        try await instanceB.revoke(id: j.id)  // B is warm+stale; must re-read, not clobber
+
+        let restarted = PairingStore(store: shared, now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: k.id) == false)  // K must stay revoked
+        #expect(await restarted.isAuthorized(id: j.id) == false)
+        #expect(await restarted.list().isEmpty)
+    }
+
+    @Test func staleWarmCacheCannotResurrectARevokedKeyOnEnroll() async throws {
+        // Same lost update via the OTHER mutation: an unrelated enroll from the stale instance
+        // re-persisted the whole map, bringing the revoked key back with it.
+        let shared = MemoryStore()
+        let instanceA = PairingStore(store: shared, now: { Date(timeIntervalSince1970: 2000) })
+        let instanceB = PairingStore(store: shared, now: { Date(timeIntervalSince1970: 2000) })
+        let k = newClient()
+        let x = newClient()
+        try await instanceA.enroll(publicKey: k.publicKey, deviceName: "K")
+        #expect(await instanceB.isAuthorized(id: k.id) == true)  // warms B's cache with {K}
+
+        try await instanceA.revoke(id: k.id)
+        try await instanceB.enroll(publicKey: x.publicKey, deviceName: "X")
+
+        let restarted = PairingStore(store: shared, now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: k.id) == false)  // not resurrected by B's enroll
+        #expect(await restarted.isAuthorized(id: x.id) == true)
+    }
+
+    @Test func mutationPropagatesAReadFailureEvenWithAWarmCache() async throws {
+        // The deliberate ASYMMETRY: the mutation path must fail rather than write from a snapshot it
+        // cannot re-verify, while the AUTHORIZATION read path keeps serving its warm cache so a
+        // keychain that locks mid-session cannot brick a live host.
+        let store = MemoryStore()
+        let pairing = PairingStore(store: store, now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        let d = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "C")
+        try await pairing.enroll(publicKey: d.publicKey, deviceName: "D")
+        #expect(await pairing.isAuthorized(id: d.id) == true)  // cache is warm
+        store.failRead = true
+
+        await #expect(throws: (any Error).self) {
+            try await pairing.enroll(publicKey: self.newClient().publicKey, deviceName: "E")
+        }
+        await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
+        // Read path unchanged: still authorizes a known device from the warm cache.
+        #expect(await pairing.isAuthorized(id: d.id) == true)
+    }
+
+    // MARK: - durable revocation intent (§6d, Sol re-review I5): fail-closed across a RESTART
+
+    /// THE decisive restart test. `beginRevoke`'s in-process fence and `HostAppModel.revokeFailures`
+    /// both die with the process, so before the intent item a failed durable revoke meant: the user
+    /// revoked, the UI said "incomplete", the app was quit, and the next launch silently re-admitted
+    /// the still-enrolled device at generation 0. A FRESH store instance (= the next process) must
+    /// refuse to authorize a key whose revocation was recorded but never durably completed.
+    @Test func recordedRevocationIntentSurvivesARestartAndFailsClosed() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+
+        auth.failWrite = true  // the durable removal throws — the record stays in the item
+        await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
+        auth.failWrite = false
+        #expect(await pairing.isAuthorized(id: c.id) == false)  // fenced in this process too
+
+        // A fresh instance over the same items = the next process launch: no in-memory fence, no
+        // retained lease, the authorization record still present.
+        let restarted = PairingStore(store: auth, lastSeenStore: MemoryLastSeenStore(),
+                                     revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: c.id) == false)
+        #expect(await restarted.authorizedClient(forPublicKey: c.publicKey) == nil)
+        // ...but the device is still ENROLLED, so the UI can still show it in the incomplete state
+        // with Retry / Cancel (the row must not vanish — that would strand the wedged revoke).
+        #expect(await restarted.list().map(\.id) == [c.id])
+    }
+
+    @Test func retryAfterARestartCompletesTheRevokeAndClearsTheIntent() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        auth.failWrite = true
+        await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
+        auth.failWrite = false
+
+        // Restart, then Retry WITHOUT a lease (there is none to reuse in a fresh process).
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        try await restarted.revoke(id: c.id)
+        #expect(await restarted.isAuthorized(id: c.id) == false)
+        #expect(await restarted.list().isEmpty)
+
+        // The completed revoke left NO intent behind: re-enrolling the same key re-admits it (a
+        // lingering intent would silently fence a legitimately re-paired device forever).
+        try await restarted.enroll(publicKey: c.publicKey, deviceName: "iPhone again")
+        #expect(await restarted.isAuthorized(id: c.id) == true)
+        let afterRestartAgain = PairingStore(store: auth, revokeIntentStore: intents,
+                                             now: { Date(timeIntervalSince1970: 4000) })
+        #expect(await afterRestartAgain.isAuthorized(id: c.id) == true)
+    }
+
+    @Test func successfulRevokeLeavesNoIntentBehind() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        try await pairing.revoke(id: c.id)
+        // Observable proof from a FRESH instance: a re-enroll of the same key is authorized, which a
+        // lingering intent would block.
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        try await restarted.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        #expect(await restarted.isAuthorized(id: c.id) == true)
+    }
+
+    @Test func attendedReEnrollClearsAStaleRevocationIntent() async throws {
+        // The wedged-revoke escape valve that needs no new UI: an ATTENDED re-enrollment of the same
+        // key (LAContext-gated upstream) supersedes a pending intent. Without this an orphaned intent
+        // would permanently lock out a device the owner just re-paired in person.
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        auth.failWrite = true
+        await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
+        auth.failWrite = false
+        #expect(await pairing.isAuthorized(id: c.id) == false)
+
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        #expect(await pairing.isAuthorized(id: c.id) == true)
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: c.id) == true)  // the clear was durable
+    }
+
+    @Test func intentWriteFailureStillAttemptsTheDurableRemoval() async throws {
+        // "If writing the intent itself fails, proceed with the attempt anyway — that is no worse
+        // than today — but do not report a false success." Here the removal SUCCEEDS, so the revoke
+        // is genuinely complete and must report success.
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        intents.failWrite = true
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        try await pairing.revoke(id: c.id)  // must NOT throw: the durable removal landed
+        #expect(await pairing.isAuthorized(id: c.id) == false)
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: c.id) == false)
+    }
+
+    @Test func unreadableIntentItemFailsClosedOnAColdRead() async throws {
+        // Fail CLOSED everywhere: if we cannot verify that no revocation is pending for a key, we do
+        // not authorize it. (Symmetric with a cold authorization-item read failure, which already
+        // denies everyone.)
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        intents.failRead = true  // cold intent cache + throwing read
+        #expect(await restarted.isAuthorized(id: c.id) == false)
+        #expect(await restarted.authorizedClient(forPublicKey: c.publicKey) == nil)
+    }
+
+    @Test func corruptIntentBlobFailsClosed() async throws {
+        let auth = MemoryStore()
+        let seed = PairingStore(store: auth, now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await seed.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        let pairing = PairingStore(store: auth, revokeIntentStore: MemoryStore(Data([0xDE, 0xAD])),
+                                   now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await pairing.isAuthorized(id: c.id) == false)
+    }
+
+    @Test func warmIntentCacheKeepsAuthorizingWhenTheIntentItemLocksMidSession() async throws {
+        // Mirrors `cachedMapSurvivesAKeychainThatLocksMidSession` for the new item: once the intent
+        // set has been read successfully, a keychain that locks mid-session must not brick a live
+        // host by denying an already-known device.
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        #expect(await pairing.isAuthorized(id: c.id) == true)  // warms both caches
+        intents.failRead = true
+        #expect(await pairing.isAuthorized(id: c.id) == true)
+    }
+
+    /// The UI-visibility half of §6d: a fresh process must be able to SEE which enrolled rows are
+    /// mid-revoke so it can render Retry / LAContext-gated Cancel without an in-process `RevokeLease`.
+    @Test func pendingRevocationsIsVisibleToAFreshInstanceAndClearsOnCompletion() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        let other = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        try await pairing.enroll(publicKey: other.publicKey, deviceName: "iPad")
+        #expect(await pairing.pendingRevocations().isEmpty)
+
+        auth.failWrite = true
+        await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
+        auth.failWrite = false
+
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.pendingRevocations() == [c.id])          // only the wedged one
+        #expect(await restarted.isAuthorized(id: other.id) == true)      // its sibling is unaffected
+        try await restarted.revoke(id: c.id)                              // Retry, no lease needed
+        #expect(await restarted.pendingRevocations().isEmpty)
+    }
+
+    @Test func cancelRevocationIntentReAdmitsTheStillEnrolledDevice() async throws {
+        // §1a step 5 Cancel: the authenticated escape hatch for a permanently-wedged keychain —
+        // deliberately re-admitting a device whose durable record was never removed.
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        auth.failWrite = true
+        await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
+        auth.failWrite = false
+
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: c.id) == false)
+        try await restarted.cancelRevocationIntent(id: c.id)
+        #expect(await restarted.isAuthorized(id: c.id) == true)
+        #expect(await restarted.pendingRevocations().isEmpty)
+        // The re-admission was DURABLE, not just this instance's cache.
+        let afterAnotherRestart = PairingStore(store: auth, revokeIntentStore: intents,
+                                               now: { Date(timeIntervalSince1970: 4000) })
+        #expect(await afterAnotherRestart.isAuthorized(id: c.id) == true)
+    }
+
+    @Test func cancelRevocationIntentThrowsRatherThanReportingAFalseReAdmission() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        auth.failWrite = true
+        await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
+        auth.failWrite = false
+
+        intents.failWrite = true  // the fence cannot be lifted durably
+        await #expect(throws: (any Error).self) { try await pairing.cancelRevocationIntent(id: c.id) }
+        intents.failWrite = false
+        // Still fenced — the caller must not have told the user the device was re-admitted.
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: c.id) == false)
+        #expect(await restarted.pendingRevocations() == [c.id])
+    }
+
+    @Test func aPendingIntentForOneKeyNeverFencesAnother() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let a = newClient()
+        let b = newClient()
+        try await pairing.enroll(publicKey: a.publicKey, deviceName: "A")
+        try await pairing.enroll(publicKey: b.publicKey, deviceName: "B")
+        auth.failWrite = true
+        await #expect(throws: (any Error).self) { try await pairing.revoke(id: a.id) }
+        auth.failWrite = false
+        #expect(await pairing.isAuthorized(id: a.id) == false)
+        #expect(await pairing.isAuthorized(id: b.id) == true)
+        #expect(await pairing.authorizedClient(forPublicKey: b.publicKey)?.id == b.id)
+        // ...and a second wedged revoke does not drop the first one's intent (the intent mutation path
+        // re-reads the durable set instead of writing a lone-entry snapshot).
+        auth.failWrite = true
+        await #expect(throws: (any Error).self) { try await pairing.revoke(id: b.id) }
+        auth.failWrite = false
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.pendingRevocations() == Set([a.id, b.id]))
+    }
+
+    @Test func revokingANeverEnrolledIdLeavesNoLingeringIntent() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.revoke(id: c.id)  // no-op: never enrolled
+        // A later enrollment of that same key must be authorized — the no-op must not have left a
+        // fence behind.
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        #expect(await pairing.isAuthorized(id: c.id) == true)
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: c.id) == true)
+    }
+
     // MARK: - lastSeen split (§6c, han.4 H-a): touch can never resurrect a revoked key
 
     @Test func touchDoesNotResurrectARevokedKey() async throws {
