@@ -570,10 +570,10 @@ public struct HostRunner: Sendable {
             effectiveMode: { authPolicy.effectiveMode(now: Date(), enrollment: await pairings.enrollmentSnapshot()) },
             isSASWindowOpen: { await sas?.isOpen() ?? false },
             pairings: pairings,
-            // Bound to the live registry's fence/generation (design §3). No `control` (the CLI's
-            // current default) means no registry exists to fence against, so admit unconditionally
-            // at generation 0 — same as today's un-fenced behavior; `HostRunner.run` minting a
-            // process-local `HostControl` for the `nil` case is a separate, not-yet-landed item.
+            // Bound to the live registry's fence/generation (design §3). A `nil` control means no
+            // registry to fence against, so admit unconditionally at generation 0 — the un-fenced
+            // fallback, now reached only by tests that drive `serveAuthGate`/`serveSession` without a
+            // control (`run` mints a process-local `HostControl` for the CLI, so production is fenced).
             admissionTicket: { keyID in control?.admissionTicket(for: keyID) ?? AdmissionTicket(keyID: keyID, generation: 0) },
             sendChallenge: { try await connection.send(.serverChallenge($0)) })
         onAuthGateOutcome?(outcome)
@@ -739,6 +739,11 @@ public struct HostRunner: Sendable {
         // capability-gated (H-e), so a revoke landing here stops the reply reaching the peer.
         do {
             let reply = try server.handle(hello)
+            // (design §1b step 8, H-e) Gate on the capability BEFORE authorizing lane streams: a revoke
+            // landing during admission's post-await window must not let an already-invalid session
+            // authorize its session token or retain a bound lane connection until teardown. `invalidate`
+            // runs on another task (out of HostControl's lock), so the flag can flip here with no `await`.
+            guard capability.isValid else { return }
             // Authorize secondary lane streams BEFORE the token-carrying ServerHello goes out, so a
             // well-behaved client can't race its lane opens past authorization (w6n.3:
             // `authorizeLanesOnce` refuses every call after the first).
@@ -750,7 +755,7 @@ public struct HostRunner: Sendable {
                     }
                 }
             }
-            guard capability.isValid else { return }  // (H-e) never send to a revoked peer
+            guard capability.isValid else { return }  // (H-e) re-check: never send to a peer revoked since
             try await connection.send(.serverHello(reply))
             connectedDeviceID = sessionID
             emit(.deviceConnected(id: sessionID, name: sanitizedDeviceName))
