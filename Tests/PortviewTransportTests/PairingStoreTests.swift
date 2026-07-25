@@ -35,6 +35,57 @@ import PortviewProtocol
     }
     private enum TestStoreError: Error { case injected }
 
+    /// In-memory `PairingRecordStore` for the SEPARATE lastSeen item (§6c, han.4 H-a); mirrors
+    /// `MemoryStore` above. Adds an optional read-pause hook — armed only by the cross-process
+    /// barrier test — to deterministically interleave a concurrent auth-store mutation between a
+    /// `touch`'s lastSeen read and its lastSeen write.
+    private final class MemoryLastSeenStore: PairingRecordStore, @unchecked Sendable {
+        private let lock = NSLock()
+        private var blob: Data?
+        var failRead = false
+        var failWrite = false
+        private(set) var writeCount = 0
+        private var pauseNextRead = false
+        private let readPaused = DispatchSemaphore(value: 0)
+        private let resumeReadSignal = DispatchSemaphore(value: 0)
+
+        init(_ blob: Data? = nil) { self.blob = blob }
+
+        /// Arms a ONE-SHOT pause: the next `read()` call snapshots the blob, signals
+        /// `waitUntilReadPaused()`, then blocks until `continueRead()` is called — all with the
+        /// lock released, so a concurrent `read()`/`write()` from another store user is never
+        /// blocked by the pause itself. Deliberately UNBOUNDED waits (mirrors the plain
+        /// `DispatchSemaphore.wait()` used by `InboundBufferTests`' barrier tests): by program
+        /// order, nothing else can call `read()` between `armPauseOnNextRead()` and the intended
+        /// `touch`'s read, so this can only be satisfied by that read — a bounded timeout risks
+        /// firing under severe parallel-suite load and letting a LATER caller's read become the
+        /// one that pauses instead, corrupting the intended interleaving.
+        func armPauseOnNextRead() { lock.lock(); pauseNextRead = true; lock.unlock() }
+        func waitUntilReadPaused() { readPaused.wait() }
+        func continueRead() { resumeReadSignal.signal() }
+
+        func read() throws -> Data? {
+            lock.lock()
+            if failRead { lock.unlock(); throw TestStoreError.injected }
+            let snapshot = blob
+            let shouldPause = pauseNextRead
+            if shouldPause { pauseNextRead = false }
+            lock.unlock()
+            if shouldPause {
+                readPaused.signal()
+                resumeReadSignal.wait()
+            }
+            return snapshot
+        }
+        func write(_ data: Data) throws {
+            lock.lock(); defer { lock.unlock() }
+            if failWrite { throw TestStoreError.injected }
+            blob = data
+            writeCount += 1
+        }
+        func rawBlob() -> Data? { lock.lock(); defer { lock.unlock() }; return blob }
+    }
+
     /// A fresh client keypair: returns its raw public key and the id the store must derive for it.
     private func newClient() -> (publicKey: Data, id: String) {
         let key = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation
@@ -244,5 +295,190 @@ import PortviewProtocol
         #expect(entries.count == 1)
         #expect(entries.first?.deviceName == "New Name")
         #expect(entries.first?.enrolledAt == firstEnrolledAt)  // enrolledAt preserved across re-enroll
+    }
+
+    // MARK: - lastSeen split (§6c, han.4 H-a): touch can never resurrect a revoked key
+
+    @Test func touchDoesNotResurrectARevokedKey() async throws {
+        let store = MemoryStore()
+        let pairing = PairingStore(store: store, now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        try await pairing.revoke(id: c.id)
+        try await pairing.touch(id: c.id)  // must be a no-op re: authorization
+        #expect(await pairing.isAuthorized(id: c.id) == false)
+        #expect(await pairing.list().isEmpty)
+        #expect(await pairing.authorizedClient(forPublicKey: c.publicKey) == nil)
+    }
+
+    @Test func touchNeverWritesToTheAuthorizationItem() async throws {
+        // Direct evidence for "by construction, not by read ordering": touch produces ZERO writes
+        // to the auth store, whether or not the id is enrolled.
+        let authStore = MemoryStore()
+        let pairing = PairingStore(store: authStore, now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        let writesAfterEnroll = authStore.writeCount
+        try await pairing.touch(id: c.id)
+        #expect(authStore.writeCount == writesAfterEnroll)
+    }
+
+    /// CROSS-PROCESS BARRIER (§6c, H-a): two `PairingStore` instances over INDEPENDENT auth stores
+    /// but a SHARED lastSeen fake — the shape of the app/CLI pairing (one physical keychain,
+    /// per-process actor caches). Pauses instance-B's `touch(K)` AFTER its lastSeen read (so it
+    /// holds a stale snapshot), lets instance-A `revoke(K)` run to completion (removing K from A's
+    /// auth item AND best-effort deleting `lastSeen[K]` from the shared item), then resumes B's
+    /// touch. Before the fix, a whole-blob read-modify-write of a SHARED item would have let B's
+    /// stale write clobber A's revoke; after the fix, `touch` never touches an auth item at all, so
+    /// K stays absent from A's auth item regardless of the interleaving. The shared lastSeen item
+    /// MAY still end up with a stale `lastSeen[K]` (B's write wins the lastSeen race) — that is the
+    /// documented, accepted residual (H-a): lastSeen never gates authorization, and `list()` never
+    /// surfaces an entry for a key absent from the auth item, so the residual is inert.
+    @Test func crossProcessBarrierTouchNeverRewritesTheAuthorizationItem() async throws {
+        let sharedLastSeen = MemoryLastSeenStore()
+        let storeA = MemoryStore()
+        let storeB = MemoryStore()
+        let instanceA = PairingStore(store: storeA, lastSeenStore: sharedLastSeen,
+                                     now: { Date(timeIntervalSince1970: 1000) })
+        let instanceB = PairingStore(store: storeB, lastSeenStore: sharedLastSeen,
+                                     now: { Date(timeIntervalSince1970: 1000) })
+        let c = newClient()
+        // Both processes' views start with K enrolled (their independent auth stores plus the one
+        // shared lastSeen item, mirroring the real single-keychain-item, per-process-cache shape).
+        try await instanceA.enroll(publicKey: c.publicKey, deviceName: "app-view")
+        try await instanceB.enroll(publicKey: c.publicKey, deviceName: "cli-view")
+        let writesToBBeforeTouch = storeB.writeCount
+
+        sharedLastSeen.armPauseOnNextRead()
+        let touchTask = Task { try? await instanceB.touch(id: c.id) }
+        sharedLastSeen.waitUntilReadPaused()  // B has read (paused) the shared lastSeen blob
+
+        try await instanceA.revoke(id: c.id)  // removes K from A's auth item; best-effort deletes lastSeen[K]
+        #expect(await instanceA.isAuthorized(id: c.id) == false)
+        #expect(await instanceA.list().isEmpty)
+
+        sharedLastSeen.continueRead()  // let B's paused read return its STALE (pre-revoke) snapshot
+        await touchTask.value
+
+        // The invariant that matters: A's auth item is UNCHANGED by B's touch completing after the
+        // revoke — no resurrection, regardless of the read/write interleaving.
+        #expect(await instanceA.isAuthorized(id: c.id) == false)
+        #expect(await instanceA.list().isEmpty)
+        #expect(await instanceA.authorizedClient(forPublicKey: c.publicKey) == nil)
+        // touch on B never wrote to EITHER auth store — only the shared lastSeen item.
+        #expect(storeA.writeCount == 2)  // A's own enroll + revoke; nothing from B's touch
+        #expect(storeB.writeCount == writesToBBeforeTouch)  // B's touch wrote nothing to B's auth item
+
+        // Documented residual: the shared lastSeen item may still show K (B's stale write landed
+        // after A's delete) — harmless because it is never surfaced (see next test) and never
+        // consulted for authorization.
+        let rawLastSeen = try #require(sharedLastSeen.rawBlob())
+        let decoded = try JSONDecoder().decode([String: Date].self, from: rawLastSeen)
+        #expect(decoded[c.id] != nil, "documented H-a residual: a stale touch may still resurrect lastSeen (never the auth item)")
+    }
+
+    @Test func listJoinsLastSeenDefaultingToEnrolledAtWhenAbsent() async throws {
+        let lastSeenStore = MemoryLastSeenStore()
+        let pairing = PairingStore(store: MemoryStore(), lastSeenStore: lastSeenStore,
+                                   now: { Date(timeIntervalSince1970: 1000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")  // seeds lastSeen too
+
+        // Simulate a lastSeen item with no entry for this id (e.g. an auth item that predates the
+        // lastSeen split): wipe the lastSeen store directly.
+        try lastSeenStore.write(JSONEncoder().encode([String: Date]()))
+        let beforeTouch = await pairing.list()
+        #expect(beforeTouch.first?.lastSeen == beforeTouch.first?.enrolledAt)
+
+        try await pairing.touch(id: c.id)
+        let afterTouch = await pairing.list()
+        #expect(afterTouch.first?.lastSeen == Date(timeIntervalSince1970: 1000))
+    }
+
+    @Test func listDoesNotSurfaceOrphanLastSeenForARevokedKey() async throws {
+        let lastSeenStore = MemoryLastSeenStore()
+        let pairing = PairingStore(store: MemoryStore(), lastSeenStore: lastSeenStore,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        try await pairing.touch(id: c.id)
+        // Force revoke's best-effort lastSeen delete to fail, so an orphan genuinely remains in the
+        // lastSeen item after K is removed from the authorization item.
+        lastSeenStore.failWrite = true
+        try await pairing.revoke(id: c.id)
+        lastSeenStore.failWrite = false
+
+        // The orphan is still physically present in the lastSeen item...
+        let raw = try #require(lastSeenStore.rawBlob())
+        let seen = try JSONDecoder().decode([String: Date].self, from: raw)
+        #expect(seen[c.id] != nil)
+        // ...but list() never surfaces it: K is absent from the authorization item.
+        #expect(await pairing.list().isEmpty)
+        #expect(await pairing.isAuthorized(id: c.id) == false)
+    }
+
+    @Test func enrollSeedsTheLastSeenItem() async throws {
+        let lastSeenStore = MemoryLastSeenStore()
+        let pairing = PairingStore(store: MemoryStore(), lastSeenStore: lastSeenStore,
+                                   now: { Date(timeIntervalSince1970: 4000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        let raw = try #require(lastSeenStore.rawBlob())
+        let seen = try JSONDecoder().decode([String: Date].self, from: raw)
+        #expect(seen[c.id] == Date(timeIntervalSince1970: 4000))
+    }
+
+    @Test func revokeBestEffortDeletesTheLastSeenItem() async throws {
+        let lastSeenStore = MemoryLastSeenStore()
+        let pairing = PairingStore(store: MemoryStore(), lastSeenStore: lastSeenStore,
+                                   now: { Date(timeIntervalSince1970: 4000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        try await pairing.revoke(id: c.id)
+        let raw = try #require(lastSeenStore.rawBlob())
+        let seen = try JSONDecoder().decode([String: Date].self, from: raw)
+        #expect(seen[c.id] == nil)
+    }
+
+    @Test func thrownLastSeenReadNoOpsAndDoesNotBreakAuthOperations() async throws {
+        let lastSeenStore = MemoryLastSeenStore()
+        let pairing = PairingStore(store: MemoryStore(), lastSeenStore: lastSeenStore,
+                                   now: { Date(timeIntervalSince1970: 6000) })
+        let c = newClient()
+        lastSeenStore.failRead = true
+
+        // enroll: the auth write must still succeed even though seeding lastSeen throws.
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        #expect(await pairing.isAuthorized(id: c.id) == true)
+
+        // list(): still returns the authorized client; lastSeen falls back to enrolledAt.
+        let entries = await pairing.list()
+        #expect(entries.first?.id == c.id)
+        #expect(entries.first?.lastSeen == entries.first?.enrolledAt)
+
+        // touch(): silently no-ops, never throws upward.
+        try await pairing.touch(id: c.id)
+
+        // revoke(): the auth removal still succeeds even though the lastSeen delete throws.
+        try await pairing.revoke(id: c.id)
+        #expect(await pairing.isAuthorized(id: c.id) == false)
+    }
+
+    @Test func thrownLastSeenWriteNoOpsAndDoesNotBreakTouchOrEnroll() async throws {
+        let lastSeenStore = MemoryLastSeenStore()
+        lastSeenStore.failWrite = true
+        let pairing = PairingStore(store: MemoryStore(), lastSeenStore: lastSeenStore,
+                                   now: { Date(timeIntervalSince1970: 7000) })
+        let c = newClient()
+
+        // enroll: the auth write succeeds; the lastSeen seed write silently fails.
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        #expect(await pairing.isAuthorized(id: c.id) == true)
+
+        // touch(): read succeeds (empty item), write throws — silently no-ops.
+        try await pairing.touch(id: c.id)
+
+        let entries = await pairing.list()
+        #expect(entries.first?.lastSeen == entries.first?.enrolledAt)  // the write never landed
     }
 }
