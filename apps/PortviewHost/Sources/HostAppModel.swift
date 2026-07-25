@@ -6,7 +6,19 @@ import Foundation
 import LocalAuthentication
 import Observation
 import PortviewHostCore
+import PortviewProtocol
 import PortviewTransport
+
+/// One paired-device row for the menu-bar "Paired devices" surface (design §1a step 1). The
+/// `fingerprint` is precomputed in `HostAppModel` (via `KeyFingerprint.short`) so the view stays a
+/// pure `PortviewHostCore` consumer and never imports `PortviewProtocol` or touches the raw
+/// `publicKey` — fingerprint only, never the key bytes.
+struct PairedDeviceRow: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let fingerprint: String
+    let lastSeen: Date
+}
 
 @MainActor
 @Observable
@@ -47,6 +59,12 @@ final class HostAppModel {
 
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private let control = HostControl()
+    /// The ONE shared durable pairing store (design §2/§6c). Built once here — NOT per-`start()` — so
+    /// the serve loop authorizes against, and the revoke UI mutates, the SAME actor instance: the
+    /// in-process live invalidation on revoke (`control.beginRevoke`) is then synchronous with the
+    /// durable removal (`pairings.revoke`). Passed into `events(...)` in `start()` and read by
+    /// `refreshEnrolledDevices()` / `revoke(_:)`.
+    @ObservationIgnored private let pairings = PairingStore()
     @ObservationIgnored private let sasControl = SASPairingControl()
     /// Chains every `beginPairing`/`endPairing` window transition into one ordered sequence.
     /// Both methods fire their actor calls from unstructured `Task`s; without this, a rapid
@@ -105,6 +123,100 @@ final class HostAppModel {
     /// authenticating (LAContext running), so a double-tap can't launch a second LAContext.
     func enrollmentDecisionInFlight(for attemptID: UUID) -> Bool { decisions.isInFlight(attemptID) }
 
+    /// The enrolled devices shown on the menu-bar "Paired devices" surface (design §1a step 1),
+    /// snapshotted from `pairings.list()`. Refreshed when the surface opens (view `.task`), after a
+    /// successful enroll (`.enrollmentResolved(approved: true)`), and after a revoke/retry/cancel.
+    private(set) var enrolledDevices: [PairedDeviceRow] = []
+
+    /// Devices whose durable revoke THREW (design §1a step 5, fail closed): id → the retained
+    /// `RevokeLease`. The fence stays set (K unauthorizable) until a successful Retry or an
+    /// authenticated Cancel lifts it. A row in this map renders Retry / Cancel instead of Revoke.
+    private(set) var revokeFailures: [String: RevokeLease] = [:]
+
+    /// Reload `enrolledDevices` from the shared `pairings` store, precomputing each row's compare
+    /// fingerprint here so the view never imports `PortviewProtocol` or sees the raw `publicKey`.
+    func refreshEnrolledDevices() async {
+        let list = await pairings.list()
+        enrolledDevices = list
+            .map { PairedDeviceRow(id: $0.id, name: $0.deviceName,
+                                   fingerprint: KeyFingerprint.short(forPublicKey: $0.publicKey),
+                                   lastSeen: $0.lastSeen) }
+            .sorted { $0.lastSeen > $1.lastSeen }
+    }
+
+    /// Revoke a paired device (design §1a steps 2–6). The confirmation dialog (product decision 1)
+    /// is presented by the view BEFORE this is called; here we run the mandatory `LAContext` gate —
+    /// an ungated Revoke is remotely clickable via an injected CGEvent with zero local presence, the
+    /// exact hole the enrollment Allow/Deny gate closes — and only a POSITIVE result proceeds. Then
+    /// the lease-owned sequence: `beginRevoke` (synchronous live fence + kill, step 3) → durable
+    /// `pairings.revoke` (step 4) → on success `endRevoke` + refresh (steps 5–6); on a durable
+    /// FAILURE do NOT `endRevoke` — keep the fence (fail closed) and retain the lease so the row can
+    /// offer Retry / an LAContext-gated Cancel.
+    func revoke(_ id: String) {
+        Task {
+            let context = LAContext()
+            let approved = (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
+                                                              localizedReason: "Revoke this device's access to this Mac")) ?? false
+            guard approved else { return }
+            let receipt = self.control.beginRevoke(clientKeyID: id)  // step 3: live fence + kill (sync)
+            do {
+                try await self.pairings.revoke(id: id)               // step 4: durable removal
+                self.control.endRevoke(lease: receipt.lease)         // step 5: finalize on success
+                self.revokeFailures[id] = nil
+                await self.refreshEnrolledDevices()                  // step 6: revoked row disappears
+                self.noteLastDeviceIfEmpty()
+            } catch {
+                // Durable write threw: do NOT endRevoke — the fence stays and K is unauthorizable
+                // (fail closed, H-c). Retain the lease so the row surfaces Retry / an authenticated
+                // Cancel. `enrolledDevices` is left un-refreshed, so the row stays visible.
+                self.revokeFailures[id] = receipt.lease
+            }
+        }
+    }
+
+    /// Retry a durable revoke that previously threw (design §1a step 5), re-running the durable
+    /// removal under the SAME retained lease. On success, lift the fence and drop the row; on a
+    /// repeated failure, keep the fence + lease so the row stays "incomplete".
+    func retryRevoke(_ id: String) {
+        guard let lease = revokeFailures[id] else { return }
+        Task {
+            do {
+                try await self.pairings.revoke(id: id)
+                self.control.endRevoke(lease: lease)
+                self.revokeFailures[id] = nil
+                await self.refreshEnrolledDevices()
+                self.noteLastDeviceIfEmpty()
+            } catch {
+                // Still failing — keep the fence + lease; the row remains in the Retry/Cancel state.
+            }
+        }
+    }
+
+    /// Cancel a wedged revoke (design §1a step 5): the LAContext-gated escape hatch that lifts the
+    /// fence WITHOUT a durable revoke, deliberately re-admitting the still-enrolled device (the owner
+    /// accepts the risk for a permanently-locked keychain). Only a POSITIVE LAContext result proceeds.
+    func cancelRevoke(_ id: String) {
+        guard let lease = revokeFailures[id] else { return }
+        Task {
+            let context = LAContext()
+            let approved = (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
+                                                              localizedReason: "Confirm you're at this Mac to re-admit this device")) ?? false
+            guard approved else { return }
+            self.control.cancelRevoke(lease: lease)  // lift fence WITHOUT durable revoke: re-admit K
+            self.revokeFailures[id] = nil
+            await self.refreshEnrolledDevices()       // the still-enrolled device reappears in the list
+        }
+    }
+
+    /// Last-device copy (product decision 2): if a successful revoke emptied the paired set, tell the
+    /// user the host is now locked out. The host stays `.required` (revoke never clears
+    /// `migrationComplete`); bootstrap never reopens — there is no remote self-recovery.
+    private func noteLastDeviceIfEmpty() {
+        if enrolledDevices.isEmpty {
+            messages.append("That was your last paired device. Portview now accepts no one until you re-pair in person.")
+        }
+    }
+
     /// Observed (not derived from the @ObservationIgnored task) so the menu-bar glyph + Start/Stop
     /// re-render on EVERY transition — including when the serve loop ends on its own while ready.
     private(set) var isRunning = false
@@ -125,15 +237,15 @@ final class HostAppModel {
         sessions = HostSessions()
         connectedSince = nil
 
-        task = Task { [weak self, control, sasControl, authority] in
+        task = Task { [weak self, control, sasControl, authority, pairings] in
             // Legacy-bootstrap until first-enroll auto-promotion flips this host to `.required`
-            // (han.3 revisits the open-ended expiry). This PairingStore is the ONE shared
-            // authority — han.4's revoke UI must use this same instance, never construct their
-            // own. `authority` is likewise the ONE shared EnrollmentAuthority (see its stored
-            // property comment above).
+            // (han.3 revisits the open-ended expiry). `pairings` is the ONE shared PairingStore
+            // (stored property) — han.4's revoke UI mutates this SAME instance, so the serve loop
+            // authorizes against exactly the store revoke removes from. `authority` is likewise the
+            // ONE shared EnrollmentAuthority (see its stored property comment above).
             let events = HostRunner().events(identity: .app(displayName: Self.displayName), control: control, sasControl: sasControl,
                                              authPolicy: .legacyBootstrap(expiresAt: .distantFuture),
-                                             pairings: PairingStore(),
+                                             pairings: pairings,
                                              enrollment: authority)
             for await event in events {
                 self?.handle(event)
@@ -417,6 +529,9 @@ final class HostAppModel {
             // late `.enrollmentResolved(approved: true)` for the FIRST attempt must not close the
             // window on that second, unrelated, still-pending enrollment.
             if approved && wasShownPrompt { endPairing() }
+            // A successful enroll added a device to the durable set — refresh the Paired-devices
+            // surface so the new row is present the next time it opens (§1a step 1 refresh point).
+            if approved { Task { await self.refreshEnrolledDevices() } }
             // If this resolved-not-approved WHILE an Allow tap's LAContext is still running for the
             // same attemptID, tell the user now rather than leaving them in silence until (or
             // unless) LAContext ever returns. Clears this attempt's decision entry too (so the still-

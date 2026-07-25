@@ -11,6 +11,12 @@ import PortviewHostCore
 struct MenuBarHostView: View {
     let model: HostAppModel
     @Environment(\.openWindow) private var openWindow
+    /// Expand/collapse for the "Paired devices (N)" surface — collapsed by default so it never
+    /// crowds the 300pt popover.
+    @State private var showPairedDevices = false
+    /// The row awaiting the destructive-action confirmation dialog (product decision 1). Non-nil ⇒
+    /// the dialog is presented; confirming calls `model.revoke`, which then runs the LAContext gate.
+    @State private var pendingRevoke: PairedDeviceRow?
 
     private var readyDetails: HostReadyDetails? {
         if case .ready(let details) = model.state { return details } else { return nil }
@@ -37,6 +43,24 @@ struct MenuBarHostView: View {
         .task {
             model.start() // idempotent: advertise even on a window-less launch
             model.startPermissionMonitoring() // refresh permission status when the popover opens
+            await model.refreshEnrolledDevices() // §1a step 1: paired-devices surface-open refresh
+        }
+        // Destructive-action gate part 1 (product decision 1): confirm BEFORE the LAContext gate in
+        // `model.revoke`. "Revoke 'iPhone'? It will lose access immediately."
+        .confirmationDialog(
+            pendingRevoke.map { "Revoke '\($0.name)'?" } ?? "Revoke device?",
+            isPresented: Binding(get: { pendingRevoke != nil },
+                                 set: { presented in if !presented { pendingRevoke = nil } }),
+            titleVisibility: .visible,
+            presenting: pendingRevoke
+        ) { row in
+            Button("Revoke", role: .destructive) {
+                model.revoke(row.id)
+                pendingRevoke = nil
+            }
+            Button("Cancel", role: .cancel) { pendingRevoke = nil }
+        } message: { _ in
+            Text("It will lose access immediately.")
         }
     }
 
@@ -69,6 +93,7 @@ struct MenuBarHostView: View {
                     Divider().overlay(Glass.text3.opacity(0.2))
                 }
                 pairingSurface(details)
+                pairedDevicesSection
             }
         } else {
             VStack(alignment: .leading, spacing: 4) {
@@ -174,6 +199,73 @@ struct MenuBarHostView: View {
                     .disabled(model.enrollmentDecisionInFlight(for: prompt.attemptID))
             }
         }
+    }
+
+    /// The "Paired devices (N)" surface (design §1a step 1). A collapsed-by-default disclosure below
+    /// the pairing surface so it never crowds the popover. Each row shows the device name, its compare
+    /// fingerprint (mono — fingerprint ONLY, never the raw public key), and a relative last-seen; the
+    /// per-row Revoke opens the confirmation dialog (then `model.revoke` runs the LAContext gate). A
+    /// row whose durable revoke threw shows the incomplete Retry / Cancel pair instead.
+    @ViewBuilder private var pairedDevicesSection: some View {
+        if !model.enrolledDevices.isEmpty {
+            Divider().overlay(Glass.text3.opacity(0.2))
+            VStack(alignment: .leading, spacing: 8) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { showPairedDevices.toggle() }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: showPairedDevices ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 9, weight: .semibold))
+                        Text("Paired devices (\(model.enrolledDevices.count))")
+                            .font(.system(size: 12.5, weight: .semibold))
+                        Spacer()
+                    }
+                    .foregroundStyle(Glass.text1)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+
+                if showPairedDevices {
+                    ForEach(model.enrolledDevices) { row in
+                        pairedDeviceRow(row)
+                    }
+                }
+            }
+        }
+    }
+
+    private func pairedDeviceRow(_ row: PairedDeviceRow) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(row.name)
+                .font(.system(size: 13, weight: .semibold)).foregroundStyle(Glass.text1Bright)
+            Text(row.fingerprint)
+                .font(.mono(10)).foregroundStyle(Glass.text2)
+            Text("last seen \(row.lastSeen, format: .relative(presentation: .named))")
+                .font(.mono(9)).foregroundStyle(Glass.text3)
+            if model.revokeFailures[row.id] != nil {
+                // Durable revoke threw — the fence is held (K unauthorizable). Retry re-runs the
+                // durable removal under the same lease; Cancel is the LAContext-gated re-admit hatch.
+                HStack(spacing: 8) {
+                    Text("revoke incomplete")
+                        .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
+                    Spacer()
+                    Button("Retry") { model.retryRevoke(row.id) }
+                        .buttonStyle(OutlineButtonStyle(tint: Glass.degraded))
+                    Button("Cancel") { model.cancelRevoke(row.id) }
+                        .buttonStyle(OutlineButtonStyle(tint: Glass.text2))
+                }
+            } else {
+                HStack {
+                    Spacer()
+                    Button("Revoke") { pendingRevoke = row }
+                        .buttonStyle(OutlineButtonStyle(tint: Glass.danger))
+                }
+            }
+        }
+        .padding(.vertical, 6).padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.04),
+                    in: RoundedRectangle(cornerRadius: Glass.well, style: .continuous))
     }
 
     private var footer: some View {
