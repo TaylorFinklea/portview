@@ -62,4 +62,40 @@ import PortviewProtocol
         sawEnd = true
         #expect(sawEnd)
     }
+
+    // MARK: - closeDiscardingInbound (han.4 finding 7 — discard-not-drain)
+
+    /// Buffered-but-undelivered control messages must be DISCARDED, not drained, on a
+    /// discard-close: `inbound` ends immediately without ever yielding them. This is the
+    /// security-critical case — a revoked peer's queued `.typeText`/clipboard/file frames.
+    @Test func closeDiscardingInboundDropsAlreadyBufferedMessagesInsteadOfDeliveringThem() async {
+        let connection = makeConnection()
+        let queuedText = TypeText(text: "attacker-queued-keystrokes")
+        #expect(connection.processIncoming(Frame.encode(queuedText)))
+        #expect(connection.inboundBuffer.controlBytesBuffered > 0)
+
+        connection.closeDiscardingInbound()
+
+        #expect(connection.inboundBuffer.controlBytesBuffered == 0)
+        var received: [AnyMessage] = []
+        for await message in connection.inbound { received.append(message) }
+        #expect(received.isEmpty)
+    }
+
+    /// A receive callback that decodes successfully AFTER a discard-close (racing it, or simply
+    /// arriving late) must be rejected as `.droppedFinished` — never appended, and never able to
+    /// resurrect the already-finished `inbound` stream (finding 7's terminal-verdict fix).
+    @Test func aReceiveCallbackRacingCloseDiscardingInboundNeverResurrectsTheStream() async {
+        let connection = makeConnection()
+        connection.closeDiscardingInbound()
+
+        // Simulate the racing/late receive callback's decode: it succeeds (not a decode error)...
+        #expect(connection.processIncoming(Frame.encode(TypeText(text: "post-revoke"))))
+        // ...but the underlying enqueue is the terminal verdict, not a silent append.
+        #expect(connection.inboundBuffer.enqueue([.bye(Bye(reason: "also-post-revoke"))]) == .droppedFinished)
+
+        var received: [AnyMessage] = []
+        for await message in connection.inbound { received.append(message) }
+        #expect(received.isEmpty)
+    }
 }

@@ -131,6 +131,17 @@ public final class PortviewConnection: @unchecked Sendable {
         inboundBuffer.finish()
     }
 
+    /// Cancel the connection, DISCARDING rather than draining the inbound buffer (han.4 finding 7):
+    /// a revoked peer's already-buffered keyboard/clipboard/file frames must never execute. Mirrors
+    /// `close()` but calls `finishDiscardingBuffered()` FIRST — before `connection.cancel()` — so
+    /// the buffer is already terminal (any parked waiter resumed nil, all lanes cleared) before the
+    /// transport teardown can trigger a racing receive callback; that race is then linearized by
+    /// `InboundBuffer`'s own lock (see `finishDiscardingBuffered`).
+    public func closeDiscardingInbound() {
+        inboundBuffer.finishDiscardingBuffered()
+        connection.cancel()
+    }
+
     // MARK: - Internal
 
     /// Race `awaitReady()` against `timeout`, throwing `ConnectTimeoutError` if the connection
@@ -196,6 +207,10 @@ public final class PortviewConnection: @unchecked Sendable {
             case .fatal:
                 connection.cancel()
                 return
+            case .droppedFinished:
+                // The buffer is already terminal (e.g. a discard-close raced this callback) —
+                // never re-arm the receive loop for a finished buffer (finding 7).
+                return
             case .ok(let paused):
                 pauseReceive = paused
             }
@@ -217,6 +232,9 @@ public final class PortviewConnection: @unchecked Sendable {
             if let data, !data.isEmpty {
                 switch self.ingest([UInt8](data)) {
                 case .fatal: return
+                // The buffer is already terminal (e.g. a discard-close raced this callback) —
+                // never re-arm the receive loop for a finished buffer (finding 7).
+                case .droppedFinished: return
                 case .ok(let paused): pauseReceive = paused
                 }
             }
@@ -231,6 +249,9 @@ public final class PortviewConnection: @unchecked Sendable {
     private enum IngestResult {
         case fatal
         case ok(pauseReceive: Bool)
+        /// The inbound buffer is already finished (e.g. discard-closed) — decode succeeded but the
+        /// messages were dropped, not buffered. Never re-arms the receive loop (finding 7).
+        case droppedFinished
     }
 
     /// Decode `bytes` into the two-lane buffer. `.fatal` means a known-tag frame's body was
@@ -239,7 +260,10 @@ public final class PortviewConnection: @unchecked Sendable {
     private func ingest(_ bytes: [UInt8]) -> IngestResult {
         do {
             let messages = try decoder.push(bytes)
-            return .ok(pauseReceive: inboundBuffer.enqueue(messages))
+            switch inboundBuffer.enqueue(messages) {
+            case .accepted(let pauseReceive): return .ok(pauseReceive: pauseReceive)
+            case .droppedFinished: return .droppedFinished
+            }
         } catch {
             inboundBuffer.finish()
             return .fatal
@@ -248,7 +272,7 @@ public final class PortviewConnection: @unchecked Sendable {
 
     /// Test seam preserving the pre-buffer contract: `false` = fatal decode error (the inbound
     /// stream is already finished). Exposed (internal) so tests can drive decode + buffering
-    /// without a live socket.
+    /// without a live socket. `.droppedFinished` still decoded cleanly, so it reports `true`.
     func processIncoming(_ bytes: [UInt8]) -> Bool {
         if case .fatal = ingest(bytes) { return false }
         return true

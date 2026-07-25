@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import Testing
+import Foundation
 import PortviewProtocol
 @testable import PortviewTransport
 
@@ -126,8 +127,8 @@ import PortviewProtocol
 
     @Test func enqueueSignalsPauseAtControlHighWater() {
         let buffer = InboundBuffer(controlHighWaterBytes: 300, controlLowWaterBytes: 100)
-        #expect(buffer.enqueue([chunk(bytes: 100)]) == false)
-        #expect(buffer.enqueue([chunk(bytes: 200)]) == true)
+        #expect(buffer.enqueue([chunk(bytes: 100)]) == .accepted(pauseReceive: false))
+        #expect(buffer.enqueue([chunk(bytes: 200)]) == .accepted(pauseReceive: true))
         #expect(buffer.isReceivePaused)
     }
 
@@ -149,9 +150,103 @@ import PortviewProtocol
 
     @Test func videoFramesDoNotCountTowardControlBytes() {
         let buffer = InboundBuffer(controlHighWaterBytes: 100, controlLowWaterBytes: 50)
-        #expect(buffer.enqueue([video(1), video(2), video(3)]) == false)
+        #expect(buffer.enqueue([video(1), video(2), video(3)]) == .accepted(pauseReceive: false))
         #expect(!buffer.isReceivePaused)
     }
+
+    // MARK: - finishDiscardingBuffered (han.4 finding 7 — discard-not-drain)
+
+    @Test func finishDiscardingBufferedClearsAllThreeLanesSoNextReturnsNil() async {
+        let buffer = InboundBuffer()
+        buffer.enqueue([.bye(Bye(reason: "control"))])
+        buffer.enqueue([video(1, isKeyframe: true)])
+        buffer.enqueue([audio(1)])
+        buffer.finishDiscardingBuffered()
+        #expect(await buffer.next() == nil)
+        #expect(await buffer.next() == nil)
+    }
+
+    @Test func finishDiscardingBufferedWakesAParkedWaiterWithNil() async {
+        let buffer = InboundBuffer()
+        let task = Task { await buffer.next() }
+        try? await Task.sleep(for: .milliseconds(50)) // let next() park
+        buffer.finishDiscardingBuffered()
+        #expect(await task.value == nil)
+    }
+
+    @Test func finishDiscardingBufferedContrastsWithFinishWhichDrains() async {
+        // finish() DRAINS already-buffered messages (existing, intentional behavior);
+        // finishDiscardingBuffered() DISCARDS them instead. Same buffered payload, opposite
+        // outcome — the security-critical distinction (han.4 finding 7): a revoked peer's queued
+        // input must never be delivered.
+        let draining = InboundBuffer()
+        draining.enqueue([.bye(Bye(reason: "drained"))])
+        draining.finish()
+        #expect(await draining.next() == .bye(Bye(reason: "drained")))
+        #expect(await draining.next() == nil)
+
+        let discarding = InboundBuffer()
+        discarding.enqueue([.bye(Bye(reason: "discarded"))])
+        discarding.finishDiscardingBuffered()
+        #expect(await discarding.next() == nil)
+    }
+
+    @Test func enqueueAfterFinishedReturnsDroppedFinishedAndDoesNotAppend() async {
+        let buffer = InboundBuffer()
+        buffer.finishDiscardingBuffered()
+        let outcome = buffer.enqueue([.bye(Bye(reason: "post-discard"))])
+        #expect(outcome == .droppedFinished)
+        #expect(await buffer.next() == nil)
+    }
+
+    /// BARRIER: races a real concurrent `enqueue` against `finishDiscardingBuffered` from two
+    /// threads with no artificial ordering, many trials. The shared lock must linearize the two
+    /// operations — the enqueue either completes fully BEFORE the discard (and its message is
+    /// cleared) or fully AFTER (and is rejected as `.droppedFinished`) — so the raced message can
+    /// NEVER survive to a later `next()`, whichever thread the OS scheduler favors.
+    @Test func concurrentEnqueueRacingDiscardNeverYieldsALaterMessage() async {
+        for trial in 0..<50 {
+            let buffer = InboundBuffer()
+            let message = AnyMessage.bye(Bye(reason: "race-\(trial)"))
+            let startGate = DispatchSemaphore(value: 0)
+            let doneGroup = DispatchGroup()
+            let outcomeBox = OutcomeBox()
+
+            doneGroup.enter()
+            DispatchQueue.global().async {
+                startGate.wait()
+                outcomeBox.set(buffer.enqueue([message]))
+                doneGroup.leave()
+            }
+            doneGroup.enter()
+            DispatchQueue.global().async {
+                startGate.wait()
+                buffer.finishDiscardingBuffered()
+                doneGroup.leave()
+            }
+            startGate.signal()
+            startGate.signal()
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                doneGroup.notify(queue: .global()) { cont.resume() }
+            }
+
+            // Whichever order won the lock, the buffer must end up fully empty: the enqueue's
+            // message was either never appended (.droppedFinished) or appended-then-cleared.
+            #expect(await buffer.next() == nil, "trial \(trial)")
+            if outcomeBox.get() == .droppedFinished {
+                #expect(buffer.controlBytesBuffered == 0, "trial \(trial)")
+            }
+        }
+    }
+}
+
+/// Test helper: a lock-guarded box for reading a racing thread's `enqueue` verdict back on the
+/// awaiting task.
+private final class OutcomeBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: InboundBuffer.EnqueueOutcome?
+    func set(_ outcome: InboundBuffer.EnqueueOutcome) { lock.lock(); value = outcome; lock.unlock() }
+    func get() -> InboundBuffer.EnqueueOutcome? { lock.lock(); defer { lock.unlock() }; return value }
 }
 
 /// Test helper: lock-free enough for the single-threaded assertions above.

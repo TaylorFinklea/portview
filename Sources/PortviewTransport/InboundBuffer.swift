@@ -73,13 +73,27 @@ final class InboundBuffer: @unchecked Sendable {
         self.onResumeReceive = onResumeReceive
     }
 
-    /// Add decoded messages. Returns true when the control lane crossed its high water — the
-    /// caller must stop re-arming `receive` until `onResumeReceive` fires.
+    /// Terminal verdict for `enqueue` — `.droppedFinished` once the buffer is finished (whether by
+    /// `finish()` or `finishDiscardingBuffered()`), so a receive callback racing a discard-close
+    /// can never re-add a message nor re-arm the receive loop (han.4 finding 7).
+    enum EnqueueOutcome: Equatable, Sendable {
+        /// The messages were appended. `pauseReceive` is true when the control lane crossed its
+        /// high water — the caller must stop re-arming `receive` until `onResumeReceive` fires.
+        case accepted(pauseReceive: Bool)
+        /// The buffer is already finished; nothing was appended.
+        case droppedFinished
+    }
+
+    /// Add decoded messages, unless the buffer is already finished. See `EnqueueOutcome`.
     @discardableResult
-    func enqueue(_ messages: [AnyMessage]) -> Bool {
+    func enqueue(_ messages: [AnyMessage]) -> EnqueueOutcome {
         var handoff: (CheckedContinuation<AnyMessage?, Never>, AnyMessage)?
         var fireResume = false
         lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return .droppedFinished
+        }
         for message in messages {
             if case .videoFrame = message {
                 videoLane.append(message)
@@ -117,7 +131,7 @@ final class InboundBuffer: @unchecked Sendable {
         lock.unlock()
         if let (continuation, message) = handoff { continuation.resume(returning: message) }
         resumeHandler?()
-        return paused
+        return .accepted(pauseReceive: paused)
     }
 
     /// Next message: queued control first, then alternating buffered audio/video; suspends when
@@ -159,6 +173,26 @@ final class InboundBuffer: @unchecked Sendable {
         }
         lock.unlock()
         if let (continuation, value) = handoff { continuation.resume(returning: value) }
+    }
+
+    /// No more messages will arrive AND every already-buffered message is DISCARDED, not drained —
+    /// the security-critical contrast to `finish()` (han.4 finding 7): a revoked peer's queued
+    /// keyboard/clipboard/file frames must never be delivered. Clears all three lanes under the
+    /// lock before marking finished, so a parked `next()` resumes nil and every future `next()`
+    /// returns nil immediately; a racing `enqueue` is linearized by the same lock — it either
+    /// completes fully before this (and is cleared here) or fully after (and sees `finished` →
+    /// `.droppedFinished`).
+    func finishDiscardingBuffered() {
+        lock.lock()
+        controlLane.removeAll(keepingCapacity: false)
+        controlHead = 0
+        controlBytesBuffered = 0
+        audioLane.removeAll(keepingCapacity: false)
+        videoLane.removeAll(keepingCapacity: false)
+        finished = true
+        let continuation = takeWaiterLocked()
+        lock.unlock()
+        continuation?.resume(returning: nil)
     }
 
     // MARK: - Locked helpers (call only while holding `lock`)
