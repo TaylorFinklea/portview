@@ -300,19 +300,21 @@ import Network
 @Suite struct SASCodeDisplayClaimTests {
     @Test func firstClaimSucceedsSecondFailsUntilRelease() async throws {
         let sas = SASPairingControl()
-        let first = try #require(await sas.claimCodeDisplay(source: "10.0.0.2"))
-        let second = await sas.claimCodeDisplay(source: "10.0.0.3")
+        let lease = await sas.openWindow()
+        let first = try #require(await sas.claimCodeDisplay(lease: lease))
+        let second = await sas.claimCodeDisplay(lease: lease)
         #expect(second == nil)
         await sas.releaseCodeDisplay(token: first)
-        let afterRelease = await sas.claimCodeDisplay(source: "10.0.0.3")
+        let afterRelease = await sas.claimCodeDisplay(lease: lease)
         #expect(afterRelease != nil)
     }
 
     @Test func releaseByStaleTokenIsANoOp() async throws {
         let sas = SASPairingControl()
-        let owner = try #require(await sas.claimCodeDisplay(source: "10.0.0.2"))
+        let lease = await sas.openWindow()
+        let owner = try #require(await sas.claimCodeDisplay(lease: lease))
         await sas.releaseCodeDisplay(token: owner + 1)   // not the current owner token — no-op
-        let stillHeld = await sas.claimCodeDisplay(source: "10.0.0.3")
+        let stillHeld = await sas.claimCodeDisplay(lease: lease)
         #expect(stillHeld == nil)
         #expect(await sas.holdsCodeDisplay(token: owner))   // original lease is untouched
     }
@@ -322,28 +324,41 @@ import Network
         // must see it lost the lease (not keep emitting as if it still owned the slot), and a new
         // claim must succeed in its place.
         let sas = SASPairingControl()
-        let oldToken = try #require(await sas.claimCodeDisplay(source: "10.0.0.2"))
-        await sas.openWindow()
+        let lease1 = await sas.openWindow()
+        let oldToken = try #require(await sas.claimCodeDisplay(lease: lease1))
+        let lease2 = await sas.openWindow()
         #expect(await sas.holdsCodeDisplay(token: oldToken) == false)
-        let newToken = await sas.claimCodeDisplay(source: "10.0.0.3")
+        let newToken = await sas.claimCodeDisplay(lease: lease2)
         #expect(newToken != nil)
     }
 
-    @Test func tokensAreMonotonicNotDerivedFromSource() async throws {
-        // Tokens come from the actor's own counter, never from `source` — link-local/APIPA and
-        // IPv6 /64 bucketing mean distinct connections can share one source key, so a
-        // source-derived token could collide across them and let a stripped holder mistake itself
-        // for the new owner.
+    @Test func claimWithPriorWindowLeaseIsRejected() async throws {
+        // Window-epoch check (§6a) layered on top of the free-slot semantics: re-opening the window
+        // supersedes the old lease, so a claim carrying the PRIOR window's lease is rejected even
+        // though the display slot is free — only the current window's lease claims it.
         let sas = SASPairingControl()
-        let first = try #require(await sas.claimCodeDisplay(source: "169.254.0.0/16"))
+        let l1 = await sas.openWindow()
+        let l2 = await sas.openWindow()             // re-open mints a fresh epoch, superseding l1
+        #expect(await sas.claimCodeDisplay(lease: l1) == nil)   // prior window's lease — rejected
+        #expect(await sas.claimCodeDisplay(lease: l2) != nil)   // current window's lease — granted
+    }
+
+    @Test func tokensAreMonotonicNotDerivedFromSource() async throws {
+        // Display-slot tokens come from the actor's own counter, never from any per-source key, so a
+        // release + fresh claim within the same window mints a DISTINCT token (a stripped holder
+        // can't collide with the new owner's token).
+        let sas = SASPairingControl()
+        let lease = await sas.openWindow()
+        let first = try #require(await sas.claimCodeDisplay(lease: lease))
         await sas.releaseCodeDisplay(token: first)
-        let second = try #require(await sas.claimCodeDisplay(source: "169.254.0.0/16"))
+        let second = try #require(await sas.claimCodeDisplay(lease: lease))
         #expect(first != second)
     }
 
     @Test func holdsCodeDisplayIsFalseForANonOwnerToken() async throws {
         let sas = SASPairingControl()
-        let owner = try #require(await sas.claimCodeDisplay(source: "10.0.0.2"))
+        let lease = await sas.openWindow()
+        let owner = try #require(await sas.claimCodeDisplay(lease: lease))
         #expect(await sas.holdsCodeDisplay(token: owner + 1) == false)
     }
 }

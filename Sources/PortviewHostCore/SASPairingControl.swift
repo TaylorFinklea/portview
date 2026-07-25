@@ -11,6 +11,17 @@ import Network
 /// ~1/10⁶ guesses — a source-rotating attacker gets at most that budget, after which the window
 /// closes. Scoped to the open window so a remote attacker can't lock out a user who isn't
 /// currently pairing.
+/// Opaque, monotonic identity for one pairing-window epoch. Minted fresh by `SASAttemptLimiter.open`
+/// (its `init` is internal — only the limiter mints them) and carried unchanged through the preamble
+/// and the `.sasCode`/`.sasConfirmed` emissions so the host UI can bind an async event to the exact
+/// window it belongs to: an event stamped with a PRIOR window's lease can never mutate a newer
+/// window's HUD. Public + Equatable + Sendable because it flows through `HostRunnerEvent` and is
+/// compared on the main actor.
+public struct WindowLease: Sendable, Equatable, Hashable {
+    let id: UInt64
+    init(id: UInt64) { self.id = id }
+}
+
 public struct SASAttemptLimiter: Sendable {
     public let windowDuration: TimeInterval
     /// Per-source attempt cap: a single grinder is rejected past this, without affecting others.
@@ -20,6 +31,11 @@ public struct SASAttemptLimiter: Sendable {
     private var windowStart: Date?
     private var attemptsBySource: [String: Int] = [:]
     private var totalAttempts: Int = 0
+    /// Monotonically incrementing source of fresh window-epoch lease ids; bumped on every `open`.
+    private var nextLeaseID: UInt64 = 0
+    /// The current window's lease (nil while closed). Distinct from `isOpen`'s time check — a
+    /// time-expired window keeps its stored lease value but `currentLease` gates on `isOpen`.
+    private var lease: WindowLease?
 
     public init(windowDuration: TimeInterval = 120, maxAttempts: Int = 5, maxTotalAttempts: Int = 20) {
         self.windowDuration = windowDuration
@@ -27,12 +43,29 @@ public struct SASAttemptLimiter: Sendable {
         self.maxTotalAttempts = maxTotalAttempts
     }
 
-    public mutating func open(now: Date) { windowStart = now; attemptsBySource = [:]; totalAttempts = 0 }
-    public mutating func close() { windowStart = nil; attemptsBySource = [:]; totalAttempts = 0 }
+    /// Open a fresh window, minting and returning a new `WindowLease` epoch id.
+    @discardableResult
+    public mutating func open(now: Date) -> WindowLease {
+        windowStart = now
+        attemptsBySource = [:]
+        totalAttempts = 0
+        nextLeaseID += 1
+        let newLease = WindowLease(id: nextLeaseID)
+        lease = newLease
+        return newLease
+    }
+    public mutating func close() { windowStart = nil; attemptsBySource = [:]; totalAttempts = 0; lease = nil }
 
     public func isOpen(now: Date) -> Bool {
         guard let windowStart else { return false }
         return now.timeIntervalSince(windowStart) < windowDuration
+    }
+
+    /// The current window's lease IFF the window is still open (a rolled-over OR time-expired window
+    /// has no current lease). The window-epoch check `claimCodeDisplay` layers on top of the single
+    /// display slot: a claim carrying a prior window's lease is rejected even though the slot is free.
+    public func currentLease(now: Date) -> WindowLease? {
+        isOpen(now: now) ? lease : nil
     }
 
     /// Record one pairing attempt from `source`. Returns true if the attempt is allowed; false when
@@ -82,12 +115,21 @@ public actor SASPairingControl {
     /// release (crash, forced close) must not wedge every future window's display slot shut. This
     /// does not reach into the stripped holder and stop it; that connection keeps running and must
     /// notice the loss on its own via `holdsCodeDisplay(token:)`.
-    public func openWindow(now: Date = Date()) { limiter.open(now: now); codeDisplayOwner = nil }
+    @discardableResult
+    public func openWindow(now: Date = Date()) -> WindowLease {
+        let lease = limiter.open(now: now)
+        codeDisplayOwner = nil
+        return lease
+    }
     public func closeWindow() { limiter.close() }
 
     func isOpen(now: Date = Date()) -> Bool { limiter.isOpen(now: now) }
-    func registerAttempt(source: String, now: Date = Date()) -> Bool {
-        limiter.registerAttempt(source: source, now: now)
+    /// Record one pairing attempt from `source`, returning the current window's `WindowLease` on
+    /// success (so the caller can stamp its emissions with the exact window epoch) or nil when the
+    /// window isn't open or the attempt is over-cap. Callers that only need a yes/no check `!= nil`.
+    func registerAttempt(source: String, now: Date = Date()) -> WindowLease? {
+        guard limiter.registerAttempt(source: source, now: now) else { return nil }
+        return limiter.currentLease(now: now)
     }
 
     /// Claim the HUD's single code-display slot for `source`, returning a fresh owner token on
@@ -98,8 +140,13 @@ public actor SASPairingControl {
     /// ever derives a code that isn't the one displayed — and must re-validate with
     /// `holdsCodeDisplay(token:)` immediately before actually displaying the code, since a
     /// subsequent `openWindow()` can force-release this lease at any time after it's granted.
-    func claimCodeDisplay(source: String) -> UInt64? {
-        guard codeDisplayOwner == nil else { return nil }
+    ///
+    /// The `lease` argument adds a window-epoch check ON TOP OF the existing single-slot semantics
+    /// (must-fix 6): the claim is rejected unless `lease` is the window's CURRENT lease — a claim
+    /// carrying a prior window's lease fails even though the display slot is free, so a preamble that
+    /// began under a now-superseded window can never grab the HUD out from under a fresh window.
+    func claimCodeDisplay(lease: WindowLease, now: Date = Date()) -> UInt64? {
+        guard let current = limiter.currentLease(now: now), current == lease, codeDisplayOwner == nil else { return nil }
         nextCodeDisplayToken += 1
         codeDisplayOwner = nextCodeDisplayToken
         return nextCodeDisplayToken

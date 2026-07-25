@@ -50,7 +50,7 @@ import PortviewProtocol
     }
 
     private static func sawCode(_ events: [HostRunnerEvent], _ code: String) -> Bool {
-        events.contains { if case .sasCode(let c) = $0 { c == code } else { false } }
+        events.contains { if case .sasCode(let c, _) = $0 { c == code } else { false } }
     }
     private static func sawConfirmed(_ events: [HostRunnerEvent]) -> Bool {
         events.contains { if case .sasConfirmed = $0 { true } else { false } }

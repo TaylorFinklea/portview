@@ -45,12 +45,14 @@ public enum HostRunnerEvent: Equatable, Sendable {
     /// Periodic live-session telemetry for the connected-device card.
     case sessionStats(HostSessionStats)
     /// The 6-digit SAS pairing code to display on the host HUD (never logged). Cleared by the app on
-    /// connect/timeout/stop.
-    case sasCode(String)
+    /// connect/timeout/stop. Stamped with the window epoch's `WindowLease` so the app applies it only
+    /// to the current window — a prior window's async emit can't mutate a newer window's HUD.
+    case sasCode(String, lease: WindowLease)
     /// A client sent a valid authenticated pairing confirmation (Guardrail E). A positive "✓ a client
     /// confirmed" signal only — it must NOT close the (single, shared) pairing window; the window
-    /// closes via the pinned re-dial's `.deviceConnected`, the app timeout, the cap, or stop.
-    case sasConfirmed
+    /// closes via the pinned re-dial's `.deviceConnected`, the app timeout, the cap, or stop. Stamped
+    /// with the window epoch's `WindowLease` (see `.sasCode`).
+    case sasConfirmed(lease: WindowLease)
     /// An unknown-but-validly-signed key asked to enroll while the pairing window was open (han.3):
     /// surfaces ONLY the human-compare fingerprint, the claimed (sanitized) device name, the attempt
     /// id, and its deadline — NEVER the raw public key (key-material hygiene).
@@ -1101,7 +1103,9 @@ public struct HostRunner: Sendable {
         // exhausted, so a rejected attempt just drops this connection.
         guard let sas, await sas.isOpen() else { return }
         let source = SASPairingControl.sourceKey(for: connection.resolvedRemoteEndpoint)
-        guard await sas.registerAttempt(source: source) else { return }
+        // The lease stamps this engagement's window epoch: threaded through the display claim and the
+        // `.sasCode`/`.sasConfirmed` emissions so the app can reject a stale (prior-window) event.
+        guard let lease = await sas.registerAttempt(source: source) else { return }
 
         // Host: fresh nonce + commit, sent before any reveal.
         let hostNonce = SASCode.randomNonce()
@@ -1123,7 +1127,7 @@ public struct HostRunner: Sendable {
         // a code that isn't the one displayed. Claiming this late (rather than at engagement start)
         // keeps a silent/stalled connection from holding the display slot for the whole 5s wait
         // above. Released via its token on every exit.
-        guard let displayToken = await sas.claimCodeDisplay(source: source) else { return }
+        guard let displayToken = await sas.claimCodeDisplay(lease: lease) else { return }
         defer { Task { await sas.releaseCodeDisplay(token: displayToken) } }
 
         // Reveal the host nonce, then both sides derive the same code.
@@ -1134,7 +1138,7 @@ public struct HostRunner: Sendable {
         // holder that was stripped mid-flight must skip the emit rather than overwrite a newer
         // window's code with its own (the exact must-fix-6 DoS this lease exists to close).
         guard await sas.holdsCodeDisplay(token: displayToken) else { return }
-        emit(.sasCode(code))
+        emit(.sasCode(code, lease: lease))
 
         // Guardrail E (optional, best-effort): read EXACTLY ONE more message — the client's
         // authenticated confirmation that the user matched. Bounded by a timeout task that closes the
@@ -1148,7 +1152,7 @@ public struct HostRunner: Sendable {
         guard case .sasClientConfirm(let confirm)? = await inbound.next() else { return }
         if SASCode.verifyConfirmation(confirm.mac, clientNonce: reveal.nonce, hostNonce: hostNonce,
                                       certSHA256: hostCertSHA256) {
-            emit(.sasConfirmed)
+            emit(.sasConfirmed(lease: lease))
         }
     }
 
