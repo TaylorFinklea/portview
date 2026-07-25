@@ -20,6 +20,15 @@ import PortviewProtocol
         func increment() { lock.lock(); _count += 1; lock.unlock() }
     }
 
+    /// Lock-guarded flag box for observing state mutated from a background thread (mirrors
+    /// `SessionCapabilityTests.Flag`).
+    private final class Flag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func set(_ newValue: Bool) { lock.lock(); value = newValue; lock.unlock() }
+        var current: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
     private static let messages: [AnyMessage] = [
         .pointerMove(PointerMove(dx: 1, dy: 1)),
         .pointerButton(PointerButton(button: .left, isDown: true)),
@@ -29,7 +38,7 @@ import PortviewProtocol
     ]
 
     @Test func pausedDropsAllMessageKindsThenUnpausedInjectsAll() {
-        let injector = InputInjector(displayBounds: CGRect(x: 0, y: 0, width: 1000, height: 1000))
+        let injector = InputInjector(displayBounds: CGRect(x: 0, y: 0, width: 1000, height: 1000), capability: SessionCapability())
         let counter = Counter()
         injector.postEvent = { _ in counter.increment() }
 
@@ -43,5 +52,73 @@ import PortviewProtocol
             injector.handle(message)
             #expect(counter.count > before, "expected \(message) to post at least one event")
         }
+    }
+
+    /// han.4 Task 5 "Bounded-wait" (design §4.1/§4-residual/§8, H-b): every CGEvent post routes
+    /// through `capability.perform` INDIVIDUALLY — never the whole `.typeText` message — so
+    /// `invalidate()` is checked atomically with each event, not once for the whole compound
+    /// message. Proven with real cross-thread contention (mirrors
+    /// `SessionCapabilityTests.performAndInvalidateAreMutuallyExclusive`): the first `postEvent`
+    /// call parks inside `perform`'s lock, and `invalidate()` is confirmed BLOCKED on that SAME
+    /// lock (cannot complete) while it's parked — so invalidate can only win once that one event's
+    /// effect returns. Exactly which iteration wins the freed lock next is a genuine OS scheduling
+    /// race (the design's own defined residual — §10 R2/R8: "one irreducible effect" may still be
+    /// in flight around an invalidation), so this asserts a generous bound, not an exact count —
+    /// what matters for H-b is that the gate stops WELL short of the whole 10,000-event message,
+    /// not that it stops at exactly the first.
+    @Test func typeTextGatedPerCGEventBoundsInvalidateToAHandfulOfEvents() {
+        let capability = SessionCapability()
+        let injector = InputInjector(displayBounds: CGRect(x: 0, y: 0, width: 1000, height: 1000), capability: capability)
+        let counter = Counter()
+        let enteredFirstEvent = DispatchSemaphore(value: 0)
+        let releaseFirstEvent = DispatchSemaphore(value: 0)
+        let totalEvents = 5_000 * 2  // .typeText posts 2 CGEvents/char
+
+        injector.postEvent = { _ in
+            counter.increment()
+            if counter.count == 1 {
+                enteredFirstEvent.signal()
+                releaseFirstEvent.wait()
+            }
+        }
+
+        let group = DispatchGroup()
+        group.enter()
+        Thread.detachNewThread {
+            // 5,000 characters × 2 CGEvents/char — if the gate ever wrapped the whole message
+            // instead of each event, every one of these would post regardless of invalidate.
+            injector.handle(.typeText(TypeText(text: String(repeating: "a", count: 5_000))))
+            group.leave()
+        }
+
+        #expect(enteredFirstEvent.wait(timeout: .now() + 10) == .success)
+
+        // invalidate() must block on the SAME lock the parked first `perform` call holds — it
+        // cannot complete until that call returns, proving the two are mutually exclusive here
+        // too (not just in SessionCapabilityTests' own unit test).
+        let invalidateCompleted = Flag()
+        let invalidateGroup = DispatchGroup()
+        invalidateGroup.enter()
+        Thread.detachNewThread {
+            capability.invalidate()
+            invalidateCompleted.set(true)
+            invalidateGroup.leave()
+        }
+
+        // Bounded window for invalidate() to reach (and block on) the shared lock. It must NOT
+        // have completed yet — proof it cannot return while the first event's `perform` is still
+        // parked, i.e. invalidate wins only AFTER that event returns, never mid-event.
+        Thread.sleep(forTimeInterval: 0.05)
+        #expect(invalidateCompleted.current == false)
+
+        releaseFirstEvent.signal()
+        #expect(invalidateGroup.wait(timeout: .now() + 10) == .success)
+        #expect(group.wait(timeout: .now() + 10) == .success)
+
+        #expect(counter.count >= 1)
+        #expect(
+            counter.count < totalEvents / 10,
+            "invalidate() must cut the large .typeText off far short of its \(totalEvents) events (posted \(counter.count)) — the gate must be per-CGEvent, not whole-message"
+        )
     }
 }

@@ -25,17 +25,23 @@ final class FileReceiver {
     private let maxFileSize: UInt64
     private let maxSessionSize: UInt64
     private var sessionTotal: UInt64 = 0
+    /// Per-session act-permission gate (han.4 Task 5, design §4/§7 invariant 2). `chunk`'s single
+    /// `handle.write` is the irreducible effect boundary — gated so an invalidated capability
+    /// skips the write, never a whole-message guard.
+    private let capability: SessionCapability
 
     init(
         directory: URL? = nil,
         maxFileSize: UInt64 = FileReceiver.defaultMaxFileSize,
-        maxSessionSize: UInt64 = FileReceiver.defaultMaxSessionSize
+        maxSessionSize: UInt64 = FileReceiver.defaultMaxSessionSize,
+        capability: SessionCapability
     ) {
         self.directory = directory
             ?? FileManager.default.urls(for: .downloadsDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
         self.maxFileSize = maxFileSize
         self.maxSessionSize = maxSessionSize
+        self.capability = capability
     }
 
     func offer(_ offer: FileOffer) {
@@ -57,7 +63,10 @@ final class FileReceiver {
                 dropTransfer(chunk.transferID, transfer)
                 return
             }
-            try? transfer.handle.write(contentsOf: Data(chunk.data))
+            let wrote = capability.perform {
+                try? transfer.handle.write(contentsOf: Data(chunk.data))
+            }
+            guard wrote else { return }
             transfer.received += incoming
             sessionTotal += incoming
             transfers[chunk.transferID] = transfer

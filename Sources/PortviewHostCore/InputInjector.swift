@@ -41,11 +41,25 @@ final class InputInjector: @unchecked Sendable {
     private var leftButtonDown = false
     private var lastReported = CGPoint(x: -1_000, y: -1_000)
     private let sensitivity: CGFloat
+    /// Per-session act-permission gate (han.4 Task 5, design §4/§7 invariant 2). Every CGEvent
+    /// post routes through `post(_:)`, which wraps the single `postEvent` call in
+    /// `capability.perform` — the IRREDUCIBLE effect boundary — so a large `.typeText` (2
+    /// CGEvents/char) is gated per event, not around the whole message: `invalidate()` can win
+    /// after at most one event, however many characters remain (H-b).
+    private let capability: SessionCapability
 
-    init(displayBounds: CGRect, sensitivity: CGFloat = 1.5) {
+    init(displayBounds: CGRect, capability: SessionCapability, sensitivity: CGFloat = 1.5) {
         self.bounds = displayBounds
         self.position = CGPoint(x: displayBounds.midX, y: displayBounds.midY)
+        self.capability = capability
         self.sensitivity = sensitivity
+    }
+
+    /// The irreducible effect boundary: one CGEvent, gated by the session capability. Every
+    /// posting call site funnels through here (never call `postEvent` directly) so `invalidate()`
+    /// is checked atomically with each individual OS effect.
+    private func post(_ event: CGEvent) {
+        capability.perform { self.postEvent(event) }
     }
 
     func handle(_ message: AnyMessage) {
@@ -74,7 +88,7 @@ final class InputInjector: @unchecked Sendable {
         )
         let type: CGEventType = leftButtonDown ? .leftMouseDragged : .mouseMoved
         if let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: position, mouseButton: .left) {
-            postEvent(event)
+            post(event)
         }
         reportCursorIfMoved()
     }
@@ -104,13 +118,13 @@ final class InputInjector: @unchecked Sendable {
             button = .center
         }
         if let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: position, mouseButton: button) {
-            postEvent(event)
+            post(event)
         }
     }
 
     private func scroll(dx: Int32, dy: Int32) {
         if let event = CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 2, wheel1: dy, wheel2: dx, wheel3: 0) {
-            postEvent(event)
+            post(event)
         }
     }
 
@@ -121,8 +135,8 @@ final class InputInjector: @unchecked Sendable {
                   let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else { continue }
             down.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
             up.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: &utf16)
-            postEvent(down)
-            postEvent(up)
+            post(down)
+            post(up)
         }
     }
 
@@ -146,11 +160,11 @@ final class InputInjector: @unchecked Sendable {
     private func postKey(_ code: CGKeyCode, flags: CGEventFlags) {
         if let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true) {
             down.flags = flags
-            postEvent(down)
+            post(down)
         }
         if let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) {
             up.flags = flags
-            postEvent(up)
+            post(up)
         }
     }
 

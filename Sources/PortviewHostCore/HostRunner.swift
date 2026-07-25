@@ -613,7 +613,13 @@ public struct HostRunner: Sendable {
         // it never rides the session's OutboundLane.
         let router = HostLaneRouter(primary: connection)
         var laneBindTask: Task<Void, Never>?
-        let clipboard = ClipboardSync()
+        // MINIMAL han.4 Task-5 compile-fix: ClipboardSync/FileReceiver/InputInjector now require a
+        // SessionCapability (design §2/§4 — each gates its irreducible effect boundary on it).
+        // Nothing in THIS function invalidates this placeholder yet; the real per-session
+        // capability (shared with `register`'s ticket/capability above, invalidated
+        // Invalidate-First on every teardown path) is Task 8's serve-loop reorder.
+        let inboundEffectCapability = SessionCapability()
+        let clipboard = ClipboardSync(capability: inboundEffectCapability)
         clipboard.start { text in
             // Cap outbound clipboard at the sender: an over-cap copy would make an oversized frame the
             // client's decoder rejects (WireError.malformed), dropping the session. Skip it entirely
@@ -624,7 +630,7 @@ public struct HostRunner: Sendable {
             }
             outbound.enqueue(.clipboardUpdate(ClipboardUpdate(text: text)))
         }
-        let fileReceiver = FileReceiver()
+        let fileReceiver = FileReceiver(capability: inboundEffectCapability)
         // Latest client-reported receive-side quality snapshot for THIS connection, read by the
         // video pump's adaptive rate controller each stats interval.
         let clientFeedback = ClientFeedbackHolder()
@@ -641,7 +647,7 @@ public struct HostRunner: Sendable {
         // Cursor reports ride the session's shared outbound lane (coalescing, last-wins), so
         // confirmations can't reorder/back-step the client's cursor-follow.
         let cursorPump = CursorReportPump(lane: outbound)
-        var injector = makeInjector(for: firstDisplay, cursorPump: cursorPump)
+        var injector = makeInjector(for: firstDisplay, cursorPump: cursorPump, capability: inboundEffectCapability)
         var currentCapture: CaptureEngine?
         var videoTask: Task<Void, Never>?
         defer {
@@ -665,7 +671,7 @@ public struct HostRunner: Sendable {
         }
         func startVideo(on display: SCDisplay) {
             videoTask?.cancel()
-            injector = makeInjector(for: display, cursorPump: cursorPump)
+            injector = makeInjector(for: display, cursorPump: cursorPump, capability: inboundEffectCapability)
             let capture = CaptureEngine(width: display.width, height: display.height)
             currentCapture = capture
             // A lane-death flip forces its keyframe through THIS capture's request path (the same
@@ -1000,8 +1006,8 @@ public struct HostRunner: Sendable {
     /// Build an `InputInjector` whose cursor clamping + reporting are bound to `display`. Cursor reports
     /// go through the connection's ordered `cursorPump` (not a detached Task per report) so they reach
     /// the client monotonically.
-    private static func makeInjector(for display: SCDisplay, cursorPump: CursorReportPump) -> InputInjector {
-        let injector = InputInjector(displayBounds: CGDisplayBounds(display.displayID))
+    private static func makeInjector(for display: SCDisplay, cursorPump: CursorReportPump, capability: SessionCapability) -> InputInjector {
+        let injector = InputInjector(displayBounds: CGDisplayBounds(display.displayID), capability: capability)
         injector.onCursorMoved = { nx, ny in cursorPump.report(nx, ny) }
         return injector
     }
