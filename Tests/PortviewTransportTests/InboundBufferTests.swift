@@ -156,11 +156,17 @@ import PortviewProtocol
 
     // MARK: - finishDiscardingBuffered (han.4 finding 7 — discard-not-drain)
 
+    /// THE PRIMARY GUARANTEE (100%, no residual): a buffered BACKLOG — messages already decoded
+    /// and appended, with NO consumer parked to race — is discarded in full. This is the case an
+    /// actual revoke hits almost always (a consumer is rarely suspended in `next()` at the instant
+    /// a `finishDiscardingBuffered()` lands); the bounded parked-waiter race below is the separate,
+    /// accepted residual (R9) for the much rarer case where a consumer happens to be parked.
     @Test func finishDiscardingBufferedClearsAllThreeLanesSoNextReturnsNil() async {
         let buffer = InboundBuffer()
-        buffer.enqueue([.bye(Bye(reason: "control"))])
-        buffer.enqueue([video(1, isKeyframe: true)])
-        buffer.enqueue([audio(1)])
+        buffer.enqueue([.bye(Bye(reason: "control-1")), .clipboardUpdate(ClipboardUpdate(text: "control-2")),
+                        .bye(Bye(reason: "control-3"))])
+        buffer.enqueue([video(1, isKeyframe: true), video(2)])
+        buffer.enqueue([audio(1), audio(2)])
         buffer.finishDiscardingBuffered()
         #expect(await buffer.next() == nil)
         #expect(await buffer.next() == nil)
@@ -191,11 +197,18 @@ import PortviewProtocol
         #expect(await discarding.next() == nil)
     }
 
-    @Test func enqueueAfterFinishedReturnsDroppedFinishedAndDoesNotAppend() async {
+    /// TERMINAL: once `finishDiscardingBuffered()` has run, the buffer stays permanently closed —
+    /// every subsequent `enqueue` is rejected (never appended), and a waiter that parks in `next()`
+    /// AFTER the finish resolves nil immediately rather than ever suspending on new work.
+    @Test func terminalAfterFinishDiscardingBufferedEveryEnqueueDropsAndALaterWaiterResolvesNil() async {
         let buffer = InboundBuffer()
         buffer.finishDiscardingBuffered()
-        let outcome = buffer.enqueue([.bye(Bye(reason: "post-discard"))])
-        #expect(outcome == .droppedFinished)
+
+        #expect(buffer.enqueue([.bye(Bye(reason: "post-discard-1"))]) == .droppedFinished)
+        #expect(buffer.enqueue([.bye(Bye(reason: "post-discard-2"))]) == .droppedFinished)
+
+        // A "waiter parked after finish" — next() called once the buffer is already terminal.
+        #expect(await buffer.next() == nil)
         #expect(await buffer.next() == nil)
     }
 
@@ -236,6 +249,65 @@ import PortviewProtocol
             if outcomeBox.get() == .droppedFinished {
                 #expect(buffer.controlBytesBuffered == 0, "trial \(trial)")
             }
+        }
+    }
+
+    /// PARKED-WAITER residual — adjudicated han.4 design doc §4 as accepted residual **R9**
+    /// (2026-07-25, Task-2 review adjudication): a consumer already suspended in `next()` (the
+    /// buffer's normal resting state) racing a SINGLE `enqueue` against `finishDiscardingBuffered`
+    /// may receive AT MOST that one message — no general synchronization primitive (raw lock, GCD
+    /// serial queue) can make either side an unconditional winner of a truly simultaneous race (see
+    /// `.superpowers/sdd/task-2-report.md` "Fix follow-up" for the empirical investigation: the
+    /// reviewer's suggested queue-serialization mechanism was measured WORSE, ~46% delivered vs the
+    /// direct call's ~1%, so the direct call — commit 9e00797, unchanged — stays). This residual is
+    /// bounded (never a SECOND message) and backstopped by the capability effect-boundary guard
+    /// (han.4 Task 5): a message that slips through here still can't perform its effect once
+    /// `SessionCapability.invalidate()` — which always runs before this discard in the revoke
+    /// ordering — has landed. Does NOT assert "never delivered" — that is not achievable for a
+    /// single truly-simultaneous enqueue and asserting it would make this test permanently flaky.
+    @Test func parkedWaiterConcurrentEnqueueIsBoundedToOneMessage() async {
+        for trial in 0..<100 {
+            let buffer = InboundBuffer()
+            let message = AnyMessage.bye(Bye(reason: "race-\(trial)"))
+
+            let waiterTask = Task { await buffer.next() }
+            try? await Task.sleep(for: .milliseconds(50)) // let next() park
+
+            let startGate = DispatchSemaphore(value: 0)
+            let doneGroup = DispatchGroup()
+
+            // Dedicated OS threads, not shared-pool GCD work items: `DispatchQueue.global()` was
+            // empirically found (see task-2-report.md) to favor whichever racer's block was
+            // SUBMITTED first in program order — an artifact of that pool's own scheduling, not a
+            // property of the code under test.
+            doneGroup.enter()
+            Thread.detachNewThread {
+                startGate.wait()
+                _ = buffer.enqueue([message])
+                doneGroup.leave()
+            }
+            doneGroup.enter()
+            Thread.detachNewThread {
+                startGate.wait()
+                buffer.finishDiscardingBuffered()
+                doneGroup.leave()
+            }
+            startGate.signal()
+            startGate.signal()
+            await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+                doneGroup.notify(queue: .global()) { cont.resume() }
+            }
+
+            // Bounded to AT MOST one message: if the race delivered it, that message must be THIS
+            // trial's own (never a stray from anywhere else) — the accepted R9 residual.
+            let firstResult = await waiterTask.value
+            if let firstResult {
+                #expect(firstResult == message, "trial \(trial): a delivered message must be this race's own")
+            }
+
+            // TERMINAL from here regardless of the first race's outcome: never a second message.
+            #expect(buffer.enqueue([.bye(Bye(reason: "second-\(trial)"))]) == .droppedFinished, "trial \(trial)")
+            #expect(await buffer.next() == nil, "trial \(trial)")
         }
     }
 }
