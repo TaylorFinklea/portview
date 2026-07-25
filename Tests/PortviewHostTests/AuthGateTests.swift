@@ -128,6 +128,41 @@ import PortviewProtocol
         #expect(outcome == .rejected(.revoking))
     }
 
+    @Test func fencedKeyIsRejectedThroughTheProductionAdmissionTicketSeam() async throws {
+        // The same fence, driven through the seam PRODUCTION binds — `HostRunner
+        // .admissionTicketProvider(control)` with a real, NON-nil `HostControl` whose key is fenced
+        // by `beginRevoke`. The provider must propagate the registry's `nil` unchanged; masking it
+        // into a `(K, 0)` ticket would silently delete the gate-level revoke fence in production
+        // (and, once the durable record is gone, route the handshake into `.unknownKey` and a
+        // spurious enrollment prompt).
+        let key = Curve25519.Signing.PrivateKey()
+        let pairings = PairingStore(store: MemoryPairingStore())
+        try await pairings.enroll(publicKey: key.publicKey.rawRepresentation, deviceName: "phone")
+        let keyID = PairingStore.deviceID(forPublicKey: key.publicKey.rawRepresentation)
+
+        let control = HostControl(keepAwake: KeepAwake(backend: GateNoopKeepAwakeBackend(), ticker: GateNoopTicker()))
+        let receipt = control.beginRevoke(clientKeyID: keyID)
+
+        let outcome = await runGate(
+            effectiveMode: { .required }, pairings: pairings,
+            admissionTicket: HostRunner.admissionTicketProvider(control)
+        ) { challenge in
+            [self.auth(for: key, challenge: challenge)]
+        }
+        #expect(outcome == .rejected(.revoking))
+
+        // Once the fence lifts, the SAME provider admits again — proving the rejection above came
+        // from the fence, not from a blanket-nil seam.
+        control.endRevoke(lease: receipt.lease)
+        let after = await runGate(
+            effectiveMode: { .required }, pairings: pairings,
+            admissionTicket: HostRunner.admissionTicketProvider(control)
+        ) { challenge in
+            [self.auth(for: key, challenge: challenge)]
+        }
+        #expect(after == .authenticated(deviceID: keyID, ticket: AdmissionTicket(keyID: keyID, generation: 1)))
+    }
+
     @Test func forgedSignatureIsRejected() async throws {
         // Signature over the WRONG nonce (a replayed prior challenge) must fail closed even for
         // an enrolled key — the fresh-nonce binding is the replay defense.
@@ -280,4 +315,17 @@ import PortviewProtocol
         _ = key
         #expect(outcome == .rejected(.missingHostCertHash))
     }
+}
+
+/// A keep-awake backend that does nothing (tests must not touch the live IOPM assertion surface).
+private final class GateNoopKeepAwakeBackend: KeepAwakeBackend, @unchecked Sendable {
+    func beginPreventingSleep() {}
+    func endPreventingSleep() {}
+    func declareUserActivity() {}
+}
+
+/// A ticker that never fires (no wall-clock timer → deterministic under parallel load).
+private final class GateNoopTicker: KeepAwakeTicker, @unchecked Sendable {
+    func start(interval: TimeInterval, onFire: @escaping @Sendable () -> Void) {}
+    func stop() {}
 }

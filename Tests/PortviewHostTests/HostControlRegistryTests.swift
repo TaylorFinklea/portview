@@ -234,6 +234,53 @@ import PortviewProtocol
         #expect(capB.isValid == false)
     }
 
+    /// Final-review M-3 (design §10 R8): with 2+ live sessions under ONE key, `beginRevoke` must
+    /// invalidate **every** snapshotted capability BEFORE it starts tearing down any of their
+    /// transports. The old per-session `invalidate → finish → close` interleave left the LATER
+    /// session's capability valid for the whole of the EARLIER session's transport teardown —
+    /// strictly wider than R8's documented "≤ one irreducible effect per capability" bound.
+    ///
+    /// Witness: each session's outbound lane drains into an injected sink that PARKS inside a
+    /// `withTaskCancellationHandler`. `OutboundLane.finish()` — the first step of a session's
+    /// transport teardown — cancels that drain task, and `Task.cancel()` runs the registered
+    /// cancellation handler synchronously on `beginRevoke`'s own thread, so the handler samples both
+    /// capabilities at the exact instant the first teardown becomes observable.
+    @Test func beginRevoke_invalidatesEveryCapabilityBeforeAnyTransportTeardown() async throws {
+        let control = makeControl()
+        let capA = SessionCapability()
+        let capB = SessionCapability()
+        let witness = TeardownWitness()
+        let sinkA = ParkedSink { witness.record(a: capA.isValid, b: capB.isValid) }
+        let sinkB = ParkedSink { witness.record(a: capA.isValid, b: capB.isValid) }
+        let connA = phantomConnection()
+        let connB = phantomConnection()
+        let laneA = OutboundLane<AnyMessage>(sink: { _ in await sinkA.park() })
+        let laneB = OutboundLane<AnyMessage>(sink: { _ in await sinkB.park() })
+
+        #expect(control.register("A", connA, outbound: laneA, authClass: .authenticated,
+                                 ticket: AdmissionTicket(keyID: "K", generation: 0),
+                                 capability: capA) == .admitted)
+        #expect(control.register("B", connB, outbound: laneB, authClass: .authenticated,
+                                 ticket: AdmissionTicket(keyID: "K", generation: 0),
+                                 capability: capB) == .admitted)
+
+        // Drive each drain task into its sink so the cancellation handlers are registered.
+        laneA.enqueue(.ping(Ping(sendMicros: 1)))
+        laneB.enqueue(.ping(Ping(sendMicros: 2)))
+        let deadline = Date().addingTimeInterval(10)
+        while !(sinkA.isParked && sinkB.isParked), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(sinkA.isParked && sinkB.isParked)
+
+        _ = control.beginRevoke(clientKeyID: "K")
+
+        let samples = witness.samples
+        #expect(samples.count == 2)  // both teardowns observed, synchronously inside beginRevoke
+        // At EVERY teardown instant — including the FIRST — no capability under the key is still live.
+        #expect(samples.allSatisfy { !$0.a && !$0.b })
+    }
+
     @Test func deregisterBySessionIDDoesNotWipeReconnectingSibling() {
         let control = makeControl()
         admit(control, id: "S1", key: "K", generation: 0)
@@ -323,6 +370,50 @@ import PortviewProtocol
 }
 
 // MARK: - Test backends / tickers
+
+/// Records what every observed transport teardown saw of the two capabilities under the key.
+private final class TeardownWitness: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [(a: Bool, b: Bool)] = []
+    func record(a: Bool, b: Bool) { lock.lock(); recorded.append((a, b)); lock.unlock() }
+    var samples: [(a: Bool, b: Bool)] { lock.lock(); defer { lock.unlock() }; return recorded }
+}
+
+/// An `OutboundLane` sink that parks its drain task forever under a cancellation handler. Because
+/// `OutboundLane.finish()` cancels the drain task and `Task.cancel()` runs cancellation handlers
+/// synchronously on the cancelling thread, `onTeardown` fires inline at the first observable moment
+/// of that lane's teardown.
+private final class ParkedSink: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var parked = false
+    private var released = false
+    private let onTeardown: @Sendable () -> Void
+
+    init(_ onTeardown: @escaping @Sendable () -> Void) { self.onTeardown = onTeardown }
+
+    var isParked: Bool { lock.lock(); defer { lock.unlock() }; return parked }
+
+    func park() async {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                lock.lock()
+                guard !released else { lock.unlock(); continuation.resume(); return }
+                self.continuation = continuation
+                parked = true
+                lock.unlock()
+            }
+        } onCancel: {
+            onTeardown()
+            lock.lock()
+            let pending = continuation
+            continuation = nil
+            released = true
+            lock.unlock()
+            pending?.resume()
+        }
+    }
+}
 
 /// A keep-awake backend that does nothing (tests must not touch the live IOPM assertion surface).
 private final class NoopKeepAwakeBackend: KeepAwakeBackend, @unchecked Sendable {

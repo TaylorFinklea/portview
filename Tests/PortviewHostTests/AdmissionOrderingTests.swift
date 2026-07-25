@@ -170,6 +170,30 @@ import PortviewProtocol
         let existing = makeControl()
         #expect(HostRunner.resolvedControl(existing) === existing)
     }
+
+    // MARK: - the gate's admissionTicket seam (design §1b step 4 / §5)
+
+    @Test func admissionTicketProvider_nilControlAdmitsUnfencedAtGenerationZero() {
+        // The ONLY un-fenced fallback: no registry to fence against (tests that drive the gate or
+        // `serveSession` without a control). Production always has one.
+        let provider = HostRunner.admissionTicketProvider(nil)
+        #expect(provider("K") == AdmissionTicket(keyID: "K", generation: 0))
+    }
+
+    @Test func admissionTicketProvider_nonNilControlPropagatesTheFenceAsNil() {
+        // With a real registry the provider is a pure pass-through: `nil` means FENCED and must stay
+        // `nil` so `serveAuthGate` rejects with `.revoking`. Collapsing it into a generation-0 ticket
+        // would make the gate-level fence dead code in production.
+        let control = makeControl()
+        let provider = HostRunner.admissionTicketProvider(control)
+        #expect(provider("K") == AdmissionTicket(keyID: "K", generation: 0))
+
+        let receipt = control.beginRevoke(clientKeyID: "K")
+        #expect(provider("K") == nil)
+
+        control.endRevoke(lease: receipt.lease)
+        #expect(provider("K") == AdmissionTicket(keyID: "K", generation: 1))
+    }
 }
 
 /// A keep-awake backend that does nothing (tests must not touch the live IOPM assertion surface).

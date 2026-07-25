@@ -126,11 +126,13 @@ authorities — the shared durable `PairingStore` actor and the in-process `Host
      c. **Snapshot** every live session in `byClient[K]` (their `capability` + `outbound` +
         `connection`); remove each from `sessions` and from `byClient[K]`; `keepAwake.sessionEnded`
         each — all under the lock. **No capability invalidation and no transport work under the lock.**
-   - **Out of the lock (H-b, H-d ordering):** for each snapshot, in order:
-     `capability.invalidate()` **first** (bounded wait ≤ one irreducible effect — §4), then
-     `session.outbound.finish()` (drop queued clipboard/cursor/file/broadcast sends), then
-     `session.connection.closeDiscardingInbound()` (§4). **No graceful `bye`** (unlike
-     `disconnectAll`, `HostControl.swift:120`).
+   - **Out of the lock (H-b, H-d ordering), in TWO passes:** pass 1 `capability.invalidate()` on
+     **every** snapshot (bounded wait ≤ one irreducible effect each — §4); pass 2, per snapshot,
+     `session.outbound.finish()` (drop queued clipboard/cursor/file/broadcast sends) then
+     `session.connection.closeDiscardingInbound()` (§4). Two passes, not one interleaved loop
+     (final-review M-3): interleaving left a second session under the same key acting for the whole
+     of the first session's transport teardown, wider than R8's per-capability bound. **No graceful
+     `bye`** (unlike `disconnectAll`, `HostControl.swift:120`).
    - Return `RevokeReceipt(lease:, evictedCount:)`.
 4. **Durable removal (second).** `try await pairings.revoke(id: K)` on the **shared** `PairingStore`
    instance (§2). `migrationComplete` is never cleared (`PairingStore.swift:147`), so revoking the
@@ -332,6 +334,12 @@ prescribed** where they are codebase idioms the implementer must read and mirror
   (`NSLock`), so an outer wrap around a self-guarding chunk would self-deadlock on a *valid*
   capability (Task-5 review). One gate at the irreducible write, not two. Size cap: `chunk.data.count`
   is capped at the SERVE boundary (Task 8, H-b). Per-file/per-session caps (`:56`) unchanged.
+- **`FileReceiver.offer`** (final-review M-2). `offer`'s single `FileManager.createFile` is an
+  irreducible effect of its own — an ungated `offer` leaves a 0-byte, client-named file in
+  ~/Downloads when a `.fileOffer` lands through the bounded R9 parked-waiter window. `offer`
+  SELF-GUARDS that one `createFile` in `capability.perform` and returns without registering the
+  transfer when the gate is closed (so a following `chunk` is a no-op too). Same rule as `chunk`:
+  the serve loop calls `fileReceiver.offer(offer)` **UNWRAPPED**.
 - **`InboundBuffer`** (`InboundBuffer.swift`). *Add* `finishDiscardingBuffered()`: under the lock,
   clear `controlLane`/`controlHead`/`controlBytesBuffered`/`audioLane`/`videoLane`, set `finished =
   true`, take + resume any `waiter` with `nil`. **Change `enqueue`** (`:79`) to return a **terminal
@@ -726,9 +734,10 @@ shared across processes. Separate storage is preferred (it preserves the durable
    (bye/close/finish). No deferred or in-flight effect outlives a session's authority on any exit.
 2. **Effect-boundary invalidation at the IRREDUCIBLE unit, synchronous (finding 3, H-b).** Every
    privileged inbound effect is size-capped and runs through `capability.perform` around one
-   irreducible OS effect (one CGEvent post, one pasteboard write, one file-chunk write) — never a
-   compound message — so `invalidate()` waits at most one such effect. Buffered inbound is
-   **discarded, never drained**; a finished buffer drops and never re-arms the receive loop.
+   irreducible OS effect (one CGEvent post, one pasteboard write, one file **creation**, one
+   file-chunk write) — never a compound message — so `invalidate()` waits at most one such effect.
+   Buffered inbound is **discarded, never drained**; a finished buffer drops and never re-arms the
+   receive loop.
 3. **Revoke never blocks the registry lock on an effect (H-b).** `beginRevoke` under `HostControl.lock`
    only bumps + fences + snapshots + unlinks; capability invalidation (which may briefly wait) and all
    transport teardown happen **out of the lock**. The lease-fence stays set under the lock for the

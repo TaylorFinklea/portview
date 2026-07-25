@@ -25,9 +25,10 @@ final class FileReceiver {
     private let maxFileSize: UInt64
     private let maxSessionSize: UInt64
     private var sessionTotal: UInt64 = 0
-    /// Per-session act-permission gate (han.4 Task 5, design §4/§7 invariant 2). `chunk`'s single
-    /// `handle.write` is the irreducible effect boundary — gated so an invalidated capability
-    /// skips the write, never a whole-message guard.
+    /// Per-session act-permission gate (han.4 Task 5, design §4/§7 invariant 2). Two irreducible
+    /// effect boundaries are gated — `offer`'s single `createFile` and `chunk`'s single
+    /// `handle.write` — so an invalidated capability skips each effect itself, never a
+    /// whole-message guard.
     private let capability: SessionCapability
 
     init(
@@ -46,7 +47,15 @@ final class FileReceiver {
 
     func offer(_ offer: FileOffer) {
         let url = uniqueURL(for: offer.name)
-        FileManager.default.createFile(atPath: url.path, contents: nil)
+        // SELF-guard at the irreducible boundary, mirroring `chunk`'s `handle.write`: creating the
+        // file IS an effect of its own, so a post-invalidate offer (reachable through the bounded R9
+        // one-message parked-waiter window) must not leave a 0-byte client-named file in ~/Downloads.
+        // The serve loop calls this UNWRAPPED — an outer `capability.perform` would self-deadlock the
+        // non-reentrant lock.
+        let created = capability.perform {
+            _ = FileManager.default.createFile(atPath: url.path, contents: nil)
+        }
+        guard created else { return }
         guard let handle = try? FileHandle(forWritingTo: url) else {
             logger.error("file transfer: could not open \(url.path) for writing")
             return

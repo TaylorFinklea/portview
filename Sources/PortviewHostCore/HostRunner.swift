@@ -572,11 +572,13 @@ public struct HostRunner: Sendable {
             effectiveMode: { authPolicy.effectiveMode(now: Date(), enrollment: await pairings.enrollmentSnapshot()) },
             isSASWindowOpen: { await sas?.isOpen() ?? false },
             pairings: pairings,
-            // Bound to the live registry's fence/generation (design §3). A `nil` control means no
-            // registry to fence against, so admit unconditionally at generation 0 — the un-fenced
-            // fallback, now reached only by tests that drive `serveAuthGate`/`serveSession` without a
-            // control (`run` mints a process-local `HostControl` for the CLI, so production is fenced).
-            admissionTicket: { keyID in control?.admissionTicket(for: keyID) ?? AdmissionTicket(keyID: keyID, generation: 0) },
+            // Bound to the live registry's fence/generation (design §3) through the provider seam:
+            // a NON-nil control answering `nil` means the key is FENCED (mid-revoke) and that `nil`
+            // must reach the gate, which rejects with `.revoking`. Only a `nil` control — tests that
+            // drive `serveAuthGate`/`serveSession` without a registry — admits un-fenced at
+            // generation 0 (`run` mints a process-local `HostControl` for the CLI, so production
+            // always has one).
+            admissionTicket: Self.admissionTicketProvider(control),
             sendChallenge: { try await connection.send(.serverChallenge($0)) })
         onAuthGateOutcome?(outcome)
         // The admission ticket captured AT AUTHORIZATION (design §3, Order-A) is threaded from the
@@ -906,6 +908,27 @@ public struct HostRunner: Sendable {
     /// connection of the process. Factored out so the mint decision is unit-testable.
     static func resolvedControl(_ control: HostControl?) -> HostControl {
         control ?? HostControl()
+    }
+
+    /// The gate's `admissionTicket` seam bound to the live registry (design §1b step 4 / §3 / §5).
+    /// Two DIFFERENT `nil`s must not be conflated:
+    /// - a **nil control** means there is no registry to fence against — admit un-fenced at
+    ///   generation 0. Reached only by tests that drive `serveAuthGate`/`serveSession` without a
+    ///   control; `run` mints a process-local `HostControl` even for the CLI, so production always
+    ///   has one and never takes this branch.
+    /// - a **non-nil control answering nil** means the key is **FENCED** (mid-revoke). That `nil`
+    ///   must reach `serveAuthGate` unchanged so the gate rejects with `.revoking`. Collapsing it
+    ///   into a `(keyID, 0)` ticket — the old `??` — made the gate-level revoke fence dead code in
+    ///   production (register's own fence still caught it, but §1b step 4 / §5 specify the gate as a
+    ///   real defense layer), and in the fenced-AND-durably-removed window it routed the handshake
+    ///   to `.unknownKey` → the enrollment ceremony instead of a clean reject.
+    ///
+    /// Factored out (like `resolvedControl`) so that distinction is unit-testable.
+    static func admissionTicketProvider(_ control: HostControl?) -> @Sendable (ClientKeyID) -> AdmissionTicket? {
+        { keyID in
+            guard let control else { return AdmissionTicket(keyID: keyID, generation: 0) }
+            return control.admissionTicket(for: keyID)
+        }
     }
 
     /// The mutual-auth gate's decision for one streaming connection.
