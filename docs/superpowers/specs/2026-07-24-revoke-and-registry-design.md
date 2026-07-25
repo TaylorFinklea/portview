@@ -515,11 +515,16 @@ snapshot-under-lock / invalidate-out-of-lock shape.
 
 **4. Discard-not-drain, terminalized before cancel (finding 7).** `InboundBuffer.finish()` (`:153`)
 leaves buffered messages to drain via `next()`. `finishDiscardingBuffered()` clears all three lanes
-under the lock before finishing, so `next()` returns `nil` on the first call. `enqueue` now returns a
+under the lock before finishing, so the **buffered backlog** (a peer's queued frames sitting in the
+lanes) is dropped — `next()` returns `nil`, never a backlogged message. `enqueue` now returns a
 **terminal verdict** (`.droppedFinished` when `finished`), and `closeDiscardingInbound` terminalizes
-the buffer **before** `connection.cancel()` — so a receive callback racing the discard is
-lock-linearized (clears-then-drops), cannot re-enqueue into a cleared lane, and **cannot re-arm the
-receive loop** (`receiveNext` returns on `.droppedFinished`, minor). The security-critical seam.
+the buffer **before** `connection.cancel()`, so once the discard runs every subsequent enqueue drops
+and the receive loop **cannot re-arm** (`receiveNext` returns on `.droppedFinished`, minor). The
+security-critical seam for the backlog. **Honest bound (parked-waiter residual, below):** a *single*
+message whose `enqueue` wins the lock the instant before the discard, while a consumer is parked in
+`next()`, is handed to that parked continuation before `finishDiscardingBuffered` runs — the
+continuation resume escapes the lock. This is ≤1 message (after `finished`, all enqueues drop), not
+the backlog, and is caught downstream by layer-1 (the capability guard at the effect boundary).
 
 **5. Outbound inside the capability boundary, including direct sends (finding 4, H-e).** v1's "all cut
 immediately" was false for outbound. v3 brings every producer inside the boundary:
@@ -534,8 +539,17 @@ immediately" was false for outbound. v3 brings every producer inside the boundar
      lock-status (`:714`), pong (`:747`) — each get an `isValid` pre-check (H-e);
    - revoke/teardown call `session.outbound.finish()` synchronously **after** invalidation.
 
-**Defined bounded residual (§10 R3, R8).** Two irreducible-size residuals remain, both bounded and of
-the same class:
+**Defined bounded residual (§10 R3, R8, R9).** Three irreducible-size residuals remain, all bounded
+and of the same class:
+   - **Parked-waiter single message (R9, Task-2 finding):** as §4.4 above — a lone message racing the
+     discard while a consumer is parked in `next()` can be handed to that continuation before the
+     discard clears (the resume escapes the lock; empirically ~1% of a forced simultaneous race, and
+     mutual exclusion cannot make the discard an unconditional winner of a truly concurrent single
+     enqueue). Bounded to **one** message (post-`finished`, all enqueues drop); it is NOT the buffered
+     backlog (100% cleared). Backstopped by **layer-1** — the capability guard at the effect boundary
+     (§4.1) drops the effect even if the message reaches the serve loop. Do NOT trade the direct
+     discard's ~99% win-rate for queue-serialization: that is empirically worse (~46%) and slower, and
+     still cannot win a simultaneous race.
    - **In-flight transport bytes:** bytes already accepted by `Network.framework` for a `send` cannot
      be recalled. `isValid`-then-async-`send` is not atomic (a send cannot run under the sync `perform`
      lock — R2), so a direct send whose `isValid` check just passed may still put one frame on the
