@@ -42,8 +42,32 @@ final class SessionCapability: @unchecked Sendable {
     /// Held for the DURATION of an effect, so `drainInFlightEffect()` waits out one in-flight
     /// effect and two effects never overlap.
     private let effectLock = NSLock()
+    /// INTERNAL test seam, `nil` in production (same precedent as `InputInjector.postEvent` and
+    /// `CaptureEngine.installConfigurationApplierForTesting`). Fired by `perform` at the ONE point a
+    /// test cannot otherwise reach: after the fast-path check has passed and before `effectLock` is
+    /// acquired. Without it, a test can only land a mark BEFORE the call — which the fast path
+    /// catches, so the test passes even with the authoritative under-lock re-check deleted.
+    ///
+    /// It delegates NO production authority: it takes no arguments, returns nothing, and both
+    /// `guard`s are evaluated entirely from `valid` — the hook cannot allow, deny, or reorder an
+    /// effect, only observe (and, for a test, park in) the window between the two checks.
+    /// Stored under `flagLock` and invoked with that lock RELEASED, so a hook may call back into
+    /// `markInvalid()`/`isValid` without deadlocking.
+    private var willAcquireEffectLock: (@Sendable () -> Void)?
 
     init() {}
+
+    func setWillAcquireEffectLockForTesting(_ hook: (@Sendable () -> Void)?) {
+        flagLock.lock()
+        willAcquireEffectLock = hook
+        flagLock.unlock()
+    }
+
+    private var effectLockHook: (@Sendable () -> Void)? {
+        flagLock.lock()
+        defer { flagLock.unlock() }
+        return willAcquireEffectLock
+    }
 
     var isValid: Bool {
         flagLock.lock()
@@ -79,6 +103,7 @@ final class SessionCapability: @unchecked Sendable {
         // Fast, non-blocking reject: an already-withdrawn capability never queues behind an
         // in-flight effect just to be told no.
         guard isValid else { return false }
+        effectLockHook?()  // nil in production; see `willAcquireEffectLock`
         effectLock.lock()
         defer { effectLock.unlock() }
         // Authoritative re-check UNDER the effect lock — this is what bounds the post-mark residual

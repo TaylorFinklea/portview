@@ -64,6 +64,13 @@ import Testing
     ///
     /// Driven through the `installConfigurationApplierForTesting` seam: a test must NEVER reach the
     /// real ScreenCaptureKit surface (no live `SCStream`, no display).
+    ///
+    /// The mark lands BETWEEN the gate's check and its effect (Sol pass 3), via the internal
+    /// `setWillAcquireEffectLockForTesting` seam. Marking before *calling* `setViewport` — the earlier
+    /// version — only exercised the cheap early return at the top of the method, so the test stayed
+    /// green with the authoritative inner `capability.perform` deleted; here `setViewport` runs its own
+    /// fast-path check against a still-valid capability and the withdrawal arrives afterwards, so only
+    /// the boundary gate can stop the OS call.
     @Test func aRevokeLandingAfterTheServeLoopCheckStopsTheLiveRecropAtTheOSBoundary() async {
         let capability = SessionCapability()
         let engine = CaptureEngine(width: 1920, height: 1080, capability: capability)
@@ -82,10 +89,10 @@ import Testing
         let appliedWidth = configuration.width
         let appliedHeight = configuration.height
 
-        // The serve loop's branch-level check passes HERE …
+        // The serve loop's branch check AND `setViewport`'s own early-out both pass — the revoke lands
+        // only once the call is already past them, in the window before the effect lock.
         #expect(capability.isValid)
-        // … the revoke lands during the suspension that follows it …
-        capability.markInvalid()
+        capability.setWillAcquireEffectLockForTesting { capability.markInvalid() }
         // … and the effect must be refused at the OS boundary, not merely at the branch.
         #expect(await engine.setViewport(normalizedX: 0.6, normalizedY: 0.6,
                                          normalizedW: 0.25, normalizedH: 0.25) == false)
@@ -93,6 +100,33 @@ import Testing
         #expect(configuration.sourceRect == appliedRect)    // and no config field was mutated either
         #expect(configuration.width == appliedWidth)
         #expect(configuration.height == appliedHeight)
+    }
+
+    /// Sol pass 3, N3 (I4 residual): a re-crop that lands inside the `< 1`-pixel tolerance must
+    /// perform NO state writes at all. The old form still hopped into `viewportState` to re-stamp the
+    /// region after a bare `isValid` check that holds no effect lock, so a revoke landing in that hop
+    /// mutated session state after withdrawal — and because the tolerance admits a sub-pixel-different
+    /// rect, those writes were not even idempotent: the frame stamp drifted away from the
+    /// configuration ScreenCaptureKit is actually running.
+    @Test func aToleranceQualifiedNoOpRecropWritesNoSessionStateAtAll() async {
+        let engine = CaptureEngine(width: 1920, height: 1080)
+        let issuedToOS = Counter()
+        engine.installConfigurationApplierForTesting(SCStreamConfiguration()) { _, completion in
+            issuedToOS.increment()
+            completion(nil)
+        }
+
+        #expect(await engine.setViewport(normalizedX: 0.25, normalizedY: 0.25,
+                                         normalizedW: 0.5, normalizedH: 0.5))
+        #expect(issuedToOS.count == 1)
+        let applied = await engine.currentViewport()
+
+        // 0.0004 of a 1920-px display is 0.768 px — inside the tolerance, so no reconfiguration is
+        // needed, but a DIFFERENT normalized rect from the one actually applied.
+        #expect(await engine.setViewport(normalizedX: 0.2504, normalizedY: 0.25,
+                                         normalizedW: 0.5, normalizedH: 0.5))
+        #expect(issuedToOS.count == 1)                       // still a no-op at the OS
+        #expect(await engine.currentViewport() == applied)   // …and at the session state too
     }
 
     /// The other half of I4: the old branch-level check held **no lock**, so a concurrent
@@ -149,16 +183,21 @@ import Testing
     }
 
     /// Stronger form of the above: the mark lands while the request is ALREADY past the actor hop and
-    /// queued on the capability's effect lock — an interleaving that a pre-hop `isValid` check cannot
-    /// catch by construction. The discriminator is that the request **cannot complete** while another
-    /// effect is parked: a pre-hop-only gate would have seen a still-valid capability, set the flag
-    /// and returned immediately.
+    /// past the fast-path check, waiting to acquire the capability's effect lock — an interleaving no
+    /// pre-hop `isValid` check can catch by construction.
+    ///
+    /// The barrier is the internal `setWillAcquireEffectLockForTesting` seam (Sol pass 3), not a
+    /// signal fired immediately before the call: the earlier version signalled `atGate` from the task
+    /// *before* `requestKeyframe()` and inferred the rest from a 200 ms timeout, so a task descheduled
+    /// until after the mark would reject at the fast path and still satisfy every assertion — the
+    /// under-lock re-check was never required.
     @Test func aKeyframeRequestQueuedOnTheEffectLockIsRefusedByTheUnderLockRecheck() {
         let capability = SessionCapability()
         let engine = CaptureEngine(width: 1920, height: 1080, capability: capability)
         let parked = DispatchSemaphore(value: 0)
         let releaseParked = DispatchSemaphore(value: 0)
         let atGate = DispatchSemaphore(value: 0)
+        let releaseGate = DispatchSemaphore(value: 0)
         let requestDone = DispatchSemaphore(value: 0)
         let granted = Flag()
 
@@ -166,17 +205,21 @@ import Testing
         Thread.detachNewThread { capability.perform { parked.signal(); releaseParked.wait() } }
         #expect(parked.wait(timeout: .now() + 10) == .success)
 
+        // Installed after the parked effect is inside, so it fires only for the keyframe request.
+        capability.setWillAcquireEffectLockForTesting { atGate.signal(); releaseGate.wait() }
         Task.detached {
-            atGate.signal()
             granted.set(await engine.requestKeyframe())
             requestDone.signal()
         }
+        // Past the actor hop AND past the fast-path check, with the capability still valid — so the
+        // rejection that follows cannot be the fast path's.
         #expect(atGate.wait(timeout: .now() + 10) == .success)
-        // Still VALID here, so the request cannot have been rejected — and it cannot have run (the
-        // effect lock is held). Non-completion therefore means it is queued on that lock, past the hop.
-        #expect(requestDone.wait(timeout: .now() + 0.2) == .timedOut)
+        #expect(capability.isValid)
 
         capability.markInvalid()
+        releaseGate.signal()          // proceeds into `effectLock.lock()`, behind the parked effect
+        #expect(requestDone.wait(timeout: .now() + 0.2) == .timedOut)
+
         releaseParked.signal()
         #expect(requestDone.wait(timeout: .now() + 10) == .success)
         #expect(granted.current == false)

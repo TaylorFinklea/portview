@@ -255,6 +255,17 @@ struct MenuBarHostView: View {
         }
     }
 
+    /// The one-line status next to Retry / Cancel. Never categorical for an unknown durability: the
+    /// device IS blocked right now in every case, and only the proven case may claim what happens
+    /// after a restart.
+    private static func revokeStatusLine(_ durability: HostAppModel.RevokeDurabilityCopy) -> String {
+        switch durability {
+        case .durable: "revoke incomplete"
+        case .notDurable: "blocked only while Portview runs"
+        case .unverified, .unverifiedFenceLastSeen: "blocked now — durability unverified"
+        }
+    }
+
     private func pairedDeviceRow(_ row: PairedDeviceRow) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(row.name)
@@ -268,17 +279,31 @@ struct MenuBarHostView: View {
                 // retained lease and/or the durable revocation intent that survives a restart. Retry
                 // re-runs the durable removal; Cancel is the LAContext-gated re-admit hatch.
                 //
-                // The two incomplete states are NOT interchangeable (Sol re-review I5 follow-up): when
-                // even the revocation intent could not be written, nothing durable is holding this
-                // device out and a restart re-admits it. Say that explicitly instead of the same
-                // reassuring "revoke incomplete" the durably-fenced case shows.
-                if model.revokeNotDurable(row.id) {
+                // The incomplete states are NOT interchangeable (Sol re-review I5 follow-up; three-way
+                // split, Sol pass 3 N1). Proven-not-durable says the re-admission outright. UNKNOWN
+                // durability must hedge — an earlier attempt's intent may still be denying the device,
+                // so a categorical warning would be false — and when the last known pending set still
+                // lists this row, it must not raise re-admission at all, or the row would contradict
+                // its own pending state.
+                let durability = model.revokeDurability(row.id)
+                switch durability {
+                case .durable:
+                    EmptyView()
+                case .notDurable:
                     Text("revoke NOT saved — regains access if Portview restarts")
+                        .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .unverified:
+                    Text("couldn't verify the revoke was saved — it MAY regain access if Portview restarts")
+                        .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
+                        .fixedSize(horizontal: false, vertical: true)
+                case .unverifiedFenceLastSeen:
+                    Text("couldn't re-check the saved revoke — the pairing store is unreadable")
                         .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 HStack(spacing: 8) {
-                    Text(model.revokeNotDurable(row.id) ? "blocked only while Portview runs" : "revoke incomplete")
+                    Text(Self.revokeStatusLine(durability))
                         .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
                     Spacer()
                     Button("Retry") { model.retryRevoke(row.id) }

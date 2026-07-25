@@ -528,6 +528,90 @@ import PortviewProtocol
         #expect(await restarted.isAuthorized(id: c.id) == true)
     }
 
+    /// Sol pass 3, N1: a failed intent READ is UNKNOWN durability, never PROVEN absence. The
+    /// counterexample the old two-state report got wrong: an earlier attempt durably recorded K's
+    /// intent and failed only the authorization removal (`.fencedDurably`); on Retry the intent read
+    /// throws, so nothing is written and the durable `{K}` blob is untouched — yet `revoke` reported
+    /// `.notDurable`, whose whole meaning is "a restart re-admits this device". A fresh process still
+    /// denies K, so that report was simply false.
+    @Test func aFailedIntentReadReportsUnknownDurabilityNotProvenAbsence() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+
+        // First attempt: the intent lands, only the removal fails.
+        auth.failWrite = true
+        var first: (any Error)?
+        do { try await pairing.revoke(id: c.id) } catch { first = error }
+        #expect(try #require(first as? RevokeIncomplete).isDurablyFenced == true)
+        #expect(try durableIntents(intents) == [c.id])
+
+        // Retry: now the intent item cannot even be READ. Nothing is written, so `{K}` is untouched.
+        intents.failRead = true
+        var second: (any Error)?
+        do { try await pairing.revoke(id: c.id) } catch { second = error }
+        let outcome = try #require(second as? RevokeIncomplete)
+        var reportedUnknown = false
+        if case .durabilityUnknown = outcome { reportedUnknown = true }
+        #expect(reportedUnknown, "expected .durabilityUnknown, got \(outcome)")
+        #expect(outcome.isDurablyFenced == false)       // unproven is not proven …
+        #expect(outcome.isProvenNotDurable == false)    // … but it is not proven absent either
+        intents.failRead = false
+        auth.failWrite = false
+
+        // And the reason the categorical copy would have been a lie: the durable fence is still there.
+        #expect(try durableIntents(intents) == [c.id])
+        let restarted = PairingStore(store: auth, revokeIntentStore: intents,
+                                     now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await restarted.isAuthorized(id: c.id) == false)
+        #expect(await restarted.pendingRevocations() == .known([c.id]))
+    }
+
+    /// Sol pass 3, N2: a FAILED enrollment must not leave an authorizable key in THIS process. The
+    /// interleaving the existing tests missed — they cover a cache already holding K's intent, and a
+    /// COLD corrupt item — is a WARM-EMPTY `intentCache` plus an intent item that becomes unreadable:
+    /// `enroll` persists K (warming the authorization cache), its fresh intent read throws, and it
+    /// throws `enrollmentStillFenced` — but the still-warm `[]` intent cache answers "nothing
+    /// pending", so the next signed handshake admitted the key the ceremony had just reported as
+    /// `approved: false`.
+    @Test func aFailedEnrollLeavesTheKeyUnauthorizableEvenWithAWarmEmptyIntentCache() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let seed = newClient()
+        try await pairing.enroll(publicKey: seed.publicKey, deviceName: "Seed iPhone")
+        #expect(await pairing.isAuthorized(id: seed.id) == true)  // warms the intent cache to []
+
+        // The intent item goes unreadable while the authorization item stays writable.
+        intents.failRead = true
+        let c = newClient()
+        await #expect(throws: (any Error).self) {
+            try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPad")
+        }
+        // The authorization record IS written (the clear is ordered after `persist`) …
+        #expect(await pairing.list().map(\.id).sorted() == [seed.id, c.id].sorted())
+        // … and the key the operation reported as FAILED must not be authorizable here, even though
+        // the warm intent cache still says nothing is pending for it.
+        #expect(await pairing.isAuthorized(id: c.id) == false)
+        #expect(await pairing.authorizedClient(forPublicKey: c.publicKey) == nil)
+        // The other device is untouched: the fence is per-id, not a wholesale cache poisoning that
+        // would brick a live host on a transient keychain lock.
+        #expect(await pairing.isAuthorized(id: seed.id) == true)
+
+        // The fence outlives the transient failure: a later successful read that simply OMITS the key
+        // must not re-admit what the failed enrollment already reported as refused.
+        intents.failRead = false
+        #expect(await pairing.isAuthorized(id: c.id) == false)
+        #expect(await pairing.pendingRevocations() == .known([c.id]))
+        // Only a discharge that genuinely READS the durable item lifts it — the attended Cancel hatch.
+        try await pairing.cancelRevocationIntent(id: c.id)
+        #expect(await pairing.isAuthorized(id: c.id) == true)
+    }
+
     /// Ruling item 2: Retry must RE-ATTEMPT the intent write, so a transient keychain failure heals
     /// into a durable fence instead of staying non-durable until the app quits.
     @Test func retryRecordsTheIntentTheFirstAttemptCouldNotWrite() async throws {

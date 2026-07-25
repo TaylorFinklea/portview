@@ -155,22 +155,25 @@ import Testing
     /// behind the in-flight effect sees the mark when it finally acquires the lock, and its effect
     /// never runs.
     ///
-    /// The point of this test is that the second caller really is *queued on the lock* when the mark
-    /// lands — a bare sleep could not tell that apart from "still short of the fast-path check", in
-    /// which case the fast path would reject it and the authoritative under-lock re-check would never
-    /// be exercised. Two ordering facts pin it down, no sleep needed:
-    ///   1. `atGate` proves the second thread is running and about to call `perform`, and at that
-    ///      moment the capability is still **valid** — so neither the fast path nor the under-lock
-    ///      check can reject it, and the effect lock is held by the parked first effect, so it cannot
-    ///      run either. Not completing therefore means: blocked on the effect lock.
-    ///   2. It stays blocked ACROSS the mark and returns only once `releaseFirst` frees the lock — a
-    ///      fast-path rejection would have returned immediately at the mark instead.
-    /// So the `false` it returns can only have come from the re-check under the lock.
+    /// The barrier sits at the ACTUAL post-fast-path / pre-effect-lock point (Sol pass 3), via the
+    /// internal `setWillAcquireEffectLockForTesting` seam. The earlier version signalled `atGate`
+    /// immediately *before* calling `perform` and then inferred lock acquisition from two 200 ms
+    /// timeouts — a second thread descheduled after `atGate` until after the mark would reject at the
+    /// fast path and still satisfy every assertion, so the test passed with the under-lock re-check
+    /// deleted. Parking the second caller inside the seam makes the interleaving exact rather than
+    /// inferred:
+    ///   1. The seam fires only after the fast-path `isValid` check has already PASSED, so the mark
+    ///      that follows cannot be the thing that rejected this caller.
+    ///   2. The caller is released into `effectLock.lock()` only after the mark, and the lock is held
+    ///      by the parked first effect, so it necessarily queues there and observes the mark on
+    ///      acquiring it.
+    /// The `false` it returns therefore can only have come from the re-check under the lock.
     @Test func aSecondEffectQueuedBehindAnInFlightOneIsRejectedByTheUnderLockRecheck() {
         let capability = SessionCapability()
         let enteredFirst = DispatchSemaphore(value: 0)
         let releaseFirst = DispatchSemaphore(value: 0)
         let atGate = DispatchSemaphore(value: 0)
+        let releaseGate = DispatchSemaphore(value: 0)
         let secondDone = DispatchSemaphore(value: 0)
         let secondRan = Flag()
         let secondResult = Flag()
@@ -178,19 +181,19 @@ import Testing
         Thread.detachNewThread { capability.perform { enteredFirst.signal(); releaseFirst.wait() } }
         #expect(enteredFirst.wait(timeout: .now() + 10) == .success)
 
+        // Installed only now, so it can fire for the SECOND caller and not the parked first one.
+        capability.setWillAcquireEffectLockForTesting { atGate.signal(); releaseGate.wait() }
         Thread.detachNewThread {
-            atGate.signal()
             let result = capability.perform { secondRan.set(true) }
             secondResult.set(result)
             secondDone.signal()
         }
+        // Past the fast path — with the capability still valid, so it was NOT rejected there.
         #expect(atGate.wait(timeout: .now() + 10) == .success)
-        // (1) Still valid, effect lock held → the only state it can be in is queued on that lock.
         #expect(capability.isValid == true)
-        #expect(secondDone.wait(timeout: .now() + 0.2) == .timedOut)
 
         capability.markInvalid()
-        // (2) The mark alone must not release it — it is past the fast path.
+        releaseGate.signal()          // now it proceeds into `effectLock.lock()` and queues
         #expect(secondDone.wait(timeout: .now() + 0.2) == .timedOut)
 
         releaseFirst.signal()
@@ -198,4 +201,5 @@ import Testing
         #expect(secondRan.current == false)
         #expect(secondResult.current == false)
     }
+
 }

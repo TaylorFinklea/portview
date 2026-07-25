@@ -22,27 +22,47 @@ public enum EnrollmentSnapshot: Sendable, Equatable {
     case unreadable
 }
 
-/// Why a `revoke` did not complete — and, the part that matters, whether the fail-closed denial it
-/// leaves behind is DURABLE (Sol re-review I5 follow-up). These are two materially different states
-/// and the UI must never render them as one "revoke incomplete":
+/// Why a `revoke` did not complete — and, the part that matters, what is actually KNOWN about the
+/// durability of the fail-closed denial it leaves behind (Sol re-review I5 follow-up; three-way split
+/// per Sol pass 3 N1). These are three materially different states and the UI must never render them
+/// as one "revoke incomplete":
 ///
-/// - `.fencedDurably` — the removal failed but the revocation intent LANDED. The device is denied
-///   now and stays denied after a host restart; Retry finishes the removal.
-/// - `.notDurable` — NEITHER the removal nor the intent could be persisted. This is the natural
-///   CORRELATED failure (both items live in the same keychain, so whatever broke one usually broke
-///   the other), and it is honestly unfixable by writing harder: if nothing durable can be written,
-///   nothing durable can deny after a restart. The device is fenced ONLY by this process's
-///   in-memory `HostControl` lease and REGAINS ACCESS when the host restarts. The store's job is to
-///   say so, loudly, instead of reporting the same thing as `.fencedDurably`.
+/// - `.fencedDurably` — the removal failed but the revocation intent is durably recorded (the item
+///   was read and either already held the id or the fresh write landed). The device is denied now and
+///   stays denied after a host restart; Retry finishes the removal.
+/// - `.notDurable` — PROVEN absent: the intent item was read successfully, the id was NOT in it, and
+///   the fresh write failed. This is the natural CORRELATED failure (both items live in the same
+///   keychain, so whatever broke one usually broke the other), and it is honestly unfixable by
+///   writing harder: if nothing durable can be written, nothing durable can deny after a restart. The
+///   device is fenced ONLY by this process's in-memory `HostControl` lease and REGAINS ACCESS when
+///   the host restarts. The store's job is to say so, loudly.
+/// - `.durabilityUnknown` — the intent item could not be READ, so whether a durable fence exists is
+///   UNKNOWN, not absent. Folding this into `.notDurable` was a factual error (Sol pass 3 N1): an
+///   earlier attempt may have durably recorded the id, in which case a fresh process still denies it
+///   — reporting a categorical "regains access on restart" is then simply false. It errs in the safe
+///   direction, but honest reporting is the whole contract here, so it gets its own case and the UI
+///   must render it CONDITIONALLY ("may regain access — could not verify").
 public enum RevokeIncomplete: Error, Sendable, Equatable {
     case fencedDurably(reason: String)
     case notDurable(reason: String)
+    case durabilityUnknown(reason: String)
 
-    /// True iff the denial survives a process restart (an intent is durably recorded).
+    /// True iff the denial is PROVEN to survive a process restart (an intent is durably recorded).
+    /// `.durabilityUnknown` is deliberately false — unproven is not proven.
     public var isDurablyFenced: Bool {
         switch self {
         case .fencedDurably: true
-        case .notDurable: false
+        case .notDurable, .durabilityUnknown: false
+        }
+    }
+
+    /// True iff the ABSENCE of a durable fence is proven (read succeeded, id absent, write failed) —
+    /// the only state in which "this device regains access if Portview restarts" may be stated
+    /// categorically. Distinct from `!isDurablyFenced`, which is also true when nothing is known.
+    public var isProvenNotDurable: Bool {
+        switch self {
+        case .notDurable: true
+        case .fencedDurably, .durabilityUnknown: false
         }
     }
 }
@@ -116,12 +136,15 @@ protocol PairingRecordStore: Sendable {
 /// K unauthorizable" true across a PROCESS RESTART — `HostControl`'s retained fence and the app's
 /// `revokeFailures` are both in-memory only.
 ///
-/// **That claim is CONDITIONAL on the intent write landing, and `revoke` says which it got.** The
-/// intent item shares a keychain with the authorization item, so the two writes fail together in the
-/// natural case; when neither lands there is nothing durable to deny with, and a restart re-admits
-/// the key. No storage trick fixes that (there is nowhere left to write) — so the contract is to
-/// report it: `revoke` throws `RevokeIncomplete.notDurable` there and `.fencedDurably` when the
-/// intent did land, and the UI must render them differently.
+/// **That claim is CONDITIONAL on the intent write landing, and `revoke` says which of THREE things
+/// it got.** The intent item shares a keychain with the authorization item, so the two writes fail
+/// together in the natural case; when neither lands there is nothing durable to deny with, and a
+/// restart re-admits the key. No storage trick fixes that (there is nowhere left to write) — so the
+/// contract is to report it: `.fencedDurably` when the intent is durably recorded, `.notDurable` when
+/// its absence is PROVEN (item read, id absent, write failed), and `.durabilityUnknown` when the item
+/// could not be read at all. The third case is not a nicety: an earlier attempt may already have
+/// recorded the intent durably, so claiming "regains access on restart" from a failed READ is false
+/// (Sol pass 3 N1). The UI must render all three differently.
 public actor PairingStore {
     /// The persisted shape: the enrolled-client map PLUS a durable `migrationComplete` marker.
     /// The marker is set the first time ANY device enrolls and is NEVER cleared by revoke — so
@@ -142,6 +165,23 @@ public actor PairingStore {
     /// Last known-good decoded revocation-intent set. `nil` = never read successfully yet (the
     /// authorization path then fails closed — see `revocationIntents()`).
     private var intentCache: Set<String>?
+    /// Ids denied for the REST OF THIS PROCESS because an operation on them ended with their durable
+    /// intent state UNVERIFIED (Sol pass 3, N2). The hole it closes: `enroll` persists the
+    /// authorization record (warming `cache` with the new key) and only then discharges the intent; if
+    /// that discharge's READ throws, `enroll` throws `enrollmentStillFenced` — but a warm `intentCache`
+    /// from before the failure (classically `[]`) still answers "nothing pending", so the very next
+    /// signed handshake read the fresh authorization cache minus an empty intent set and ADMITTED the
+    /// key the operation had just reported as failed. Enrollment said `approved: false`, the key
+    /// worked.
+    ///
+    /// Deliberately a targeted per-id fence rather than poisoning `intentCache` wholesale: (a) dropping
+    /// the warm cache would deny EVERY other live device on a transient mid-session keychain lock —
+    /// exactly the brick-a-live-host regression the warm cache exists to prevent (§6d item 7) — and
+    /// (b) it would not even be sufficient, because a later successful read that omits the id would
+    /// re-admit it, while the operation that reported failure is still the last word. Fails CLOSED in
+    /// every branch: it only ever subtracts, and it is lifted ONLY by `dischargeRevocationIntent`
+    /// succeeding, i.e. by a genuine read of the durable item proving the id carries no intent.
+    private var unverifiedIntentFence: Set<String> = []
 
     /// Two-arg convenience: existing call sites that predate the lastSeen split (§6c, H-a) and the
     /// revocation-intent item (§6d, I5) keep compiling unchanged. Both extra stores fall back to
@@ -246,10 +286,16 @@ public actor PairingStore {
     /// same read, so "no pending revocations" would be shown at the moment NOTHING is authorized
     /// (Sol re-review, enroll-false-success finding). The caller renders the store-unreadable state
     /// instead of a clean list.
+    ///
+    /// Also surfaces this process's `unverifiedIntentFence` (N2): those rows are denied by
+    /// `authorizedMap()` too, and a denial the surface cannot see is the same silent lie in a new
+    /// costume — the row needs its Retry / Cancel, and a successful Cancel is exactly what lifts that
+    /// fence (it proves, by reading the durable item, that no intent is pending).
     public func pendingRevocations() -> PendingRevocations {
         guard let intents = revocationIntents() else { return .unreadable }
-        guard !intents.isEmpty else { return .known([]) }
-        return .known(intents.intersection(enrolledMap().keys))
+        let fenced = intents.union(unverifiedIntentFence)
+        guard !fenced.isEmpty else { return .known([]) }
+        return .known(fenced.intersection(enrolledMap().keys))
     }
 
     /// Drop a recorded revocation intent WITHOUT removing the enrollment (§1a step 5 Cancel): the
@@ -305,6 +351,12 @@ public actor PairingStore {
         do {
             try dischargeRevocationIntent(id)
         } catch {
+            // FAIL CLOSED IN THIS PROCESS TOO (Sol pass 3, N2). `persist` above already warmed the
+            // authorization cache with this key; if the discharge's own READ threw, a warm
+            // `intentCache` from before the failure still answers "nothing pending", so the next
+            // handshake would have authorized the very key this call is about to report as failed.
+            // The fence makes the thrown error and the gate agree.
+            unverifiedIntentFence.insert(id)
             throw PairingStoreError.enrollmentStillFenced(id: id, reason: String(describing: error))
         }
         seedLastSeen(id: id)
@@ -326,23 +378,27 @@ public actor PairingStore {
     /// Intent recording still does not ABORT the revoke — a broken intent item must not stop the
     /// removal attempt — but its outcome is NO LONGER SWALLOWED (Sol re-review I5 follow-up). When
     /// the removal then fails, the thrown `RevokeIncomplete` says which fence the caller actually
-    /// has: `.fencedDurably` (intent landed → denied across a restart) or `.notDurable` (nothing
-    /// durable landed → this process's in-memory fence is all there is, and a restart RE-ADMITS the
-    /// device). The correlated case — one keychain, so the intent write and the authorization write
-    /// fail together — is precisely the one the old best-effort code reported as a clean fenced
-    /// incomplete. There is nothing to write when nothing can be written; the fix is to tell the
-    /// truth about it, and to re-attempt the intent write on every Retry so a transient failure
-    /// self-heals into a durable fence.
+    /// has: `.fencedDurably` (intent recorded → denied across a restart), `.notDurable` (item read,
+    /// id absent, write failed → nothing durable landed, this process's in-memory fence is all there
+    /// is, and a restart RE-ADMITS the device), or `.durabilityUnknown` (the item could not be read,
+    /// so an earlier attempt's durable intent may or may not still be denying the device). The
+    /// correlated case — one keychain, so the intent write and the authorization write fail together —
+    /// is precisely the one the old best-effort code reported as a clean fenced incomplete. There is
+    /// nothing to write when nothing can be written; the fix is to tell the truth about it, and to
+    /// re-attempt the intent write on every Retry so a transient failure self-heals into a durable
+    /// fence. Collapsing the unknown case into `.notDurable` was the remaining lie (Sol pass 3 N1):
+    /// on Retry after a durably-recorded first attempt, a failed READ left `{K}` untouched, so a
+    /// fresh process still denies K while the UI announced the opposite.
     ///
     /// Deliberately recorded before the fresh authorization read too, so a revoke that cannot even
     /// READ the authorization item still leaves a durable fence behind.
     public func revoke(id: String) throws {
-        let intentIsDurable = recordRevocationIntent(id)
+        let intentDurability = recordRevocationIntent(id)
         var state: Persisted
         do {
             state = try mutableState()
         } catch {
-            throw Self.incomplete(intentIsDurable: intentIsDurable, underlying: error)
+            throw Self.incomplete(intent: intentDurability, underlying: error)
         }
         guard state.clients.removeValue(forKey: id) != nil else {
             // Not enrolled (never was, or another process already removed it): there is nothing to
@@ -354,15 +410,34 @@ public actor PairingStore {
         do {
             try persist(state)
         } catch {
-            throw Self.incomplete(intentIsDurable: intentIsDurable, underlying: error)
+            throw Self.incomplete(intent: intentDurability, underlying: error)
         }
         clearRevocationIntent(id)
         deleteLastSeen(id: id)
     }
 
-    private static func incomplete(intentIsDurable: Bool, underlying: any Error) -> RevokeIncomplete {
+    /// What is durably TRUE about an id's revocation intent once `recordRevocationIntent` has run.
+    /// Three states, not two (Sol pass 3, N1): a failed READ proves nothing, and must never be
+    /// reported as the proven-absent case.
+    enum IntentDurability {
+        /// The item was READ and the id is now in it — already present from an earlier attempt, or
+        /// this call's write landed. A fresh process denies the id.
+        case recorded
+        /// The item was READ, the id was NOT in it, and the write FAILED. Nothing durable denies the
+        /// id; a restart re-admits it. The only state that may be stated categorically.
+        case provenAbsent
+        /// The item could not be READ, so nothing was written and nothing is known: a durable intent
+        /// from an earlier attempt may or may not be sitting in the item.
+        case unknown
+    }
+
+    private static func incomplete(intent: IntentDurability, underlying: any Error) -> RevokeIncomplete {
         let reason = String(describing: underlying)
-        return intentIsDurable ? .fencedDurably(reason: reason) : .notDurable(reason: reason)
+        switch intent {
+        case .recorded: return .fencedDurably(reason: reason)
+        case .provenAbsent: return .notDurable(reason: reason)
+        case .unknown: return .durabilityUnknown(reason: reason)
+        }
     }
 
     /// Update a client's `lastSeen` (called on a successful authenticated handshake) in the
@@ -385,15 +460,16 @@ public actor PairingStore {
         readState()?.clients ?? [:]
     }
 
-    /// AUTHORIZATION view: the enrolled map MINUS every id with a recorded revocation intent (§6d).
-    /// Fail-closed on BOTH items: an unreadable intent item authorizes nobody, because "no pending
-    /// revocation" is then unverifiable — symmetric with an unreadable authorization item, which
-    /// already denies everyone.
+    /// AUTHORIZATION view: the enrolled map MINUS every id with a recorded revocation intent (§6d)
+    /// AND minus every id in this process's `unverifiedIntentFence` (N2). Fail-closed on BOTH items:
+    /// an unreadable intent item authorizes nobody, because "no pending revocation" is then
+    /// unverifiable — symmetric with an unreadable authorization item, which already denies everyone.
     private func authorizedMap() -> [String: EnrolledClient] {
         guard let intents = revocationIntents() else { return [:] }
         let enrolled = enrolledMap()
-        guard !intents.isEmpty else { return enrolled }
-        return enrolled.filter { !intents.contains($0.key) }
+        let denied = intents.union(unverifiedIntentFence)
+        guard !denied.isEmpty else { return enrolled }
+        return enrolled.filter { !denied.contains($0.key) }
     }
 
     /// Read view: cache if warm, else a swallow-errors read caching only a genuinely-successful
@@ -480,31 +556,39 @@ public actor PairingStore {
         intentCache = intents
     }
 
-    /// Record a revocation intent, REPORTING whether it is now durably recorded. Still never throws
+    /// Record a revocation intent, REPORTING what is durably true afterwards. Still never throws
     /// upward (a broken intent item must not stop the revoke from attempting the durable removal),
-    /// but the outcome is returned rather than swallowed — `revoke` needs it to tell
-    /// `.fencedDurably` from `.notDurable`, and swallowing it is exactly what made a revoke whose
-    /// intent write AND authorization write both failed look like a clean fenced incomplete while a
-    /// restart re-admitted the key. On a read failure it writes NOTHING — clobbering the set with a
-    /// lone entry would re-admit every other key with a pending intent.
+    /// but the outcome is returned rather than swallowed — `revoke` needs it to classify the throw,
+    /// and swallowing it is exactly what made a revoke whose intent write AND authorization write both
+    /// failed look like a clean fenced incomplete while a restart re-admitted the key. On a read
+    /// failure it writes NOTHING — clobbering the set with a lone entry would re-admit every other key
+    /// with a pending intent.
     ///
-    /// `true` also covers "the id was ALREADY in the durable set" (an earlier attempt recorded it):
-    /// the fence is durable, which is the only question being asked.
-    private func recordRevocationIntent(_ id: String) -> Bool {
-        guard var intents = try? mutableIntents() else { return false }
-        guard intents.insert(id).inserted else { return true }
-        do { try persistIntents(intents) } catch { return false }
-        return true
+    /// `.recorded` also covers "the id was ALREADY in the durable set" (an earlier attempt recorded
+    /// it): the fence is durable, which is the question being asked. A read failure is `.unknown`, NOT
+    /// `.provenAbsent` — the durable `{K}` an earlier attempt wrote is untouched by a failed read, so
+    /// reporting "nothing durable exists" there is simply false (Sol pass 3, N1).
+    private func recordRevocationIntent(_ id: String) -> IntentDurability {
+        guard var intents = try? mutableIntents() else { return .unknown }
+        guard intents.insert(id).inserted else { return .recorded }
+        do { try persistIntents(intents) } catch { return .provenAbsent }
+        return .recorded
     }
 
     /// Durably drop `id` from the intent set, THROWING if the set cannot be re-read or the write
     /// fails. The single implementation behind the public Cancel hatch, `enroll`'s mandatory clear,
     /// and the best-effort `clearRevocationIntent` below — the three differ only in how they treat a
     /// failure, never in what they attempt.
+    ///
+    /// Reaching the end is the ONLY thing that lifts `unverifiedIntentFence` for the id (N2): it means
+    /// the durable item was genuinely READ and the id is verifiably not pending in it, which is
+    /// precisely the fact the fence stands in for when it cannot be established.
     private func dischargeRevocationIntent(_ id: String) throws {
         var intents = try mutableIntents()
-        guard intents.remove(id) != nil else { return }
-        try persistIntents(intents)
+        if intents.remove(id) != nil {
+            try persistIntents(intents)
+        }
+        unverifiedIntentFence.remove(id)
     }
 
     /// Best-effort intent clear, used ONLY where the intent is already discharged by the durable

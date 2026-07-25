@@ -245,10 +245,15 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             && abs(newRect.width - current.width) < 1 && abs(newRect.height - current.height) < 1
         let unchangedSize = config.width == outputSize.width && config.height == outputSize.height
         if unchangedRect && unchangedSize {
-            // No OS call — but the region stamp is still session state, so gate it too.
-            guard capability.isValid else { return false }
-            await viewportState.set(normalizedRect, requestKeyframe: false)
-            setAppliedRegion(normalizedRect)
+            // A tolerance-qualified no-op performs NO state writes AT ALL (Sol pass 3, N3). The old
+            // form checked `capability.isValid` and then hopped into `viewportState` to re-stamp the
+            // region: a revoke landing in that hop passed the check, `drainInFlightEffect()` returned
+            // (this path holds no effect lock), and the actor resumed to mutate session state after
+            // withdrawal — §7 invariant 2 / §10 R9 require every such branch to reach an unsuspended
+            // gate. The writes are not idempotent either: the `< 1`-pixel tolerance admits a
+            // sub-pixel-different `normalizedRect`, so re-stamping would drift the frame region away
+            // from the configuration ScreenCaptureKit is actually running. Writing nothing keeps the
+            // stamp equal to the applied configuration AND leaves no post-withdrawal mutation.
             return true
         }
         // Snapshot the last-applied state so we can roll back if the update throws — `config` is a

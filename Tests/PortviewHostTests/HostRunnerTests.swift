@@ -159,6 +159,13 @@ import PortviewProtocol
     /// `.clientFeedback` steers the live encoder's bitrate and the SCStream's fps, so a withdrawn peer
     /// must not keep driving it. Self-guarded at the one irreducible write (called UNWRAPPED from the
     /// serve loop, mirroring `FileReceiver`).
+    ///
+    /// The mark lands BETWEEN the gate's check and its write (Sol pass 3), via the internal
+    /// `setWillAcquireEffectLockForTesting` seam. Marking before *calling* `update` — the earlier
+    /// version — proved nothing about atomicity or drain coupling: a non-atomic
+    /// `isValid`-then-write would have refused that too. Here `update` is already past its check when
+    /// the withdrawal arrives, so only a write that is genuinely coupled to the capability's effect
+    /// lock refuses it.
     @Test func clientFeedbackHolderRefusesTheEncoderWriteAfterWithdrawal() {
         let capability = SessionCapability()
         let holder = HostRunner.ClientFeedbackHolder(capability: capability)
@@ -169,7 +176,8 @@ import PortviewProtocol
         #expect(holder.latest()?.receivedFPSX100 == 3000)
 
         #expect(capability.isValid)                             // the branch check would pass here …
-        capability.markInvalid()                                // … and the revoke lands in the gap
+        // … and the revoke lands AFTER the write's own check has passed, not before the call.
+        capability.setWillAcquireEffectLockForTesting { capability.markInvalid() }
         let starved = ClientFeedback(receivedFPSX100: 200, receivedMbpsX100: 10,
                                      averageDecodeMsX100: 9000, decodeQueueDepth: 40,
                                      droppedFrames: 500, rttMicros: 900_000)

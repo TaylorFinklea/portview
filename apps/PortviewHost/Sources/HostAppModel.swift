@@ -141,14 +141,27 @@ final class HostAppModel {
     /// `revokeIncomplete`).
     private(set) var pendingRevocations: Set<String> = []
 
-    /// Devices whose revoke could not be recorded DURABLY AT ALL — `PairingStore.revoke` threw
-    /// `RevokeIncomplete.notDurable`, meaning neither the removal nor the revocation intent landed
-    /// (the correlated one-keychain failure). These rows are NOT the same as `pendingRevocations`:
-    /// the only thing denying the device is this process's in-memory `HostControl` fence, so quitting
-    /// or crashing Portview RE-ADMITS it. The row and its copy must say that out loud (design §1a
-    /// step 5, §7 invariant 6b) — a silent "revoke incomplete" here would be the same false-assurance
-    /// bug the durable intent was introduced to fix.
-    private(set) var nonDurableRevokes: Set<String> = []
+    /// What a row may honestly say about the durability of an incomplete revoke's fence — the UI half
+    /// of `RevokeIncomplete`'s three-way split (design §1a step 5, §7 invariant 6b; Sol pass 3 N1).
+    /// A device is in this map only while a warning is warranted; a proven-durable fence is the
+    /// absence of an entry.
+    enum RevokeDurabilityWarning: Sendable, Equatable {
+        /// PROVEN: `RevokeIncomplete.notDurable` — the intent item was read, the id was not in it and
+        /// the write failed. The only thing denying the device is this process's in-memory
+        /// `HostControl` fence, so quitting or crashing Portview RE-ADMITS it. Say so categorically.
+        case notDurable
+        /// UNKNOWN: `RevokeIncomplete.durabilityUnknown` — the intent item could not be read, so an
+        /// earlier attempt's durable intent may or may not still be denying the device. Categorical
+        /// "regains access on restart" copy here is factually wrong (an untouched durable `{K}` still
+        /// denies K in a fresh process), so the row must hedge instead.
+        case unverified
+    }
+
+    /// Devices whose incomplete revoke carries a durability warning, keyed by id. NOT the same as
+    /// `pendingRevocations`, which records a *durably recorded* intent. Kept as one map (rather than
+    /// two sets) so the two warnings are structurally mutually exclusive and a Retry that changes what
+    /// is known always replaces — never accumulates — the row's claim.
+    private(set) var revokeDurabilityWarnings: [String: RevokeDurabilityWarning] = [:]
 
     /// True when the intent item itself could not be read on the last refresh. Authorization fails
     /// CLOSED on that read (`PairingStore.authorizedMap`), so every device is currently denied while
@@ -160,12 +173,32 @@ final class HostAppModel {
     /// Revoke: this process holds the retained lease, a durable intent survived a restart, or the
     /// revoke could not be recorded durably at all.
     func revokeIncomplete(_ id: String) -> Bool {
-        revokeFailures[id] != nil || pendingRevocations.contains(id) || nonDurableRevokes.contains(id)
+        revokeFailures[id] != nil || pendingRevocations.contains(id) || revokeDurabilityWarnings[id] != nil
     }
 
-    /// True when this device's incomplete revoke is NOT durable — the row must warn that the device
-    /// regains access if Portview restarts, instead of the plain "revoke incomplete" copy.
-    func revokeNotDurable(_ id: String) -> Bool { nonDurableRevokes.contains(id) }
+    /// What this row may honestly claim about its fence surviving a restart. The `.unverified` case
+    /// is split by whether the LAST KNOWN durable intent set still lists the device: if it does, the
+    /// row must not suggest re-admission at all (that would contradict its own pending state — Sol
+    /// pass 3 N1); if it does not, the row hedges. Neither variant is ever categorical.
+    enum RevokeDurabilityCopy: Sendable, Equatable {
+        /// Proven durably fenced (or never in doubt): the plain "revoke incomplete" row.
+        case durable
+        /// Proven nothing durable was recorded: state the re-admission outright.
+        case notDurable
+        /// Unknown, and no durable intent is known for this device: hedge ("may … couldn't verify").
+        case unverified
+        /// Unknown, but the last successful read of the intent item DID list this device: the fence
+        /// was last seen durable, so say the check failed — never that access may come back.
+        case unverifiedFenceLastSeen
+    }
+
+    func revokeDurability(_ id: String) -> RevokeDurabilityCopy {
+        switch revokeDurabilityWarnings[id] {
+        case .none: .durable
+        case .notDurable: .notDurable
+        case .unverified: pendingRevocations.contains(id) ? .unverifiedFenceLastSeen : .unverified
+        }
+    }
 
     /// True when the host has been through enrollment but now has ZERO paired devices — the
     /// last-device lockout (product decision 2): Portview accepts no one until an in-person re-pair.
@@ -244,7 +277,7 @@ final class HostAppModel {
                 try await self.pairings.revoke(id: id)               // step 4: durable removal
                 self.control.endRevoke(lease: receipt.lease)         // step 5: finalize on success
                 self.revokeFailures[id] = nil
-                self.nonDurableRevokes.remove(id)
+                self.revokeDurabilityWarnings[id] = nil
                 await self.refreshEnrolledDevices()                  // step 6: revoked row disappears
                 self.noteLastDeviceIfEmpty()
             } catch {
@@ -279,7 +312,7 @@ final class HostAppModel {
                 try await self.pairings.revoke(id: id)
                 if let lease = self.revokeFailures[id] { self.control.endRevoke(lease: lease) }
                 self.revokeFailures[id] = nil
-                self.nonDurableRevokes.remove(id)
+                self.revokeDurabilityWarnings[id] = nil
                 await self.refreshEnrolledDevices()  // also refreshes `pendingRevocations`
                 self.noteLastDeviceIfEmpty()
             } catch {
@@ -296,20 +329,34 @@ final class HostAppModel {
     }
 
     /// Classify a failed durable revoke and tell the user the TRUTH about which fence they have
-    /// (Sol re-review I5 follow-up). `.fencedDurably` = denied across a restart, retry at leisure.
-    /// `.notDurable` = nothing durable was recorded, so only this process is holding the device out
-    /// and a quit/crash re-admits it — that must never render as a quiet "revoke incomplete". Any
-    /// other error type is treated as not-durable: unclassified means unproven, and the safe lie to
-    /// avoid is the reassuring one.
+    /// (Sol re-review I5 follow-up; three-way split, Sol pass 3 N1). `.fencedDurably` = denied across
+    /// a restart, retry at leisure. `.notDurable` = PROVEN that nothing durable was recorded, so only
+    /// this process is holding the device out and a quit/crash re-admits it — that must never render
+    /// as a quiet "revoke incomplete". `.durabilityUnknown` = the intent item could not be read, so
+    /// neither claim is available: an earlier attempt's `{K}` may still be sitting there denying the
+    /// device, and announcing re-admission would be plainly false. Any other error type lands there
+    /// too — unclassified means unproven, and unproven is exactly what `.unverified` says.
+    ///
+    /// Each call REPLACES the row's claim rather than accumulating one, so a Retry that learns
+    /// something different (in either direction) always leaves the row saying only what is now known.
     private func noteRevokeDurability(_ id: String, error: any Error) {
-        let durablyFenced = (error as? RevokeIncomplete)?.isDurablyFenced ?? false
-        if durablyFenced {
+        let previous = revokeDurabilityWarnings[id]
+        let warning: RevokeDurabilityWarning?
+        switch error as? RevokeIncomplete {
+        case .fencedDurably: warning = nil
+        case .notDurable: warning = .notDurable
+        case .durabilityUnknown, .none: warning = .unverified
+        }
+        revokeDurabilityWarnings[id] = warning
+        guard warning != previous else { return }  // say each transition once, not on every Retry
+        switch warning {
+        case .none:
             // Promotion (Retry recorded the intent this time): drop the warning and say so once.
-            if nonDurableRevokes.remove(id) != nil {
-                messages.append("\(deviceName(id)) is now blocked even if Portview restarts, but the revoke still hasn't finished — keep retrying.")
-            }
-        } else if nonDurableRevokes.insert(id).inserted {
+            messages.append("\(deviceName(id)) is now blocked even if Portview restarts, but the revoke still hasn't finished — keep retrying.")
+        case .notDurable:
             messages.append("Couldn't record that revoke — \(deviceName(id)) is blocked right now, but it REGAINS ACCESS if Portview restarts. Retry until this warning clears.")
+        case .unverified:
+            messages.append("Couldn't check whether that revoke was saved — \(deviceName(id)) is blocked right now, but it MAY regain access if Portview restarts. Retry until this warning clears.")
         }
     }
 
@@ -341,9 +388,9 @@ final class HostAppModel {
                 self.control.cancelRevoke(lease: lease)  // lift fence WITHOUT durable revoke: re-admit K
             }
             self.revokeFailures[id] = nil
-            // The device is deliberately re-admitted, so the not-durable warning is spent: there is no
+            // The device is deliberately re-admitted, so the durability warning is spent: there is no
             // longer a revoke whose durability could be misreported.
-            self.nonDurableRevokes.remove(id)
+            self.revokeDurabilityWarnings[id] = nil
             await self.refreshEnrolledDevices()       // the still-enrolled device reappears in the list
         }
     }
