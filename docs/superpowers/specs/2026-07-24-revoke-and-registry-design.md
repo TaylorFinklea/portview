@@ -19,10 +19,12 @@ session's authority is captured (the ticket, at authorization) and *when the epo
 v3 nails down *when the authority DIES and who is allowed to act in the gaps*:
 
 - **Invalidate-Capability-First (the named invariant, H-d).** On **every** terminal path — normal
-  serve-defer, `disconnectAll`, `evictLegacyAdmitted`, a failed post-register recheck, a
-  register-reject self-close, and revoke — `capability.invalidate()` runs **before** any registry
-  removal or async teardown. v2 only invalidated on the revoke path, so a deferred effect (a queued
-  MainActor pasteboard write) could outlive a *normal* disconnect on a still-valid capability.
+  serve-defer, cancellation-driven shutdown, `disconnectAll`, `evictLegacyAdmitted`, a failed
+  post-register recheck, a register-reject self-close, and revoke — the capability is withdrawn
+  **before any async teardown** (and before the registry removal on the single-session paths; the
+  batch paths unlink under the lock first, see §7 invariant 1). v2 only invalidated on the revoke
+  path, so a deferred effect (a queued MainActor pasteboard write) could outlive a *normal*
+  disconnect on a still-valid capability.
 - **Revoke never blocks the registry lock on an effect (H-b).** `beginRevoke` under `HostControl.lock`
   only bumps the generation, sets the fence, **snapshots** the target capabilities, and unlinks them
   from the registry. Invalidation of those snapshots — which may briefly *wait* on one in-flight
@@ -62,9 +64,10 @@ re-enrollments of the same key — **for the process that owns hosting** (the ap
   inbound-clipboard cap = `Frame.maxClipboardBytes`, a `.fileChunk` cap ≈ the 64 KiB sender chunk).
   (2) The capability is checked at each **irreducible** OS effect (one CGEvent post, one pasteboard
   write, one file-chunk write), never wrapped around a whole compound message. (3) `beginRevoke`
-  **snapshots** target capabilities under `HostControl.lock` and **invalidates them OUT of the lock**
-  (§1a, §4). Net: `invalidate()` waits at most one irreducible effect, and never while
-  `HostControl.lock` is held (§10 R2 now bounded).
+  **snapshots** target capabilities under `HostControl.lock` and withdraws them **OUT of the lock**,
+  as a non-blocking **mark-all** pass followed by a **drain-all** pass (§1a, §4). Net: a drain waits
+  at most one irreducible effect, never while `HostControl.lock` is held, and never on a *sibling's*
+  effect (§10 R2/R8 now bounded).
 - **H-c** (finding 2 residual — no revoke owner, fails OPEN on durable failure) → **folded.**
   `revoking` becomes `[ClientKeyID: RevokeLease]`; `beginRevoke` coalesces/rejects a duplicate begin
   for K, `endRevoke` requires the matching lease, and a durable-write failure **retains** the fence
@@ -126,14 +129,38 @@ authorities — the shared durable `PairingStore` actor and the in-process `Host
      c. **Snapshot** every live session in `byClient[K]` (their `capability` + `outbound` +
         `connection`); remove each from `sessions` and from `byClient[K]`; `keepAwake.sessionEnded`
         each — all under the lock. **No capability invalidation and no transport work under the lock.**
-   - **Out of the lock (H-b, H-d ordering), in TWO passes:** pass 1 `capability.invalidate()` on
-     **every** snapshot (bounded wait ≤ one irreducible effect each — §4); pass 2, per snapshot,
-     `session.outbound.finish()` (drop queued clipboard/cursor/file/broadcast sends) then
-     `session.connection.closeDiscardingInbound()` (§4). Two passes, not one interleaved loop
-     (final-review M-3): interleaving left a second session under the same key acting for the whole
-     of the first session's transport teardown, wider than R8's per-capability bound. **No graceful
-     `bye`** (unlike `disconnectAll`, `HostControl.swift:120`).
+   - **Out of the lock (H-b, H-d ordering), in THREE passes** (Sol review C1): pass 0
+     `capability.markInvalid()` on **every** snapshot — the NON-blocking half, so the instant this
+     pass ends no session under the key can START a new effect; pass 1
+     `capability.drainInFlightEffect()` on each — the only bounded wait (≤ one *already*-in-flight
+     irreducible effect apiece, §4); pass 2, per snapshot, `session.outbound.finish()` (drop queued
+     clipboard/cursor/file/broadcast sends) then `session.connection.closeDiscardingInbound()` (§4).
+     Separate passes, not one interleaved loop: a fused blocking `invalidate()` per session (v3's
+     first shape) **blocked on the first session whose effect was in flight** — a stalled
+     `FileHandle.write` — while every later session under the key stayed valid with its inbound
+     still open, so a revoked device kept full keyboard/pointer/clipboard/file control through its
+     second session for the whole stall. That is strictly wider than R8's per-capability bound; the
+     mark/drain split is what restores it. **No graceful `bye`** (unlike `disconnectAll`,
+     `HostControl.swift:120`).
    - Return `RevokeReceipt(lease:, evictedCount:)`.
+
+   **Why the registry unlink precedes withdrawal here, and why that is still Invalidate-First**
+   (Sol review I7 — this used to read as a contradiction against §7 invariant 1, which said
+   invalidation runs *before* registry removal; the implementation follows the ordering below and
+   invariant 1 has been restated to match). Two constraints pull in opposite directions:
+   - **H-b forbids waiting under `HostControl.lock`.** Everything under the lock must be
+     non-blocking, so the *drain* (which can wait out an in-flight effect) cannot run there — hence
+     snapshot + unlink under the lock, withdrawal after it.
+   - **Invalidate-First is about the TEARDOWN order, not about the registry.** What it forbids is
+     close-then-invalidate: the transport close alone drains, so a session whose transport is torn
+     down while its capability is still live can still act. Withdrawal must therefore precede
+     `outbound.finish()` / `closeDiscardingInbound()` / the `bye` Task — and it does, in pass 0/1.
+
+   The unlinked-but-not-yet-withdrawn interval that this ordering creates is made safe by the
+   **fence** (no new session for K can register into the gap) plus the **non-blocking mark**: pass 0
+   ends the interval for *every* snapshotted session at once, without waiting on any of them, so no
+   NEW effect can start in it. What remains is the ≤ one already-in-flight irreducible effect per
+   capability (R8) — bounded, and the accepted price of not freezing the registry lock.
 4. **Durable removal (second).** `try await pairings.revoke(id: K)` on the **shared** `PairingStore`
    instance (§2). `migrationComplete` is never cleared (`PairingStore.swift:147`), so revoking the
    last device keeps the host `.required` (decision 2).
@@ -264,8 +291,9 @@ prescribed** where they are codebase idioms the implementer must read and mirror
   invalidated first (Invalidate-First, H-d); deregister is registry bookkeeping only.
 - **`HostControl.beginRevoke(clientKeyID:) -> RevokeReceipt`** (NEW, **public**). §1a step 3: coalesce
   a duplicate begin; else mint lease + fence + bump + snapshot + unlink + keepAwake-end (all under the
-  lock, **no invalidate/close under the lock**), then **out of the lock** invalidate-first + finish +
-  `closeDiscardingInbound` each snapshot. Returns the opaque `RevokeReceipt`. Teardown is internal
+  lock, **no invalidate/close under the lock**), then **out of the lock** `markInvalid()` on every
+  snapshot → `drainInFlightEffect()` on every snapshot → finish + `closeDiscardingInbound` each.
+  Returns the opaque `RevokeReceipt`. Teardown is internal
   (M-b). `HostAppModel.revoke` orchestrates begin → `await pairings.revoke` → end/retain (§1a).
 - **`HostControl.endRevoke(lease:) / cancelRevoke(lease:)`** (NEW). `endRevoke` removes K from
   `revoking` **iff** `revoking[K] == lease` (matching-lease-required); the generation stays bumped.
@@ -273,15 +301,17 @@ prescribed** where they are codebase idioms the implementer must read and mirror
   `LAContext`-gated Cancel action on a durable failure (§1a step 5). Both no-op on a stale lease.
 - **`HostControl.evictLegacyAdmitted`** (`HostControl.swift:106`). Upgrade to the §4 primitive AND
   Invalidate-First: under the lock, snapshot the legacy sessions + `keepAwake.sessionEnded` + remove
-  from `sessions`; **out of the lock**, `capability.invalidate()` **first**, then `outbound.finish()`
-  + `closeDiscardingInbound()` — replacing the draining `connection.close()` at `:113`. Legacy
+  from `sessions`; **out of the lock**, the same three passes as `beginRevoke` — mark all, drain all,
+  then `outbound.finish()` + `closeDiscardingInbound()` each — replacing the draining
+  `connection.close()` at `:113` (Sol review C1: this path was still interleaving). Legacy
   sessions carry no `keyID`, so `byClient` needs no update. Closes the han.3 residual and the H-d
   "legacy eviction leaves the capability valid" hole.
 - **`HostControl.disconnectAll`** (`HostControl.swift:120`). Under the lock: snapshot sessions,
   `sessions.removeAll()`, **clear `byClient`** (M-a/finding 8a — it currently clears only `sessions`,
   `:123`), and `keepAwake.endAll()` **inside the lock** (M-a — it currently runs after `unlock`,
-  `:124–125`, racing a new `sessionBegan`). Out of the lock: `capability.invalidate()` **first** on
-  each snapshot (H-d — stops a deferred effect outliving the disconnect), THEN the graceful-`bye`
+  `:124–125`, racing a new `sessionBegan`). Out of the lock: `markInvalid()` on **all** snapshots then
+  `drainInFlightEffect()` on all (H-d — stops a deferred effect outliving the disconnect, and one
+  session's stalled effect cannot leave a sibling acting), THEN the graceful-`bye`
   Task (the direct `bye` send is not capability-gated, so it still flushes — this is the *trusted*
   disconnect). `revoking`/`generation` untouched.
 - **`HostRunner.run`** (`HostRunner.swift:97`). `control: HostControl? = nil` stays for callers that
@@ -378,13 +408,23 @@ prescribed** where they are codebase idioms the implementer must read and mirror
   (`PairingStore.deviceID`, `PairingStore.swift:90`). No new derivation.
 - **`AdmissionTicket`** — an immutable value `(keyID: ClientKeyID?, generation: UInt64)`, captured at
   authorization, carried by-value through register + recheck (the whole point of finding 1).
-- **`SessionCapability`** (§4) — a lock-guarded per-session "may this session still act" flag, checked
-  synchronously at each **irreducible** effect boundary and flippable synchronously by teardown/revoke.
-  Pattern to mirror: `InputInjector`'s lock-guarded authority flag (`InputInjector.swift:16–29`) — but
-  **per-session**, not the process-wide `paused`. Exposes `isValid` (read), `invalidate()`, and
-  `perform(_ effect: () -> Void) -> Bool` (under the lock: if valid, run `effect`, return whether it
-  ran). `perform` is for **strictly synchronous, irreducible** effects only — no `await`, no reentrant
-  capability call, no compound multi-OS-effect closure (§10 R2).
+- **`SessionCapability`** (§4) — a per-session "may this session still act" flag, checked
+  synchronously at each **irreducible** effect boundary and withdrawable synchronously by
+  teardown/revoke. Pattern to mirror: `InputInjector`'s lock-guarded authority flag
+  (`InputInjector.swift:16–29`) — but **per-session**, not the process-wide `paused`. TWO locks (Sol
+  review C1): a `flagLock` guarding the flag and an `effectLock` held for an effect's duration.
+  Exposes `isValid` (read), `markInvalid()` (**non-blocking** — no NEW effect can start after it
+  returns), `drainInFlightEffect()` (**blocking** — waits out an already-in-flight effect),
+  `invalidate()` (mark then drain, for single-session terminal paths), and
+  `perform(_ effect: () -> Void) -> Bool` (fast reject, then under `effectLock` re-check the flag and
+  run `effect`; returns whether it ran). Lock order is one-directional — `perform` takes
+  effect→flag, nothing takes flag→effect — so there is no deadlock. `perform` is for **strictly
+  synchronous, irreducible** effects only — no `await`, no reentrant capability call, no compound
+  multi-OS-effect closure (§10 R2).
+- **`SessionCapabilityBox`** (Sol review I3) — a lock-guarded slot letting `serve`'s cancellation
+  handler reach the capability created inside `serveSession`, so a shutdown MARKS before it closes
+  the transport. Remembers a cancel that fires before publication and applies it to whatever is
+  published later.
 - **`RevokeLease` / `RevokeReceipt`** (H-c, M-b) — `RevokeLease` is an opaque comparable token minted
   by `beginRevoke` and required by `endRevoke`/`cancelRevoke`. `RevokeReceipt` is the public value
   `beginRevoke` returns (`lease` + `evictedCount`); it lets `HostAppModel` drive end/retain/cancel
@@ -479,17 +519,28 @@ Five composed layers close the windows through which post-revoke (or post-teardo
 or through which output could still be sent (findings 3, 4, 7; H-b, H-d, H-e).
 
 **0. Invalidate-Capability-First — the named invariant (H-d).** On **every** path that ends a session's
-authority, `capability.invalidate()` runs **before** any registry removal and before any async
-teardown (bye / close / finish). The enumerated paths:
+authority, the capability is withdrawn **before** any async teardown (bye / close / finish) — and,
+on the single-session paths, before the registry removal too. The batch paths snapshot + unlink
+under the lock first because H-b forbids waiting there (§1a step 3 states the ordering and why it is
+still Invalidate-First; §7 invariant 1 restates the invariant to match). The enumerated paths:
 
-| Terminal path | Where invalidate lands |
+| Terminal path | Where withdrawal lands |
 |---|---|
-| Normal serve-loop teardown | **first** statement of the `serveSession` defer (before `clipboard.stop`, `deregister`, cancels) |
-| Register rejected (fence/gen) | self-close guard, step 6, before return |
-| Post-await recheck fails (H-e) | recheck guard, step 6, before `deregister` |
-| `beginRevoke` | out-of-lock, per snapshot, before `finish`/`closeDiscardingInbound` |
-| `evictLegacyAdmitted` | out-of-lock, per snapshot, before `finish`/`closeDiscardingInbound` |
-| `disconnectAll` | out-of-lock, per snapshot, before the graceful-`bye` Task |
+| Normal serve-loop teardown | `invalidate()` (mark+drain) as the **first** statement of the `serveSession` defer (before `clipboard.stop`, `deregister`, cancels) |
+| **Cancellation-driven shutdown** (Stop Hosting / listener cancel) | `serve`'s `onCancel` → `cancelServe`: `markInvalid()` on the session's `SessionCapabilityBox` **before** `connection.close()` (Sol review I3) |
+| Register rejected (fence/gen) | `invalidate()` in the self-close guard, step 6, before return |
+| Post-await recheck fails (H-e) | `invalidate()` in the recheck guard, step 6, before `deregister` |
+| `beginRevoke` | out-of-lock, **mark all → drain all**, before any `finish`/`closeDiscardingInbound` |
+| `evictLegacyAdmitted` | out-of-lock, **mark all → drain all**, before any `finish`/`closeDiscardingInbound` |
+| `disconnectAll` | out-of-lock, **mark all → drain all**, before any graceful-`bye` Task |
+
+The shutdown row is Sol review I3: `serve`'s cancellation handler used to `connection.close()` while
+the capability was still valid (it was invalidated only later, in `serveSession`'s defer), so an
+already-dequeued `.typeText` kept posting its remaining CGEvents past the shutdown boundary — the
+synchronous injection loop never observes task cancellation. The handler MARKS (never drains): it
+runs synchronously on the cancelling thread, which a stalled effect must not be able to wedge. The
+`SessionCapabilityBox` also remembers a cancel that fired *before* the capability existed (during
+the auth gate), so the session can never come up live on an already-cancelled serve task.
 
 v2 invalidated only on the revoke path, so a deferred effect (`ClipboardSync.applyRemote`'s MainActor
 task, `:36`) captured on a *normal* disconnect saw a still-valid capability and mutated the pasteboard
@@ -502,13 +553,30 @@ CGEvents, starving `invalidate` — H-b). v3 checks the capability **atomic with
 effect**:
    - input: `capability.perform { self.postEvent(event) }` **per CGEvent**, at `InputInjector`'s
      `postEvent` seam (`:35`) — not around the whole `.typeText`;
-   - file: `fileReceiver.chunk(chunk)` called UNWRAPPED (FileReceiver self-guards its single
-     `handle.write` (`FileReceiver.swift:60`);
+   - file: `fileReceiver.offer/chunk` called UNWRAPPED — FileReceiver self-guards **four** boundaries
+     (Sol review I4b): `offer`'s `createFile`, `chunk`'s `handle.write`, `chunk`'s finalizing
+     `handle.close` (a zero-length final chunk skips the write branch entirely and used to complete
+     the transfer ungated), and `dropTransfer`'s close+unlink (the quota branch reached an unguarded
+     **file deletion**). The drop's close+unlink is one boundary on purpose — the pair must not be
+     split, since unlinking a still-open handle or closing without unlinking each leaves a
+     half-dropped transfer. A refused gate leaves the transfer in flight; the serve defer's
+     `cancelAll` reclaims the handle;
    - clipboard: inside `applyRemote`'s MainActor task, `capability.perform { pasteboard.clearContents();
      pasteboard.setString(text, .string); … }` around the **one** pasteboard mutation.
-   `perform` holds the capability lock across the (bounded) effect; `invalidate()` takes the same lock,
-   so each effect runs fully (then invalidate) or is skipped (invalidate first). Because the boundary
-   is irreducible, `invalidate()` waits **at most one** such effect, whatever the message size.
+   `perform` holds the **effect** lock across the (bounded) effect and re-checks the flag under it;
+   `drainInFlightEffect()` takes that same lock, so each effect runs fully or is skipped, and anything
+   that queued behind an in-flight effect observes the mark instead of running. Because the boundary is
+   irreducible, a drain waits **at most one** such effect, whatever the message size — and the mark
+   that precedes it never waits at all.
+
+**1b. Host-local session-control effects are gated too (Sol review I4a, R9).** The serve loop's
+`.startSession`/`.switchDisplay` (build a `CaptureEngine`, swap the injector/capture, start the video
+task), `.viewport` (re-crop the live capture), `.clientFeedback` (steer the encoder) and
+`.requestKeyframe` branches mutate HOST-side session state rather than sending, so the outbound gates
+of §4.5 never covered them: an R9 residual message could reconfigure — or START — screen capture for
+an already-revoked peer. Each now runs its effect through `HostRunner.applySessionControl`, an
+`isValid` check immediately before the effect and after any preceding `await`. It is a pre-check, not
+a `perform`: these effects `await` an actor, which the synchronous capability lock cannot span (R2).
 
 **2. Size caps so the pre-invalidate work is bounded too (H-b).** At the serve-loop boundary, before
 dispatch, each privileged inbound message is capped by type: `.typeText` well under
@@ -567,15 +635,16 @@ and of the same class:
      lock — R2), so a direct send whose `isValid` check just passed may still put one frame on the
      wire. `closeDiscardingInbound` + `closeBoundLanes` reclaim the streams promptly, dropping
      undelivered bytes.
-   - **Out-of-lock invalidation window (NEW, R8):** because invalidation moves out of the lock (H-b),
-     there is a brief interval between the under-lock snapshot/unlink and the out-of-lock
-     `invalidate()` during which one already-in-flight irreducible `perform` (or one queued deferred
-     MainActor pasteboard write) can still win its lock and execute. This is **one irreducible effect**,
-     the same bounded class as the transport residual — not an unbounded stream. The security line
-     holds because (a) the fence already blocks *new* admission for K, (b) the buffer is discarded so
-     no *further* inbound is dispatched, and (c) size caps bound that one effect.
-   The honest guarantee: **no NEW effect after `invalidate()` completes; a bounded one-irreducible-
-   effect residual during the invalidation window, plus bytes already handed to the transport.**
+   - **Out-of-lock mark window (R8):** because withdrawal moves out of the lock (H-b), there is a
+     brief interval between the under-lock snapshot/unlink and the out-of-lock **mark pass** during
+     which one already-in-flight irreducible `perform` (or one queued deferred MainActor pasteboard
+     write) can still execute. This is **one irreducible effect per capability**, the same bounded
+     class as the transport residual — not an unbounded stream. The security line holds because (a)
+     the fence already blocks *new* admission for K, (b) the buffer is discarded so no *further*
+     inbound is dispatched, (c) size caps bound that one effect, and (d) the mark pass is
+     non-blocking, so ONE session's stalled effect cannot extend any *sibling's* window.
+   The honest guarantee: **no NEW effect on a capability after `markInvalid()` returns; ≤ one
+   already-in-flight irreducible effect per capability, plus bytes already handed to the transport.**
 
 **No graceful `bye` on revoke (unchanged).** `closeDiscardingInbound()` cancels the transport with no
 farewell frame. `disconnectAll` (`HostControl.swift:120`) sends `bye` first *by design* (trusted
@@ -584,8 +653,10 @@ and (client-side) suppresses the reconnect we no longer owe it. Matches han.3's 
 (decisions.md 2026-07-23 item 4).
 
 **Ordering within revoke:** (under lock) bump + fence + snapshot + unlink + keepAwake-end → (out of
-lock, per snapshot) invalidate **first** → `outbound.finish()` → `closeDiscardingInbound()`. Never
-close-then-invalidate: the transport close alone drains, so invalidation must land first.
+lock) `markInvalid()` on **all** snapshots → `drainInFlightEffect()` on **all** snapshots → per
+snapshot `outbound.finish()` → `closeDiscardingInbound()`. Never close-then-invalidate: the transport
+close alone drains, so withdrawal must land first. Never drain-before-marking-the-others: that is the
+C1 defect (one stalled effect leaves every sibling under the key fully live).
 
 **Reachability caveat (finding 2, honest framing).** The "queued enrollment interleaving a revoke"
 that finding 2 fixes is *hard to reach* via the normal ceremony: an enrollment for K only runs after
@@ -728,16 +799,34 @@ shared across processes. Separate storage is preferred (it preserves the durable
 
 ## 7. Security invariants (must hold)
 
-1. **Invalidate-Capability-First (H-d).** On **every** terminal path — normal serve-defer, register
-   reject, failed post-await recheck, `beginRevoke`, `evictLegacyAdmitted`, `disconnectAll` —
-   `capability.invalidate()` runs **before** any registry removal and before any async teardown
-   (bye/close/finish). No deferred or in-flight effect outlives a session's authority on any exit.
+1. **Invalidate-Capability-First (H-d).** On **every** terminal path — normal serve-defer,
+   **cancellation-driven shutdown**, register reject, failed post-await recheck, `beginRevoke`,
+   `evictLegacyAdmitted`, `disconnectAll` — the capability is withdrawn **before any async teardown**
+   (bye / close / finish / lane-close). No deferred or in-flight effect outlives a session's
+   authority on any exit. Two refinements make this precise (Sol review I7 + C1 + I3), replacing the
+   earlier "before any registry removal" phrasing that contradicted §1a:
+   - **Single-session paths** (serve-defer, register reject, post-await recheck) call the blocking
+     `invalidate()` (mark **then** drain) and do so before their `deregister`, so withdrawal there
+     genuinely precedes the registry removal too.
+   - **Batch paths** (`beginRevoke`/`evictLegacyAdmitted`/`disconnectAll`) snapshot and unlink from
+     the registry **under the lock first**, because H-b forbids anything that can wait from running
+     there (invariant 3). Withdrawal follows out of the lock as **mark-all → drain-all**, still
+     strictly before any transport teardown. The unlinked-but-not-yet-withdrawn interval is closed
+     by the fence (no new session for K) plus the non-blocking mark, which ends the interval for
+     every snapshotted session at once — see §1a step 3 and R8.
+   - **Shutdown** marks only (`cancelServe` via `SessionCapabilityBox`), because a cancellation
+     handler runs synchronously on the cancelling thread and must not be wedged by a stalled effect;
+     the serve defer's full `invalidate()` still runs as the loop unwinds.
 2. **Effect-boundary invalidation at the IRREDUCIBLE unit, synchronous (finding 3, H-b).** Every
-   privileged inbound effect is size-capped and runs through `capability.perform` around one
-   irreducible OS effect (one CGEvent post, one pasteboard write, one file **creation**, one
-   file-chunk write) — never a compound message — so `invalidate()` waits at most one such effect.
-   Buffered inbound is **discarded, never drained**; a finished buffer drops and never re-arms the
-   receive loop.
+   privileged inbound effect is size-capped and runs through `capability.perform` at one irreducible
+   effect boundary — one CGEvent post, one pasteboard write, one file **creation**, one file-chunk
+   write, one transfer **finalization** (`handle.close`), one over-cap **drop** (that file's
+   close+unlink, deliberately unsplit) — never a compound message, so a drain waits at most one such
+   effect. Host-local **session-control** effects that must `await` (capture start / re-crop /
+   keyframe / encoder feedback) are gated by an `isValid` pre-check immediately before the effect
+   (`applySessionControl`) rather than by `perform`, which cannot span an `await` (R2). Buffered
+   inbound is **discarded, never drained**; a finished buffer drops and never re-arms the receive
+   loop.
 3. **Revoke never blocks the registry lock on an effect (H-b).** `beginRevoke` under `HostControl.lock`
    only bumps + fences + snapshots + unlinks; capability invalidation (which may briefly wait) and all
    transport teardown happen **out of the lock**. The lease-fence stays set under the lock for the
@@ -803,9 +892,11 @@ shared across processes. Separate storage is preferred (it preserves the durable
     lifts. **Fail-closed:** simulate a durable-revoke throw → the fence is **retained** (K still
     unauthorizable), Retry then success lifts, and `cancelRevoke(matching lease)` lifts without a
     durable revoke.
-  - **Invalidate-First (H-d):** on a normal `deregister`-driven teardown, on `evictLegacyAdmitted`, and
-    on `disconnectAll`, the session's `capability` is `invalidate()`d **before** the registry entry is
-    removed / the async close runs (observe ordering via a fake capability recording the call order).
+  - **Invalidate-First (H-d):** on a normal `deregister`-driven teardown the `capability` is
+    `invalidate()`d **before** the registry entry is removed; on `evictLegacyAdmitted` and
+    `disconnectAll` (batch paths, which unlink under the lock — §7 invariant 1) it is withdrawn
+    **before the async close/bye runs**, and every snapshot is marked before any is drained or torn
+    down (observe ordering via a parked outbound sink recording what it sees).
   - `deregister` removes precisely by SessionID and does not wipe a reconnecting sibling; `disconnectAll`
     clears `byClient` **and** `sessions` (M-a/finding 8a).
   - **keepAwake linearization (finding 8b, M-a):** a `disconnectAll` `endAll` that races a `register`
@@ -813,11 +904,27 @@ shared across processes. Separate storage is preferred (it preserves the durable
     `KeepAwake` backend, assert the assertion balances); nil-key legacy sessions are untouched by
     `beginRevoke`.
 - **`SessionCapability`**: `invalidate()` flips `isValid` under concurrent reads; `perform` runs the
-  effect iff valid and is mutually exclusive with `invalidate` (barrier test — an effect in `perform`
+  effect iff valid and is mutually exclusive with the drain (barrier test — an effect in `perform`
   and a concurrent `invalidate` never both "win"). **Bounded-wait (H-b):** a `perform` around one
-  irreducible effect blocks `invalidate` for at most that one effect; a large `.typeText` gated
+  irreducible effect blocks the drain for at most that one effect; a large `.typeText` gated
   per-CGEvent lets `invalidate` win after one event (observe via `InputInjector.postEvent` count after
-  invalidate; mirror `InputInjectorGateTests`).
+  invalidate; mirror `InputInjectorGateTests`). **Mark/drain split (Sol review C1):** `markInvalid()`
+  returns — and `isValid` reads false — while an effect is still parked mid-flight; the drain alone
+  blocks until it finishes; a second `perform` that queued behind the in-flight effect is refused
+  after the mark (the ≤ one-effect residual bound). **Batch bound:** with two sessions under one key
+  each parked inside `perform`, `beginRevoke` marks BOTH before draining either, and the sibling
+  cannot start a new effect while the first is still parked
+  (`HostControlRegistryTests.beginRevoke_marksEverySiblingInvalidWhileASessionIsParkedInsidePerform`);
+  `evictLegacyAdmitted` likewise invalidates every capability before any transport teardown.
+- **Shutdown Invalidate-First (Sol review I3):** `cancelServe` marks the session capability **before**
+  the transport close (observe the flag from inside the close closure), does not block on a parked
+  in-flight effect, and a cancel that fires before the capability is published still withdraws the
+  later-published one.
+- **R9 host-local gate (Sol review I4a):** `applySessionControl` runs the effect while valid and skips
+  it entirely after withdrawal (real `CaptureEngine` keyframe request / `ClientFeedbackHolder`).
+- **FileReceiver post-withdrawal boundaries (Sol review I4b):** a zero-length FINAL chunk does not
+  finalize the transfer (it stays in flight for `cancelAll`) while the same chunk under a valid
+  capability does; a quota-crossing chunk does not close+delete the partial file.
 - **Size caps (H-b):** an over-cap `.typeText` / inbound `.clipboardUpdate` / `.fileChunk` is skipped
   at the serve boundary (no injection / no pasteboard write / no file write); a within-cap one runs.
 - **`InboundBuffer.finishDiscardingBuffered`** *(security-critical, finding 7)*: with buffered
@@ -932,15 +1039,52 @@ shared across processes. Separate storage is preferred (it preserves the durable
   surfaces only keys present in the *authorization* item and can prune orphans. Verify: the lastSeen
   item is read strictly best-effort and never on the authorization path; `list()`/a sweep prunes
   lastSeen keys absent from the auth set so the item cannot grow unboundedly across enroll/revoke churn.
-- **R8 — NEW: out-of-lock invalidation window (H-b × H-d interaction).** Moving `invalidate()` out of
-  `HostControl.lock` (R3-of-H-b) opens a brief window between the under-lock snapshot/unlink and the
-  out-of-lock `invalidate()`, during which one already-in-flight irreducible `perform` — or one queued
-  deferred MainActor pasteboard write whose `perform` has not yet run — can still execute on a
-  snapshotted-but-not-yet-invalidated capability. This is **one irreducible effect**, the same bounded
-  residual class as the transport bytes (§4), NOT an unbounded stream: the fence already blocks new
-  admission, the inbound buffer is discarded (no *further* dispatch), and size caps bound that one
-  effect. Verify: no path invalidates *before* snapshotting (which would defeat Invalidate-First on
-  the batch paths), the window is bounded to one effect per capability, and the serve-defer path (which
-  invalidates first *synchronously*, not out-of-lock) has **zero** such window — the out-of-lock window
-  exists only on the batch paths (`beginRevoke`/`disconnectAll`/`evictLegacyAdmitted`) where H-b
-  requires it, and is the accepted price of not freezing the registry lock.
+- **R8 — out-of-lock mark window, now split mark/drain (H-b × H-d interaction; REVISED by Sol review
+  C1).** Moving withdrawal out of `HostControl.lock` (R3-of-H-b) opens a brief window between the
+  under-lock snapshot/unlink and the out-of-lock withdrawal, during which one already-in-flight
+  irreducible `perform` — or one queued deferred MainActor pasteboard write whose `perform` has not
+  yet run — can still execute on a snapshotted-but-not-yet-withdrawn capability.
+
+  **The bound did not originally hold.** With withdrawal as ONE blocking operation sharing the
+  effect lock, a batch teardown's first `invalidate()` blocked for the entire duration of that
+  session's in-flight effect (e.g. a stalled `FileHandle.write`), and every *later* session under
+  the same key stayed valid — with its inbound still open, since transport teardown is a later pass
+  — for the whole stall. A revoked device with two concurrent sessions kept full
+  keyboard/pointer/clipboard/file control through the sibling. `evictLegacyAdmitted` was worse: it
+  still interleaved each session's invalidation with its own transport teardown.
+
+  **The fix** is `SessionCapability`'s two-lock split — `markInvalid()` (non-blocking, flag lock
+  only) and `drainInFlightEffect()` (blocking, effect lock) — with every batch teardown running
+  **mark-all → drain-all → tear down transports**. `perform` re-checks the flag *under* the effect
+  lock, so a second effect that queued behind an in-flight one is refused rather than run. Restored
+  bound: **≤ one already-in-flight irreducible effect per capability**, and one session's stall can
+  no longer extend any sibling's window. Verify: no path drains before every snapshot is marked; no
+  path withdraws *before* snapshotting (which would defeat Invalidate-First on the batch paths); the
+  serve-defer path (synchronous mark+drain, not out-of-lock) has **zero** such window; and no
+  `perform` closure ever calls back into its own capability (a re-entrant `perform`/drain deadlocks
+  on the effect lock). Regression:
+  `HostControlRegistryTests.beginRevoke_marksEverySiblingInvalidWhileASessionIsParkedInsidePerform`.
+- **R9 — parked-waiter single-message residual (Task-2 finding; backstop EXTENDED by Sol review
+  I4a/I4b).** §4.4: a lone inbound message whose `enqueue` wins the lock the instant before the
+  discard, while a consumer is parked in `next()`, is handed to that continuation and can reach the
+  serve loop after withdrawal. Bounded to **one** message; the backstop is layer-1, the capability
+  check at the effect boundary. That backstop was incomplete in two places, both now closed:
+  **(a)** the serve loop's host-local session-control branches (`.startSession`/`.switchDisplay` →
+  build a `CaptureEngine` and start the video task, `.viewport` → re-crop the live capture,
+  `.clientFeedback` → steer the encoder, `.requestKeyframe`) had no capability check at all — only
+  *outbound* was gated — so a revoked peer could reconfigure or START screen capture; they now run
+  through `applySessionControl` (§4.1b). **(b)** `FileReceiver` gated only `createFile` and the
+  non-empty `handle.write`, leaving a zero-length final chunk able to finalize a transfer and a
+  quota-crossing chunk able to close **and delete** the partial file; both boundaries are now gated
+  (§4.1). Verify: every branch of the serve loop that mutates host state or touches the filesystem
+  passes a capability check immediately before its effect. Regressions:
+  `HostRunnerTests.applySessionControl_*`, `FileReceiverTests.emptyFinalChunk*` /
+  `quotaCrossingChunkUnderInvalidatedCapabilityDoesNotDeleteThePartialFile`.
+- **R10 — NEW: shutdown-path withdrawal is a MARK, not a drain (Sol review I3).** `serve`'s
+  cancellation handler now marks the session capability (through `SessionCapabilityBox`) before
+  `connection.close()`, so Invalidate-First holds on host shutdown. It deliberately does **not**
+  drain: a cancellation handler runs synchronously on the cancelling thread, and draining there would
+  let one stalled irreducible effect wedge "Stop Hosting". The residual is therefore the usual ≤ one
+  in-flight effect, and `serveSession`'s defer still performs the full mark+drain as the loop
+  unwinds. Verify: the box is published before any producer is built, a cancel that fires *before*
+  publication still withdraws the later-published capability, and nothing in the handler can block.

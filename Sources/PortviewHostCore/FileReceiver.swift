@@ -25,10 +25,11 @@ final class FileReceiver {
     private let maxFileSize: UInt64
     private let maxSessionSize: UInt64
     private var sessionTotal: UInt64 = 0
-    /// Per-session act-permission gate (han.4 Task 5, design §4/§7 invariant 2). Two irreducible
-    /// effect boundaries are gated — `offer`'s single `createFile` and `chunk`'s single
-    /// `handle.write` — so an invalidated capability skips each effect itself, never a
-    /// whole-message guard.
+    /// Per-session act-permission gate (han.4 Task 5, design §4/§7 invariant 2). FOUR irreducible
+    /// effect boundaries are gated — `offer`'s `createFile`, `chunk`'s `handle.write`, `chunk`'s
+    /// finalizing `handle.close`, and `dropTransfer`'s close+unlink — so an invalidated capability
+    /// skips each effect itself, never a whole-message guard. (Sol review I4b added the last two:
+    /// a zero-length final chunk and a quota-crossing chunk each reached an unguarded effect.)
     private let capability: SessionCapability
 
     init(
@@ -81,7 +82,13 @@ final class FileReceiver {
             transfers[chunk.transferID] = transfer
         }
         if chunk.isLast {
-            try? transfer.handle.close()
+            // SELF-guard at the irreducible boundary (Sol review I4b): COMPLETING a transfer is an
+            // effect of its own. A zero-length final chunk skips the write branch above entirely, so
+            // without this a revoked peer could still close the handle and commit the transfer
+            // through the bounded R9 parked-waiter window. When the gate refuses, the transfer stays
+            // in flight and the serve defer's `cancelAll` reclaims the handle instead.
+            let finalized = capability.perform { try? transfer.handle.close() }
+            guard finalized else { return }
             transfers[chunk.transferID] = nil
             logger.info("Saved \(transfer.url.lastPathComponent) (\(transfer.received, privacy: .public) bytes).")
         }
@@ -89,12 +96,28 @@ final class FileReceiver {
 
     /// Over the per-file or per-session cap: close the handle, delete the partial file, and drop
     /// the transfer (no further chunks for this id will be written).
+    ///
+    /// SELF-guarded (Sol review I4b): deleting a file is the most destructive effect this type has,
+    /// and the quota branch reaches it WITHOUT going through the write's gate — so a revoked peer
+    /// could make a ~/Downloads file disappear with one over-cap chunk. Close+unlink of the SAME
+    /// file is the irreducible boundary here and is deliberately NOT split: unlinking a still-open
+    /// handle, or closing without unlinking, would each leave a half-dropped transfer. When the gate
+    /// refuses, nothing is deleted and the transfer stays in flight (further chunks re-enter here
+    /// and are refused again); the serve defer's `cancelAll` reclaims the handle.
     private func dropTransfer(_ transferID: UInt32, _ transfer: Transfer) {
-        try? transfer.handle.close()
-        try? FileManager.default.removeItem(at: transfer.url)
+        let dropped = capability.perform {
+            try? transfer.handle.close()
+            try? FileManager.default.removeItem(at: transfer.url)
+        }
+        guard dropped else { return }
         transfers[transferID] = nil
         logger.warning("file transfer: \(transfer.url.lastPathComponent) exceeded size cap, dropped.")
     }
+
+    /// Test seam: the transfers still in flight — neither finalized (`isLast`) nor dropped
+    /// (over-cap). Lets the capability-gating tests observe that a post-withdrawal message did not
+    /// finalize or drop a transfer, which is otherwise invisible on disk.
+    var inFlightTransferIDs: Set<UInt32> { Set(transfers.keys) }
 
     func cancelAll() {
         for (_, transfer) in transfers { try? transfer.handle.close() }

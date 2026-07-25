@@ -118,12 +118,15 @@ public final class HostControl: @unchecked Sendable {
     /// (nothing that can *wait* runs here — H-b): coalesce a duplicate begin (return the existing
     /// lease, no second fence/bump); else mint a fresh lease, set the fence, bump the generation,
     /// **snapshot** every live session under the key, unlink each from `sessions`/`byClient`, and
-    /// `keepAwake.sessionEnded` each. Then **out of the lock**, in TWO passes: pass 1
-    /// `capability.invalidate()` on **every** snapshot (bounded wait ≤ one irreducible effect each),
-    /// pass 2 `outbound.finish()` then `connection.closeDiscardingInbound()` on each
-    /// (discard-not-drain, **no** graceful `bye` — a de-trusted peer loses access at once). Two
-    /// passes rather than one interleaved loop so a second session under the same key cannot keep
-    /// acting while a sibling's transport is torn down. The fence stays set (blocking new
+    /// `keepAwake.sessionEnded` each. Then **out of the lock**, in THREE passes: pass 0
+    /// `capability.markInvalid()` on **every** snapshot (NON-blocking, so no session under the key
+    /// can start a new effect even if a sibling's effect is stalled), pass 1
+    /// `capability.drainInFlightEffect()` on each (the only bounded wait — ≤ one already-in-flight
+    /// irreducible effect apiece), pass 2 `outbound.finish()` then
+    /// `connection.closeDiscardingInbound()` on each (discard-not-drain, **no** graceful `bye` — a
+    /// de-trusted peer loses access at once). Separate passes rather than one interleaved loop so a
+    /// second session under the same key cannot keep acting while a sibling stalls or while a
+    /// sibling's transport is torn down. The fence stays set (blocking new
     /// admission for the key) for the whole operation; it is lifted only by a matching
     /// `endRevoke`/`cancelRevoke`. Teardown is internal — the private `Session`/`OutboundLane` never
     /// escape (M-b).
@@ -148,14 +151,20 @@ public final class HostControl: @unchecked Sendable {
         }
         byClient[keyID] = nil
         lock.unlock()
-        // Out of the lock (H-b), in TWO passes. Pass 1: invalidate EVERY snapshotted capability
-        // first. Never close-then-invalidate — the transport close alone would drain, so
-        // invalidation must land first (design §4 ordering) — and never interleave per session: a
-        // one-pass `invalidate → finish → close` loop left the LATER session's capability valid for
-        // the whole of the EARLIER session's transport teardown, widening the effect window past
-        // R8's documented "≤ one irreducible effect per capability" bound.
+        // Out of the lock (H-b), in THREE passes (Sol review C1). Pass 0: MARK every snapshotted
+        // capability — non-blocking, so the instant this pass ends NO session under the key can
+        // start a new effect, however long a sibling's in-flight effect stalls. A blocking
+        // `invalidate()` here (mark+drain fused) blocked on the FIRST session whose effect was in
+        // flight while every later session stayed valid with its inbound still open — the C1
+        // defect that broke R8's "≤ one irreducible effect per capability" bound.
         for session in snapshot {
-            session.capability.invalidate()
+            session.capability.markInvalid()
+        }
+        // Pass 1: DRAIN each — the only bounded wait (≤ one already-in-flight irreducible effect
+        // per capability). Never close-then-invalidate: the transport close alone would drain, so
+        // withdrawal must land first (design §4 ordering).
+        for session in snapshot {
+            session.capability.drainInFlightEffect()
         }
         // Pass 2: only now the transport teardown — drop queued sends, then discard-close.
         for session in snapshot {
@@ -253,11 +262,19 @@ public final class HostControl: @unchecked Sendable {
             keepAwake.sessionEnded(id)  // inside the lock (invariant 13)
         }
         lock.unlock()
-        // Legacy sessions carry no keyID, so `byClient` needs no update. Out of the lock:
-        // invalidate FIRST (Invalidate-First, H-d — closes the "legacy eviction leaves the capability
-        // valid" hole), then finish, then discard-close (replacing the draining `close()`).
+        // Legacy sessions carry no keyID, so `byClient` needs no update. Out of the lock, in the
+        // same THREE passes as `beginRevoke` (Sol review C1 — this path still interleaved each
+        // session's invalidation with its own transport teardown, the widest form of the defect):
+        // MARK every evicted capability (non-blocking) …
         for (_, session) in evicted {
-            session.capability.invalidate()
+            session.capability.markInvalid()
+        }
+        // … DRAIN each (≤ one in-flight irreducible effect apiece) …
+        for (_, session) in evicted {
+            session.capability.drainInFlightEffect()
+        }
+        // … then the transport teardown: finish, then discard-close (not the draining `close()`).
+        for (_, session) in evicted {
             session.outbound.finish()
             session.connection.closeDiscardingInbound()
         }
@@ -273,11 +290,15 @@ public final class HostControl: @unchecked Sendable {
         byClient.removeAll()   // clear byClient too (M-a/finding 8a — it previously cleared only sessions)
         keepAwake.endAll()     // inside the lock (M-a — previously ran after unlock, racing a new sessionBegan)
         lock.unlock()
-        // Invalidate-First (H-d): flip every capability synchronously BEFORE the async bye/close, so a
-        // deferred effect can't outlive the disconnect. `revoking`/`generation` are untouched — this
-        // is the trusted disconnect, not a revoke.
+        // Invalidate-First (H-d): withdraw every capability synchronously BEFORE the async bye/close,
+        // so a deferred effect can't outlive the disconnect. `revoking`/`generation` are untouched —
+        // this is the trusted disconnect, not a revoke. MARK every session first (non-blocking, Sol
+        // review C1) so one session's in-flight effect can't leave its siblings acting, THEN drain.
         for session in active {
-            session.capability.invalidate()
+            session.capability.markInvalid()
+        }
+        for session in active {
+            session.capability.drainInFlightEffect()
         }
         // Deliberately NOT via the outbound lane: this is the teardown path itself — the close must
         // sequence after the bye's send completes, and the lane (whose owner is being torn down)

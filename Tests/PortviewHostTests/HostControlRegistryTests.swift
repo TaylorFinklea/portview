@@ -33,6 +33,19 @@ import PortviewProtocol
         HostControl(keepAwake: KeepAwake(backend: backend, ticker: NoopTicker()))
     }
 
+    /// Watch `capability.isValid` from a DEDICATED thread and signal once it goes false, so the test
+    /// thread never blocks on the capability itself: before the mark/drain split the flag getter took
+    /// the very lock a parked `perform` holds, so a direct read would HANG the test rather than fail
+    /// it. The observer thread exits as soon as the parked effect is released.
+    private func observeInvalidation(of capability: SessionCapability) -> DispatchSemaphore {
+        let observed = DispatchSemaphore(value: 0)
+        Thread.detachNewThread {
+            while capability.isValid { Thread.sleep(forTimeInterval: 0.002) }
+            observed.signal()
+        }
+        return observed
+    }
+
     /// Register a keyed session under `keyID` at `generation` and return its capability. Fails the
     /// test if admission is rejected (the caller asserts admission separately when that's the point).
     @discardableResult
@@ -279,6 +292,97 @@ import PortviewProtocol
         #expect(samples.count == 2)  // both teardowns observed, synchronously inside beginRevoke
         // At EVERY teardown instant — including the FIRST — no capability under the key is still live.
         #expect(samples.allSatisfy { !$0.a && !$0.b })
+    }
+
+    /// Sol review C1 (second half): `evictLegacyAdmitted` never got `beginRevoke`'s multi-pass
+    /// treatment — it ran `invalidate → finish → close` per session, so the LAST legacy session kept
+    /// full authority for the whole of the FIRST one's transport teardown. Same `ParkedSink` witness
+    /// as `beginRevoke_invalidatesEveryCapabilityBeforeAnyTransportTeardown`.
+    @Test func evictLegacyAdmitted_invalidatesEveryCapabilityBeforeAnyTransportTeardown() async throws {
+        let control = makeControl()
+        let capA = SessionCapability()
+        let capB = SessionCapability()
+        let witness = TeardownWitness()
+        let sinkA = ParkedSink { witness.record(a: capA.isValid, b: capB.isValid) }
+        let sinkB = ParkedSink { witness.record(a: capA.isValid, b: capB.isValid) }
+        let connA = phantomConnection()
+        let connB = phantomConnection()
+        let laneA = OutboundLane<AnyMessage>(sink: { _ in await sinkA.park() })
+        let laneB = OutboundLane<AnyMessage>(sink: { _ in await sinkB.park() })
+
+        #expect(control.register("A", connA, outbound: laneA, authClass: .legacyAdmitted,
+                                 ticket: AdmissionTicket(keyID: nil, generation: 0),
+                                 capability: capA) == .admitted)
+        #expect(control.register("B", connB, outbound: laneB, authClass: .legacyAdmitted,
+                                 ticket: AdmissionTicket(keyID: nil, generation: 0),
+                                 capability: capB) == .admitted)
+
+        laneA.enqueue(.ping(Ping(sendMicros: 1)))
+        laneB.enqueue(.ping(Ping(sendMicros: 2)))
+        let deadline = Date().addingTimeInterval(10)
+        while !(sinkA.isParked && sinkB.isParked), Date() < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        #expect(sinkA.isParked && sinkB.isParked)
+
+        control.evictLegacyAdmitted()
+
+        let samples = witness.samples
+        #expect(samples.count == 2)
+        #expect(samples.allSatisfy { !$0.a && !$0.b })
+    }
+
+    /// Sol review C1 (design §10 R8): the previous regression test parked OUTBOUND teardown, which
+    /// never exercised the actual counterexample — a session parked INSIDE `capability.perform`.
+    /// `invalidate()` used to take the SAME lock `perform` holds for the whole effect, so the
+    /// teardown blocked on the first session whose effect was in flight (a stalled
+    /// `FileHandle.write`) and **every later session under the key stayed valid, with its inbound
+    /// still open, for the entire stall** — a revoked device kept full keyboard/pointer/clipboard/
+    /// file control through its second session. R8's "≤ one irreducible effect per capability" did
+    /// not hold. The mark/drain split fixes it: the non-blocking MARK pass lands on every
+    /// snapshotted capability before the blocking DRAIN pass waits out any in-flight effect.
+    ///
+    /// Both sessions park inside an effect so the assertion is independent of `byClient`'s
+    /// (hash-seeded, per-process) set iteration order — pre-fix, NEITHER capability can be flipped
+    /// while both effects are in flight, whichever the teardown reaches first.
+    @Test func beginRevoke_marksEverySiblingInvalidWhileASessionIsParkedInsidePerform() {
+        let control = makeControl()
+        let (capA, _) = admit(control, id: "A", key: "K", generation: 0)
+        let (capB, _) = admit(control, id: "B", key: "K", generation: 0)
+
+        let enteredA = DispatchSemaphore(value: 0), releaseA = DispatchSemaphore(value: 0)
+        let enteredB = DispatchSemaphore(value: 0), releaseB = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { capA.perform { enteredA.signal(); releaseA.wait() } }
+        Thread.detachNewThread { capB.perform { enteredB.signal(); releaseB.wait() } }
+        #expect(enteredA.wait(timeout: .now() + 10) == .success)
+        #expect(enteredB.wait(timeout: .now() + 10) == .success)
+
+        let markedA = observeInvalidation(of: capA)
+        let markedB = observeInvalidation(of: capB)
+        let revokeReturned = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { _ = control.beginRevoke(clientKeyID: "K"); revokeReturned.signal() }
+
+        // Pass 0 (MARK) is non-blocking, so BOTH capabilities lose authority while BOTH effects are
+        // still in flight.
+        #expect(markedA.wait(timeout: .now() + 5) == .success)
+        #expect(markedB.wait(timeout: .now() + 5) == .success)
+        // …and the DRAIN pass is genuinely still waiting on those in-flight effects (so this is a
+        // real stall, not a teardown that already finished).
+        #expect(revokeReturned.wait(timeout: .now() + 0.05) == .timedOut)
+
+        // The decisive counterexample: release ONLY B. With A still parked mid-effect, B must be
+        // unable to START a new effect.
+        releaseB.signal()
+        var ranB = false
+        #expect(capB.perform { ranB = true } == false)
+        #expect(ranB == false)
+        #expect(revokeReturned.wait(timeout: .now() + 0.05) == .timedOut)
+
+        // Releasing A completes the drain; the teardown then finishes normally.
+        releaseA.signal()
+        #expect(revokeReturned.wait(timeout: .now() + 10) == .success)
+        #expect(capA.isValid == false)
+        #expect(capB.isValid == false)
     }
 
     @Test func deregisterBySessionIDDoesNotWipeReconnectingSibling() {

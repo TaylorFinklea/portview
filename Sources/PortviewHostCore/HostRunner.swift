@@ -503,13 +503,46 @@ public struct HostRunner: Sendable {
         sas: SASPairingControl? = nil,
         enrollment: EnrollmentAuthority? = nil
     ) async {
+        // Invalidate-First on the SHUTDOWN path too (Sol review I3, design §7 invariant 1): the
+        // capability is created inside `serveSession`, so it is published into this box for the
+        // cancellation handler to reach.
+        let capabilities = SessionCapabilityBox()
         await withTaskCancellationHandler {
             await serveSession(connection, registry: registry, hostCertSHA256: hostCertSHA256,
                                authPolicy: authPolicy, pairings: pairings,
-                               emit: emit, control: control, sas: sas, enrollment: enrollment)
+                               emit: emit, control: control, sas: sas, enrollment: enrollment,
+                               capabilities: capabilities)
         } onCancel: {
-            connection.close()
+            Self.cancelServe(capabilities) { connection.close() }
         }
+    }
+
+    /// The serve task's CANCELLATION teardown — host shutdown ("Stop Hosting") or listener cancel.
+    /// Invalidate-First (design §7 invariant 1: EVERY terminal path): MARK the session's capability
+    /// invalid **before** the transport close, so an already-dequeued privileged message stops at its
+    /// next effect boundary instead of finishing (e.g. `InputInjector.typeText`'s synchronous CGEvent
+    /// loop, which does not observe task cancellation, kept posting past the shutdown boundary when
+    /// the close ran first). MARKS, never drains: this runs synchronously on the cancelling thread,
+    /// which a stalled in-flight effect must not be able to wedge — the in-flight effect completes
+    /// (the accepted ≤ one-effect residual) and `serveSession`'s defer does the full mark+drain.
+    /// Factored out and named so the ordering is directly testable.
+    static func cancelServe(_ capabilities: SessionCapabilityBox, close: () -> Void) {
+        capabilities.markInvalid()
+        close()
+    }
+
+    /// R9 backstop for HOST-LOCAL session-control effects (Sol review I4a, design §10 R9). The
+    /// parked-waiter residual can hand the serve loop ONE inbound message after invalidation, and the
+    /// session-control branches mutate host-side state rather than sending — so they were not covered
+    /// by the outbound `isValid` gates (§4.5/H-e). Every such branch runs its effect through here,
+    /// checked immediately before the effect and after any preceding `await`. An `isValid` pre-check
+    /// (not `perform`): these effects `await` an actor, which the synchronous capability lock cannot
+    /// span (R2). Named and static so the gate is testable without a live display.
+    @discardableResult
+    static func applySessionControl(_ capability: SessionCapability, _ effect: () async -> Void) async -> Bool {
+        guard capability.isValid else { return false }
+        await effect()
+        return true
     }
 
     /// `internal` (not `private`) so the auth-gate loopback integration tests can drive it
@@ -526,6 +559,10 @@ public struct HostRunner: Sendable {
         control: HostControl? = nil,
         sas: SASPairingControl? = nil,
         enrollment: EnrollmentAuthority? = nil,
+        /// Publishes this session's capability to `serve`'s cancellation handler so a shutdown
+        /// withdraws authority BEFORE closing the transport (Sol review I3). Absent only for tests
+        /// that drive `serveSession` directly.
+        capabilities: SessionCapabilityBox? = nil,
         onAuthGateOutcome: (@Sendable (AuthGateOutcome) -> Void)? = nil,
         didBuildScaffolding: (@Sendable () -> Void)? = nil
     ) async {
@@ -636,6 +673,10 @@ public struct HostRunner: Sendable {
         // (this is the whole of finding 5). The three prior-task placeholder capabilities collapse
         // into this ONE `capability`.
         let capability = SessionCapability()
+        // Published BEFORE any producer or transport work so a cancellation-driven shutdown lands
+        // Invalidate-First on this session (Sol review I3). A cancel that already fired marks this
+        // capability the instant it is published, so the session never comes up live.
+        capabilities?.publish(capability)
         // One ordered outbound lane for this whole connection (survives display switches), owned here
         // and finished in the teardown defer: clipboard pushes, cursor confirmations, and HostControl
         // broadcast/file sends all enqueue onto it, so no fire-and-forget send can reorder under load
@@ -798,15 +839,24 @@ public struct HostRunner: Sendable {
                 do { try server.handle(start) } catch { logger.error("startSession error: \(error, privacy: .public)"); return }
                 requestedFPS = StreamParameters.captureFPS(requested: start.maxFPS)
                 requestedBitrate = StreamParameters.encoderBitrate(requested: start.targetBitrate)
-                startVideo(on: await display(forID: start.displayID))
+                // (R9, Sol review I4a) STARTING capture is a host-local privileged effect: gated
+                // immediately before it, after the registry read's await — a revoked peer must not be
+                // able to stand up a fresh CaptureEngine + video pump through the residual window.
+                let startTarget = await display(forID: start.displayID)
+                await Self.applySessionControl(capability) { startVideo(on: startTarget) }
             case .switchDisplay(let switchMessage):
-                startVideo(on: await display(forID: switchMessage.displayID))
+                let switchTarget = await display(forID: switchMessage.displayID)
+                await Self.applySessionControl(capability) { startVideo(on: switchTarget) }
             case .viewport(let viewport):
                 // Magnifier: re-crop the live capture. The viewport now travels in every VideoFrame,
-                // so no separate echo is needed — just apply the crop.
-                _ = await currentCapture?.setViewport(
-                    normalizedX: viewport.normalizedX, normalizedY: viewport.normalizedY,
-                    normalizedW: viewport.normalizedW, normalizedH: viewport.normalizedH)
+                // so no separate echo is needed — just apply the crop. Gated (R9): re-cropping the
+                // live capture is a host-local privileged effect.
+                let capture = currentCapture
+                await Self.applySessionControl(capability) {
+                    _ = await capture?.setViewport(
+                        normalizedX: viewport.normalizedX, normalizedY: viewport.normalizedY,
+                        normalizedW: viewport.normalizedW, normalizedH: viewport.normalizedH)
+                }
             case .typeText(let text):
                 // Serve-boundary size cap (H-b): an over-cap typeText is skipped WHOLE, never partially
                 // injected. The injector self-gates each CGEvent on the capability (Task 5).
@@ -845,13 +895,16 @@ public struct HostRunner: Sendable {
             case .pong:
                 break
             case .clientFeedback(let feedback):
-                clientFeedback.update(feedback)
+                // Gated (R9): this snapshot steers the live encoder's bitrate/fps, so a revoked peer
+                // must not keep driving it.
+                guard await Self.applySessionControl(capability, { clientFeedback.update(feedback) }) else { break }
                 logger.notice("client feedback fps=\(feedback.receivedFPS, privacy: .public) mbps=\(feedback.receivedMbps, privacy: .public) decodeMs=\(feedback.averageDecodeMs, privacy: .public) dropped=\(feedback.droppedFrames, privacy: .public)")
             case .requestKeyframe:
                 // Client asked for a fresh keyframe (e.g. it just returned to the foreground and its
                 // delta chain has a gap). Force the next encoded frame to a keyframe on the active
-                // capture so the stream recovers without waiting for the periodic keyframe.
-                await currentCapture?.requestKeyframe()
+                // capture so the stream recovers without waiting for the periodic keyframe. Gated (R9).
+                let keyframeCapture = currentCapture
+                await Self.applySessionControl(capability) { await keyframeCapture?.requestKeyframe() }
             default:
                 break
             }

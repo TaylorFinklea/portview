@@ -94,6 +94,73 @@ import PortviewProtocol
         #expect((try? FileManager.default.contentsOfDirectory(atPath: dir.path))?.isEmpty == true)
     }
 
+    /// Sol review I4(b), first gap (design §7 invariant 2): a ZERO-LENGTH final chunk skips the
+    /// `!data.isEmpty` branch entirely, so it never reached `capability.perform` — and still closed
+    /// the handle and completed the transfer. Finalization is an effect of its own and must be gated
+    /// at its irreducible boundary like the write is; a session whose authority is gone may not
+    /// commit a transfer. The bytes written BEFORE the withdrawal stay on disk (already committed);
+    /// the handle is reclaimed by the serve defer's `cancelAll`, not by the revoked peer.
+    @Test func emptyFinalChunkUnderInvalidatedCapabilityDoesNotFinalizeTheTransfer() {
+        let dir = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let capability = SessionCapability()
+        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000, capability: capability)
+
+        receiver.offer(FileOffer(transferID: 8, name: "half.bin", size: 12))
+        receiver.chunk(FileChunk(transferID: 8, isLast: false, data: Array(repeating: 1, count: 6)))
+        #expect(receiver.inFlightTransferIDs == [8])
+
+        capability.invalidate()
+        receiver.chunk(FileChunk(transferID: 8, isLast: true, data: []))
+
+        #expect(receiver.inFlightTransferIDs == [8])   // NOT finalized by the revoked peer
+        #expect((try? Data(contentsOf: dir.appendingPathComponent("half.bin")))?.count == 6)
+        receiver.cancelAll()                            // the serve defer reclaims the handle
+        #expect(receiver.inFlightTransferIDs.isEmpty)
+    }
+
+    /// The gate must not break the normal path: with a live capability the same zero-length final
+    /// chunk still finalizes the transfer.
+    @Test func emptyFinalChunkUnderAValidCapabilityFinalizes() {
+        let dir = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000,
+                                    capability: SessionCapability())
+
+        receiver.offer(FileOffer(transferID: 9, name: "whole.bin", size: 6))
+        receiver.chunk(FileChunk(transferID: 9, isLast: false, data: Array(repeating: 1, count: 6)))
+        receiver.chunk(FileChunk(transferID: 9, isLast: true, data: []))
+
+        #expect(receiver.inFlightTransferIDs.isEmpty)
+        #expect((try? Data(contentsOf: dir.appendingPathComponent("whole.bin")))?.count == 6)
+    }
+
+    /// Sol review I4(b), second gap (design §7 invariant 2): a quota-crossing chunk called
+    /// `dropTransfer` UNGUARDED, which closes the handle **and deletes** the partial file. That is a
+    /// destructive filesystem mutation performed by a session whose authority is already withdrawn —
+    /// a revoked peer could still make a file disappear from ~/Downloads by pushing one over-cap
+    /// chunk through the bounded R9 parked-waiter window.
+    @Test func quotaCrossingChunkUnderInvalidatedCapabilityDoesNotDeleteThePartialFile() {
+        let dir = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let capability = SessionCapability()
+        let receiver = FileReceiver(directory: dir, maxFileSize: 10, maxSessionSize: 1000, capability: capability)
+
+        receiver.offer(FileOffer(transferID: 10, name: "partial.bin", size: 6))
+        receiver.chunk(FileChunk(transferID: 10, isLast: false, data: Array(repeating: 1, count: 6)))
+        let url = dir.appendingPathComponent("partial.bin")
+        #expect((try? Data(contentsOf: url))?.count == 6)
+
+        capability.invalidate()
+        // 6 + 6 > maxFileSize(10) → the over-cap drop path.
+        receiver.chunk(FileChunk(transferID: 10, isLast: false, data: Array(repeating: 1, count: 6)))
+
+        #expect(FileManager.default.fileExists(atPath: url.path))   // not deleted
+        #expect((try? Data(contentsOf: url))?.count == 6)           // and never grew
+        #expect(receiver.inFlightTransferIDs == [10])               // not dropped either
+        receiver.cancelAll()
+    }
+
     /// The transfer is not registered either, so a following chunk is a no-op rather than writing
     /// into a stale handle.
     @Test func chunkAfterGatedOfferIsANoOp() {

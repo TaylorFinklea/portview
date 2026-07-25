@@ -95,4 +95,76 @@ import Testing
         #expect(invalidateCompleted.current == true)
         #expect(capability.isValid == false)
     }
+
+    /// Sol review C1: `markInvalid()` is the NON-blocking half. It takes only the flag lock, so it
+    /// returns — and the flag is observably false — while an effect is still parked mid-flight. This
+    /// is what lets a batch teardown withdraw EVERY session's authority before waiting on any one of
+    /// them; the fused single-lock `invalidate()` could not (it blocked on the first stalled effect).
+    @Test func markInvalidReturnsWhileAnEffectIsStillInFlight() {
+        let capability = SessionCapability()
+        let enteredEffect = DispatchSemaphore(value: 0)
+        let releaseEffect = DispatchSemaphore(value: 0)
+        let performDone = DispatchSemaphore(value: 0)
+
+        Thread.detachNewThread {
+            capability.perform { enteredEffect.signal(); releaseEffect.wait() }
+            performDone.signal()
+        }
+        #expect(enteredEffect.wait(timeout: .now() + 10) == .success)
+
+        // Both of these run on the TEST thread while the effect is parked — neither may block.
+        capability.markInvalid()
+        #expect(capability.isValid == false)
+
+        releaseEffect.signal()
+        #expect(performDone.wait(timeout: .now() + 10) == .success)
+    }
+
+    /// The blocking half: `drainInFlightEffect()` returns only once the in-flight effect is done.
+    @Test func drainWaitsOutTheInFlightEffect() {
+        let capability = SessionCapability()
+        let enteredEffect = DispatchSemaphore(value: 0)
+        let releaseEffect = DispatchSemaphore(value: 0)
+        let drainReturned = DispatchSemaphore(value: 0)
+
+        Thread.detachNewThread { capability.perform { enteredEffect.signal(); releaseEffect.wait() } }
+        #expect(enteredEffect.wait(timeout: .now() + 10) == .success)
+
+        capability.markInvalid()
+        Thread.detachNewThread { capability.drainInFlightEffect(); drainReturned.signal() }
+        #expect(drainReturned.wait(timeout: .now() + 0.05) == .timedOut)
+
+        releaseEffect.signal()
+        #expect(drainReturned.wait(timeout: .now() + 10) == .success)
+    }
+
+    /// The residual a non-blocking mark accepts is **at most one** effect per capability, and that
+    /// bound is enforced by `perform`'s re-check UNDER the effect lock: a second caller that queued
+    /// behind the in-flight effect sees the mark when it finally acquires the lock, and its effect
+    /// never runs. (Robust either way — a caller that had not yet passed the fast-path check is
+    /// rejected there instead; neither path may run the effect.)
+    @Test func aSecondEffectQueuedBehindAnInFlightOneIsRejectedAfterTheMark() {
+        let capability = SessionCapability()
+        let enteredFirst = DispatchSemaphore(value: 0)
+        let releaseFirst = DispatchSemaphore(value: 0)
+        let secondDone = DispatchSemaphore(value: 0)
+        let secondRan = Flag()
+        let secondResult = Flag()
+
+        Thread.detachNewThread { capability.perform { enteredFirst.signal(); releaseFirst.wait() } }
+        #expect(enteredFirst.wait(timeout: .now() + 10) == .success)
+
+        Thread.detachNewThread {
+            let result = capability.perform { secondRan.set(true) }
+            secondResult.set(result)
+            secondDone.signal()
+        }
+        Thread.sleep(forTimeInterval: 0.05)  // let the second caller reach the effect lock
+        capability.markInvalid()
+        releaseFirst.signal()
+
+        #expect(secondDone.wait(timeout: .now() + 10) == .success)
+        #expect(secondRan.current == false)
+        #expect(secondResult.current == false)
+    }
 }
