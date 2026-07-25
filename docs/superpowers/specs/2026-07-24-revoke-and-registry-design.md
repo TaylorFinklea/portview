@@ -325,9 +325,13 @@ prescribed** where they are codebase idioms the implementer must read and mirror
   at most one event and a capped message bounds wasted pre-invalidate work. The process-wide `paused`
   flag (`:16–29`) is unchanged (orthogonal lock-monitor gate).
 - **`FileReceiver.chunk`** (`FileReceiver.swift:52`). The single `handle.write(contentsOf:)` (`:60`)
-  is the irreducible effect; the serve loop wraps `capability.perform { fileReceiver.chunk(chunk) }`
-  around one chunk, and caps `chunk.data.count` at the serve boundary (H-b). Per-file/per-session
-  caps (`:56`) unchanged.
+  is the irreducible effect. **`FileReceiver` SELF-GUARDS** it: `chunk` takes the session capability
+  and wraps only its own `handle.write` in `capability.perform` (Task 5, landed). The serve loop
+  therefore calls `fileReceiver.chunk(chunk)` **UNWRAPPED** — do NOT add an outer
+  `capability.perform { fileReceiver.chunk(chunk) }`: `SessionCapability.perform` is non-reentrant
+  (`NSLock`), so an outer wrap around a self-guarding chunk would self-deadlock on a *valid*
+  capability (Task-5 review). One gate at the irreducible write, not two. Size cap: `chunk.data.count`
+  is capped at the SERVE boundary (Task 8, H-b). Per-file/per-session caps (`:56`) unchanged.
 - **`InboundBuffer`** (`InboundBuffer.swift`). *Add* `finishDiscardingBuffered()`: under the lock,
   clear `controlLane`/`controlHead`/`controlBytesBuffered`/`audioLane`/`videoLane`, set `finished =
   true`, take + resume any `waiter` with `nil`. **Change `enqueue`** (`:79`) to return a **terminal
@@ -490,7 +494,7 @@ CGEvents, starving `invalidate` — H-b). v3 checks the capability **atomic with
 effect**:
    - input: `capability.perform { self.postEvent(event) }` **per CGEvent**, at `InputInjector`'s
      `postEvent` seam (`:35`) — not around the whole `.typeText`;
-   - file: `capability.perform { fileReceiver.chunk(chunk) }` around **one** chunk's single
+   - file: `fileReceiver.chunk(chunk)` called UNWRAPPED (FileReceiver self-guards its single
      `handle.write` (`FileReceiver.swift:60`);
    - clipboard: inside `applyRemote`'s MainActor task, `capability.perform { pasteboard.clearContents();
      pasteboard.setString(text, .string); … }` around the **one** pasteboard mutation.
