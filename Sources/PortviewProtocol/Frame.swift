@@ -21,6 +21,31 @@ public enum Frame {
         text.utf8.count <= maxClipboardBytes
     }
 
+    /// Largest `.typeText` payload (UTF-8 bytes) the host will inject. Well under `maxBodyLength`
+    /// (16 MiB): a privileged inbound message is size-capped at the serve boundary so the COUNT of
+    /// irreducible CGEvent posts an attacker can queue in one message is bounded — together with
+    /// `InputInjector`'s per-CGEvent capability gate this keeps a revoke's `invalidate()` from being
+    /// starved by one giant message (han.4 design §4, H-b). Keyboard input is tiny; bulk text arrives
+    /// via the clipboard path, itself capped at `maxClipboardBytes`.
+    public static let maxTypeTextBytes = 64 * 1024
+
+    /// Whether a `.typeText` payload is small enough to inject (serve-boundary size cap, han.4 H-b).
+    /// Over-cap messages are SKIPPED whole (never partially injected), mirroring `shouldSendClipboard`.
+    public static func shouldInjectTypeText(_ text: String) -> Bool {
+        text.utf8.count <= maxTypeTextBytes
+    }
+
+    /// Largest inbound `.fileChunk` data payload the host will write in one message (serve-boundary
+    /// size cap, han.4 H-b). Comfortably above the sender's 64 KiB chunk (`SessionViewModel`/`HostControl`
+    /// both slice at 64 KiB) so legitimate transfers pass, while bounding the single irreducible
+    /// `FileHandle.write` per message. Per-file / per-session byte caps stay in `FileReceiver`.
+    public static let maxFileChunkBytes = 256 * 1024
+
+    /// Whether an inbound `.fileChunk` is small enough to write (serve-boundary size cap, han.4 H-b).
+    public static func shouldWriteFileChunk(_ chunk: FileChunk) -> Bool {
+        chunk.data.count <= maxFileChunkBytes
+    }
+
     /// Encode a single message into one frame.
     public static func encode<M: WireMessage>(_ message: M) -> [UInt8] {
         var payload = BinaryWriter()

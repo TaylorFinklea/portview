@@ -108,6 +108,13 @@ public struct HostRunner: Sendable {
             return
         }
 
+        // M-b (design §2): the app supplies its own `HostControl` (it owns the revoke UI); a `nil`
+        // caller (the CLI, `PortviewHostApp.swift`) gets ONE process-local registry minted here and
+        // threaded down NON-optionally, so the CLI still mints admission tickets, registers session
+        // capabilities, and evicts legacy sessions against a single shared registry across every
+        // connection of the process.
+        let control = Self.resolvedControl(control)
+
         do {
             let content = try await SCShareableContent.current
             let displays = content.displays
@@ -178,7 +185,7 @@ public struct HostRunner: Sendable {
             // (a locked Mac captures the secure desktop / blank, not the user's content).
             let lockMonitor = LockMonitor { locked in
                 InputInjector.paused = locked
-                control?.broadcast(.hostLockStatus(HostLockStatus(locked: locked)))
+                control.broadcast(.hostLockStatus(HostLockStatus(locked: locked)))
                 onEvent(.message(locked ? "🔒 Screen locked — live view paused for connected clients."
                                         : "🔓 Screen unlocked — live view resumed."))
             }
@@ -570,6 +577,11 @@ public struct HostRunner: Sendable {
             admissionTicket: { keyID in control?.admissionTicket(for: keyID) ?? AdmissionTicket(keyID: keyID, generation: 0) },
             sendChallenge: { try await connection.send(.serverChallenge($0)) })
         onAuthGateOutcome?(outcome)
+        // The admission ticket captured AT AUTHORIZATION (design §3, Order-A) is threaded from the
+        // gate into `control.register` below (Task 8, finding 1). Legacy (nil-key) sessions default
+        // to a nil-key ticket that skips the fence/generation check; the enrollment path captures a
+        // POST-enroll ticket so its generation reflects the just-enrolled key.
+        var admissionTicket = AdmissionTicket(keyID: nil, generation: 0)
         switch outcome {
         case .rejected(let reason):
             logger.notice("auth gate rejected connection: \(String(describing: reason), privacy: .public)")
@@ -588,55 +600,171 @@ public struct HostRunner: Sendable {
                 return
             }
             logger.info("auth gate: unknown key enrolled (fingerprint \(KeyFingerprint.short(forPublicKey: Data(publicKey)), privacy: .public))")
+            // Capture the ticket POST-enroll (design §1b): the just-enrolled key is now known, so its
+            // generation reflects THIS instant. `control` is non-nil on the enrolled path (the
+            // ceremony requires it); the `??` fallback only covers the no-registry test path. If K is
+            // fenced mid-enroll, `admissionTicket(for:)` returns nil → the fallback carries (K, 0),
+            // which `register`'s own fence check still rejects (fence dominates the generation check).
+            let keyID = PairingStore.deviceID(forPublicKey: Data(publicKey))
+            admissionTicket = control?.admissionTicket(for: keyID) ?? AdmissionTicket(keyID: keyID, generation: 0)
         case .legacyAdmitted:
             emit(.message("⚠️ Legacy client connected without device authentication (bootstrap policy — enroll this device to tighten)."))
-        case .authenticated(let deviceID, _):
-            // MINIMAL han.4 Task-7 compile-fix: the gate now carries the admission ticket captured
-            // at authorization (Order-A), but `control?.register` further down still uses its own
-            // Task-4 placeholder ticket — threading THIS ticket into register for real (plus the
-            // durable + post-await recheck) is Task 8's job (design §5).
+        case .authenticated(let deviceID, let ticket):
             logger.info("auth gate: authenticated device \(deviceID, privacy: .public)")
+            admissionTicket = ticket
         }
         // The session's auth class is carried into `control.register` so a later policy tightening
         // can evict exactly the legacy-admitted sessions (HostControl.evictLegacyAdmitted).
         let sessionAuthClass: HostControl.SessionAuthClass =
             outcome == .legacyAdmitted ? .legacyAdmitted : .authenticated
 
+        // Display guard (design §1b step 5, unchanged position): a session with no display to stream
+        // is closed BEFORE admission — so an authenticated-but-display-less peer never occupies the
+        // registry. In production `run` guarantees ≥1 display, so this effectively never fires there.
         guard let firstDisplay = await registry.current().first else { connection.close(); return }
+
+        // --- ADMISSION, before ANY producer or ServerHello (design §1b step 6, findings 5/H-e) ---
+        // ONE per-session capability, threaded into EVERY effect boundary (inbound: injector,
+        // clipboard, file; outbound: lane, router, pumpVideo) and invalidated FIRST on every teardown
+        // path (Invalidate-First, H-d). ONE inert `OutboundLane` — no producer attached yet.
+        // Registration + the post-await durable recheck run AHEAD of scaffolding, `ServerHello`, and
+        // every producer, so nothing reaches the peer before the session is confirmed still-authorized
+        // (this is the whole of finding 5). The three prior-task placeholder capabilities collapse
+        // into this ONE `capability`.
+        let capability = SessionCapability()
+        // One ordered outbound lane for this whole connection (survives display switches), owned here
+        // and finished in the teardown defer: clipboard pushes, cursor confirmations, and HostControl
+        // broadcast/file sends all enqueue onto it, so no fire-and-forget send can reorder under load
+        // or outlive the session. Its sink gates on `capability.isValid` (Task 6).
+        let outbound = OutboundLane(connection: connection, capability: capability)
+        // Per-connection session id (a fresh UUID, NOT the device's stable key id): on a reconnect the
+        // old session's disconnect must not evict the new one's entry.
+        let sessionID = UUID().uuidString
+        var registered = false
+        if let control {
+            // register (fence + generation check, synchronous) → post-await durable recheck. On any
+            // failure `admitSession` tears down Invalidate-First and returns false; nothing was
+            // produced and no ServerHello was sent, so we simply return.
+            guard await Self.admitSession(
+                connection, control: control, outbound: outbound, capability: capability,
+                authClass: sessionAuthClass, ticket: admissionTicket, sessionID: sessionID,
+                isAuthorized: { await pairings.isAuthorized(id: $0) }) else {
+                return
+            }
+            registered = true
+        }
+        // Scaffolding construction begins ONLY after admission + the post-await recheck — a rejected or
+        // revoked-during-await peer returned above and never reaches this seam.
         didBuildScaffolding?()
 
-        // MINIMAL han.4 Task-6 compile-fix: OutboundLane/HostLaneRouter/pumpVideo now require a
-        // SessionCapability (design §2/§4 finding 4/H-e — each gates its post-encode send / sink
-        // on it). This is a THIRD standalone placeholder, distinct from `inboundEffectCapability`
-        // below and the ticket capability minted inline at `control.register` further down —
-        // nothing in THIS function invalidates any of the three yet. Unifying all three into ONE
-        // real per-session capability, invalidated Invalidate-First in this defer, is Task 8's job
-        // (see the report for the exact seam).
-        let outboundEffectCapability = SessionCapability()
-        // One ordered outbound lane for this whole connection (survives display switches), owned
-        // here and finished in the teardown defer: clipboard pushes, cursor confirmations, and
-        // HostControl broadcast/file sends all enqueue onto it, so no fire-and-forget send can
-        // reorder under load or outlive the session.
-        let outbound = OutboundLane(connection: connection, capability: outboundEffectCapability)
-        // The token minter runs only for a lane-capable handshake (negotiated >= laneVersion) —
-        // an old client never gets a token minted or advertised (ServerHandshake stamps the
-        // negotiated version, and ServerHello carries the token iff that stamp >= laneVersion).
+        // --- PRODUCERS + capability-gated handshake (design §1b step 8) ---
+        // The token minter runs only for a lane-capable handshake (negotiated >= laneVersion) — an old
+        // client never gets a token minted or advertised (ServerHandshake stamps the negotiated
+        // version, and ServerHello carries the token iff that stamp >= laneVersion).
         var server = ServerHandshake(displays: Self.displayInfos(from: await registry.current()), supportedCodecs: [.hevc],
                                      mintSessionToken: LaneSessionToken.mint)
-        // Lane routing (QUIC lane-splitting, w6n.4): pumpVideo's video/audio/stats sends route
-        // onto the client's secondary lane streams once it binds them; legacy sessions — and any
-        // lane that dies or never opens — flow on primary. See HostLaneRouter for the
-        // flip/fallback rules. Video keeps its back-pressured direct drain through the router;
-        // it never rides the session's OutboundLane.
-        let router = HostLaneRouter(primary: connection, capability: outboundEffectCapability)
+        // Lane routing (QUIC lane-splitting, w6n.4): pumpVideo's video/audio/stats sends route onto the
+        // client's secondary lane streams once it binds them; legacy sessions — and any lane that dies
+        // or never opens — flow on primary. Video keeps its back-pressured direct drain through the
+        // router; it never rides the session's OutboundLane. Gated on `capability` (Task 6).
+        let router = HostLaneRouter(primary: connection, capability: capability)
         var laneBindTask: Task<Void, Never>?
-        // MINIMAL han.4 Task-5 compile-fix: ClipboardSync/FileReceiver/InputInjector now require a
-        // SessionCapability (design §2/§4 — each gates its irreducible effect boundary on it).
-        // Nothing in THIS function invalidates this placeholder yet; the real per-session
-        // capability (shared with `register`'s ticket/capability above, invalidated
-        // Invalidate-First on every teardown path) is Task 8's serve-loop reorder.
-        let inboundEffectCapability = SessionCapability()
-        let clipboard = ClipboardSync(capability: inboundEffectCapability)
+        // Inbound effect units — each SELF-GUARDS its irreducible OS effect on `capability` (Task 5),
+        // so the serve loop calls them UNWRAPPED (an outer `capability.perform` would self-deadlock the
+        // non-reentrant lock).
+        let clipboard = ClipboardSync(capability: capability)
+        let fileReceiver = FileReceiver(capability: capability)
+        // Latest client-reported receive-side quality snapshot for THIS connection, read by the video
+        // pump's adaptive rate controller each stats interval.
+        let clientFeedback = ClientFeedbackHolder()
+        // Set when `.deviceConnected` is emitted (after ServerHello), so the teardown emits a matching
+        // `.deviceDisconnected` only for a session that was actually announced.
+        var connectedDeviceID: String?
+        // Client-requested stream params (StartSession), honored by capture + encoder and reused when
+        // the display is switched mid-session.
+        var requestedFPS = 60
+        var requestedBitrate: Int?
+
+        // Injector, capture engine, and video pump are (re)bound to the active display; switching
+        // re-targets all three. `currentCapture` lets viewport (magnifier) requests re-crop the live
+        // stream. All of these are touched only from this inbound loop's task. Cursor reports ride the
+        // session's shared outbound lane (coalescing, last-wins).
+        let cursorPump = CursorReportPump(lane: outbound)
+        var injector = makeInjector(for: firstDisplay, cursorPump: cursorPump, capability: capability)
+        var currentCapture: CaptureEngine?
+        var videoTask: Task<Void, Never>?
+        defer {
+            // Invalidate-First (design §4/§7 invariant 1, H-d): flip the capability BEFORE any registry
+            // removal or async teardown, so a deferred MainActor pasteboard write — or any queued
+            // effect holding the capability — fails closed on a NORMAL disconnect, not only on revoke.
+            capability.invalidate()
+            clipboard.stop()
+            fileReceiver.cancelAll()
+            videoTask?.cancel()
+            // Stops consuming the accepted-lane stream, which revokes the token's authorization at the
+            // tunnel — a dead session's token can't bind new lanes.
+            laneBindTask?.cancel()
+            // Terminalize the router so a late bind racing teardown is refused and every bound
+            // secondary-lane stream closes promptly (Task 6, design §2/§4 finding 4/H-e).
+            router.closeBoundLanes()
+            currentCapture?.stop()
+            outbound.finish()
+            connection.close()
+            // Registry bookkeeping only — the capability was already invalidated FIRST above (H-d).
+            if registered { control?.deregister(sessionID) }
+            if let connectedDeviceID { emit(.deviceDisconnected(id: connectedDeviceID)) }
+        }
+
+        func display(forID id: UInt32) async -> SCDisplay {
+            await registry.current().first { UInt32($0.displayID) == id } ?? firstDisplay
+        }
+        func startVideo(on display: SCDisplay) {
+            videoTask?.cancel()
+            injector = makeInjector(for: display, cursorPump: cursorPump, capability: capability)
+            let capture = CaptureEngine(width: display.width, height: display.height)
+            currentCapture = capture
+            // A lane-death flip forces its keyframe through THIS capture's request path (the same
+            // consumeKeyframeRequest plumbing a client `.requestKeyframe` uses); re-pointed on every
+            // display switch so the request always reaches the live capture.
+            router.setKeyframeRequester { await capture.requestKeyframe() }
+            let fps = requestedFPS
+            let bitrate = requestedBitrate
+            videoTask = Task { await pumpVideo(router, display: display, capture: capture, fps: fps, bitrate: bitrate, feedback: clientFeedback, capability: capability, emit: emit) }
+            logger.info("Streaming display \(display.displayID, privacy: .public) source \(display.width, privacy: .public)x\(display.height, privacy: .public).")
+        }
+
+        // The ClientHello handshake is a ONE-SHOT here (pulled OUT of the message loop, design §1b step
+        // 8): the first frame was already consumed as `hello` and admission already ran, so this only
+        // authorizes lane streams and replies with the token-carrying ServerHello. Each DIRECT send is
+        // capability-gated (H-e), so a revoke landing here stops the reply reaching the peer.
+        do {
+            let reply = try server.handle(hello)
+            // Authorize secondary lane streams BEFORE the token-carrying ServerHello goes out, so a
+            // well-behaved client can't race its lane opens past authorization (w6n.3:
+            // `authorizeLanesOnce` refuses every call after the first).
+            if let token = server.sessionToken,
+               let lanes = router.authorizeLanesOnce({ connection.acceptLanes(sessionToken: token) }) {
+                laneBindTask = Task {
+                    for await accepted in lanes {
+                        router.bind(accepted.lane, accepted.connection)
+                    }
+                }
+            }
+            guard capability.isValid else { return }  // (H-e) never send to a revoked peer
+            try await connection.send(.serverHello(reply))
+            connectedDeviceID = sessionID
+            emit(.deviceConnected(id: sessionID, name: sanitizedDeviceName))
+            // Seed this client with the current lock state (the live broadcast only reaches
+            // already-connected clients), so one that connects while locked pauses at once — gated (H-e).
+            if LockMonitor.currentlyLocked(), capability.isValid {
+                try? await connection.send(.hostLockStatus(HostLockStatus(locked: true)))
+            }
+        } catch {
+            logger.error("handshake error: \(error, privacy: .public)")
+            return
+        }
+
+        // Begin local clipboard polling — a PRODUCER, so it starts only NOW (post-admission).
         clipboard.start { text in
             // Cap outbound clipboard at the sender: an over-cap copy would make an oversized frame the
             // client's decoder rejects (WireError.malformed), dropping the session. Skip it entirely
@@ -647,114 +775,16 @@ public struct HostRunner: Sendable {
             }
             outbound.enqueue(.clipboardUpdate(ClipboardUpdate(text: text)))
         }
-        let fileReceiver = FileReceiver(capability: inboundEffectCapability)
-        // Latest client-reported receive-side quality snapshot for THIS connection, read by the
-        // video pump's adaptive rate controller each stats interval.
-        let clientFeedback = ClientFeedbackHolder()
-        // Identifies this session for the host UI; set once the client handshake names the device.
-        var connectedDeviceID: String?
-        // Client-requested stream params (StartSession), honored by capture + encoder and reused
-        // when the display is switched mid-session.
-        var requestedFPS = 60
-        var requestedBitrate: Int?
 
-        // Injector, capture engine, and video pump are (re)bound to the active display; switching
-        // re-targets all three. `currentCapture` lets viewport (magnifier) requests re-crop the
-        // live stream. All of these are touched only from this inbound loop's task.
-        // Cursor reports ride the session's shared outbound lane (coalescing, last-wins), so
-        // confirmations can't reorder/back-step the client's cursor-follow.
-        let cursorPump = CursorReportPump(lane: outbound)
-        var injector = makeInjector(for: firstDisplay, cursorPump: cursorPump, capability: inboundEffectCapability)
-        var currentCapture: CaptureEngine?
-        var videoTask: Task<Void, Never>?
-        defer {
-            clipboard.stop()
-            fileReceiver.cancelAll()
-            videoTask?.cancel()
-            // Stops consuming the accepted-lane stream, which revokes the token's authorization
-            // at the tunnel — a dead session's token can't bind new lanes.
-            laneBindTask?.cancel()
-            // MINIMAL han.4 Task-6 wiring: terminalize the router so a late bind racing teardown
-            // is refused and every bound secondary-lane stream closes promptly (design §2/§4
-            // finding 4/H-e). Full Invalidate-First reordering (capability.invalidate() as this
-            // defer's FIRST statement, ahead of every cancel/close) is Task 8's job.
-            router.closeBoundLanes()
-            currentCapture?.stop()
-            outbound.finish()
-            connection.close()
-            if let connectedDeviceID {
-                control?.deregister(connectedDeviceID)
-                emit(.deviceDisconnected(id: connectedDeviceID))
-            }
-        }
-
-        func display(forID id: UInt32) async -> SCDisplay {
-            await registry.current().first { UInt32($0.displayID) == id } ?? firstDisplay
-        }
-        func startVideo(on display: SCDisplay) {
-            videoTask?.cancel()
-            injector = makeInjector(for: display, cursorPump: cursorPump, capability: inboundEffectCapability)
-            let capture = CaptureEngine(width: display.width, height: display.height)
-            currentCapture = capture
-            // A lane-death flip forces its keyframe through THIS capture's request path (the same
-            // consumeKeyframeRequest plumbing a client `.requestKeyframe` uses); re-pointed on
-            // every display switch so the request always reaches the live capture.
-            router.setKeyframeRequester { await capture.requestKeyframe() }
-            let fps = requestedFPS
-            let bitrate = requestedBitrate
-            videoTask = Task { await pumpVideo(router, display: display, capture: capture, fps: fps, bitrate: bitrate, feedback: clientFeedback, capability: outboundEffectCapability, emit: emit) }
-            logger.info("Streaming display \(display.displayID, privacy: .public) source \(display.width, privacy: .public)x\(display.height, privacy: .public).")
-        }
-
-        var pendingMessage: AnyMessage? = firstMessage
-        while let message = pendingMessage {
+        // Message loop over the SUBSEQUENT inbound (design §1b step 9 — the ClientHello was consumed
+        // above): each privileged inbound effect is SIZE-CAPPED at this serve boundary BEFORE dispatch
+        // (design §4 H-b), then handed to its self-guarding effect unit UNWRAPPED.
+        while let message = await inbound.next() {
             switch message {
-            case .clientHello(let hello):
-                do {
-                    let reply = try server.handle(hello)
-                    // Authorize secondary lane streams BEFORE the token-carrying ServerHello goes
-                    // out, so a well-behaved client can't race its lane opens past authorization.
-                    // HARD invariant (w6n.3 review): acceptLanes runs at most ONCE per primary
-                    // connection — re-authorizing on a repeat ClientHello would REPLACE the
-                    // token's authorization and reset its duplicate-lane protection.
-                    // `authorizeLanesOnce` refuses every call after the first, regardless of how
-                    // many hellos arrive; an old-version session mints no token and never enters
-                    // this branch.
-                    if let token = server.sessionToken,
-                       let lanes = router.authorizeLanesOnce({ connection.acceptLanes(sessionToken: token) }) {
-                        laneBindTask = Task {
-                            for await accepted in lanes {
-                                router.bind(accepted.lane, accepted.connection)
-                            }
-                        }
-                    }
-                    try await connection.send(.serverHello(reply))
-                    if connectedDeviceID == nil {
-                        // Identify the session per-connection (not by the device's stable id): on a
-                        // reconnect the old session's disconnect must not evict the new one's entry.
-                        let sessionID = UUID().uuidString
-                        connectedDeviceID = sessionID
-                        // MINIMAL han.4 Task-4 compile-fix: the register signature now requires a
-                        // ticket + capability. The real admission wiring (ticket captured at
-                        // authorization, capability threaded through every effect boundary, the
-                        // post-await recheck) is Task 8; until then this constructs a fresh capability
-                        // and a legacy/nil-keyID ticket so the call compiles and behaves as today
-                        // (legacy tickets skip the fence/generation check).
-                        control?.register(sessionID, connection, outbound: outbound, authClass: sessionAuthClass,
-                                          ticket: AdmissionTicket(keyID: nil, generation: 0),
-                                          capability: SessionCapability())
-                        emit(.deviceConnected(id: sessionID, name: sanitizedDeviceName))
-                        // Seed this client with the current lock state (the live broadcast only reaches
-                        // already-connected clients), so one that connects while locked pauses at once.
-                        if LockMonitor.currentlyLocked() {
-                            try? await connection.send(.hostLockStatus(HostLockStatus(locked: true)))
-                        }
-                    }
-                } catch {
-                    logger.error("handshake error: \(error, privacy: .public)")
-                    videoTask?.cancel()
-                    return
-                }
+            case .clientHello:
+                // The handshake already ran as a one-shot above; a repeat ClientHello must NOT
+                // re-authorize lanes or re-register (w6n.3 / finding 1) — ignore it.
+                break
             case .startSession(let start):
                 do { try server.handle(start) } catch { logger.error("startSession error: \(error, privacy: .public)"); return }
                 requestedFPS = StreamParameters.captureFPS(requested: start.maxFPS)
@@ -768,17 +798,39 @@ public struct HostRunner: Sendable {
                 _ = await currentCapture?.setViewport(
                     normalizedX: viewport.normalizedX, normalizedY: viewport.normalizedY,
                     normalizedW: viewport.normalizedW, normalizedH: viewport.normalizedH)
-            case .pointerMove, .pointerButton, .scroll, .typeText, .keyEvent:
+            case .typeText(let text):
+                // Serve-boundary size cap (H-b): an over-cap typeText is skipped WHOLE, never partially
+                // injected. The injector self-gates each CGEvent on the capability (Task 5).
+                guard Frame.shouldInjectTypeText(text.text) else {
+                    logger.notice("input: skipping \(text.text.utf8.count, privacy: .public)-byte typeText over \(Frame.maxTypeTextBytes, privacy: .public)-byte cap")
+                    break
+                }
+                injector.handle(message)
+            case .pointerMove, .pointerButton, .scroll, .keyEvent:
                 injector.handle(message)
             case .clipboardUpdate(let update):
+                // Serve-boundary size cap (H-b, = maxClipboardBytes): an over-cap inbound clipboard is
+                // skipped before it reaches the deferred MainActor pasteboard write.
+                guard Frame.shouldSendClipboard(update.text) else {
+                    logger.notice("clipboard: skipping \(update.text.utf8.count, privacy: .public)-byte inbound update over \(Frame.maxClipboardBytes, privacy: .public)-byte cap")
+                    break
+                }
                 clipboard.applyRemote(update.text)
             case .fileOffer(let offer):
                 fileReceiver.offer(offer)
             case .fileChunk(let chunk):
+                // Serve-boundary size cap (H-b, ≈ the 64 KiB sender chunk): an over-cap chunk is
+                // skipped. FileReceiver self-guards its single `handle.write` — call it UNWRAPPED.
+                guard Frame.shouldWriteFileChunk(chunk) else {
+                    logger.notice("file: skipping \(chunk.data.count, privacy: .public)-byte chunk over \(Frame.maxFileChunkBytes, privacy: .public)-byte cap")
+                    break
+                }
                 fileReceiver.chunk(chunk)
             case .bye:
                 return
             case .ping(let ping):
+                // The pong is a DIRECT send — capability-gated (H-e) so a revoked peer gets no reply.
+                guard capability.isValid else { break }
                 let hostUptimeMicros = UInt64(ProcessInfo.processInfo.systemUptime * 1_000_000)
                 try? await connection.send(.pong(Pong(sendMicros: ping.sendMicros, hostUptimeMicros: hostUptimeMicros)))
             case .pong:
@@ -794,9 +846,59 @@ public struct HostRunner: Sendable {
             default:
                 break
             }
-            pendingMessage = await inbound.next()
         }
         logger.notice("session inbound drained — serve loop exiting")
+    }
+
+    /// Admission + post-await durable recheck (design §1b step 6, §5, H-e), factored out of
+    /// `serveSession` so the ordering is directly testable. Registers the session under the ticket
+    /// captured at authorization, then — the instant the SUSPENDING durable `isAuthorized` await
+    /// returns — rechecks BOTH the durable authorization AND the capability: a revoke landing during
+    /// the suspension invalidated the capability synchronously (the live-authority signal), so this
+    /// catches it even if the durable read returned stale-true. On ANY failure it tears down
+    /// Invalidate-First — `capability.invalidate()` FIRST, then `deregister` (only if it registered),
+    /// then `outbound.finish()`, then `connection.closeDiscardingInbound()` — and returns `false`; no
+    /// producer ran and no ServerHello was sent, so nothing reached the peer. Returns `true` iff the
+    /// session is admitted AND still authorized; the caller may then build producers. `isAuthorized` is
+    /// a seam (bound to `pairings.isAuthorized` in production) so a test can land a revoke DURING the
+    /// await and prove the post-await recheck catches it.
+    static func admitSession(
+        _ connection: PortviewConnection,
+        control: HostControl,
+        outbound: OutboundLane<AnyMessage>,
+        capability: SessionCapability,
+        authClass: HostControl.SessionAuthClass,
+        ticket: AdmissionTicket,
+        sessionID: SessionID,
+        isAuthorized: @Sendable (ClientKeyID) async -> Bool
+    ) async -> Bool {
+        // Synchronous fence + generation admission gate (design §3/§5).
+        guard control.register(sessionID, connection, outbound: outbound, authClass: authClass,
+                               ticket: ticket, capability: capability) == .admitted else {
+            capability.invalidate()          // Invalidate-First (H-d)
+            outbound.finish()
+            connection.closeDiscardingInbound()
+            return false
+        }
+        // Durable backstop (keyed sessions only; a legacy nil-key ticket skips it) — this await SUSPENDS.
+        let stillDurable = ticket.keyID == nil ? true : await isAuthorized(ticket.keyID!)
+        // POST-AWAIT RECHECK (H-e): a revoke may have invalidated the capability during the suspension.
+        guard stillDurable && capability.isValid else {
+            capability.invalidate()          // Invalidate-First (H-d)
+            control.deregister(sessionID)
+            outbound.finish()
+            connection.closeDiscardingInbound()
+            return false
+        }
+        return true
+    }
+
+    /// M-b (design §2): resolve the process-local `HostControl` for a host run. The app supplies its
+    /// own (it owns the revoke UI); a `nil` caller (the CLI) gets ONE minted here so the CLI still
+    /// mints admission tickets, registers session capabilities, and evicts legacy sessions across every
+    /// connection of the process. Factored out so the mint decision is unit-testable.
+    static func resolvedControl(_ control: HostControl?) -> HostControl {
+        control ?? HostControl()
     }
 
     /// The mutual-auth gate's decision for one streaming connection.
