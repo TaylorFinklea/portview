@@ -330,7 +330,8 @@ import PortviewProtocol
         // HostControlEvictionTests — this is the session the ceremony's eager evict must remove.
         let (legacyListener, legacyConnection) = try await standaloneConnection()
         defer { legacyListener.cancel() }
-        control.register("legacy", legacyConnection, outbound: OutboundLane(connection: legacyConnection),
+        control.register("legacy", legacyConnection,
+                         outbound: OutboundLane(connection: legacyConnection, capability: SessionCapability()),
                          authClass: .legacyAdmitted,
                          ticket: AdmissionTicket(keyID: nil, generation: 0), capability: SessionCapability())
         #expect(control.activeSessionIDs() == ["legacy"])

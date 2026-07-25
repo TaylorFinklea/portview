@@ -36,8 +36,9 @@ private final class Counter: @unchecked Sendable {
 /// A router whose session authorized lanes (the lane-capable state serveSession reaches after a
 /// lane-version handshake); unit tests bind fakes directly instead of consuming the stream.
 private func laneCapableRouter(primary: any LaneStreamSender,
+                               capability: SessionCapability = SessionCapability(),
                                bindWait: Duration = .seconds(2)) -> HostLaneRouter {
-    let router = HostLaneRouter(primary: primary, laneBindWait: bindWait)
+    let router = HostLaneRouter(primary: primary, capability: capability, laneBindWait: bindWait)
     _ = router.authorizeLanesOnce { AsyncStream<AcceptedLane>.makeStream().stream }
     return router
 }
@@ -64,7 +65,7 @@ private func statsMarker(_ n: UInt64) -> AnyMessage {
     /// behavior. The huge bindWait proves the no-op: waiting it out would hang the test.
     @Test func legacySessionRoutesEverythingToPrimaryWithNoWait() async throws {
         let primary = RecordingSender()
-        let router = HostLaneRouter(primary: primary, laneBindWait: .seconds(600))
+        let router = HostLaneRouter(primary: primary, capability: SessionCapability(), laneBindWait: .seconds(600))
 
         await router.awaitLaneBindings()
 
@@ -78,7 +79,7 @@ private func statsMarker(_ n: UInt64) -> AnyMessage {
     /// connection — a repeat ClientHello must not re-authorize, because the transport's
     /// replace semantics would reset duplicate-lane protection.
     @Test func authorizeLanesOnceRefusesEveryCallAfterTheFirst() {
-        let router = HostLaneRouter(primary: RecordingSender())
+        let router = HostLaneRouter(primary: RecordingSender(), capability: SessionCapability())
         let calls = Counter()
 
         let first = router.authorizeLanesOnce {
@@ -171,7 +172,7 @@ private func statsMarker(_ n: UInt64) -> AnyMessage {
     /// Primary-path send errors PROPAGATE: pumpVideo's catch (encoder rebuild + forced keyframe)
     /// keeps owning primary-stream recovery exactly as today.
     @Test func primarySendErrorsPropagateToTheCaller() async {
-        let router = HostLaneRouter(primary: RecordingSender(failing: true))
+        let router = HostLaneRouter(primary: RecordingSender(failing: true), capability: SessionCapability())
         await #expect(throws: RecordingSender.SendFailure.self) {
             try await router.send(videoMarker(1), lane: .video)
         }

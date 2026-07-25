@@ -10,6 +10,14 @@ private let logger = Logger(subsystem: "dev.finklea.portview", category: "lanes"
 /// scripted fake in tests.
 protocol LaneStreamSender: Sendable {
     func send(_ message: AnyMessage) async throws
+    /// Close this sender's transport (han.4 Task 6, design §2/§4 finding 4/H-e —
+    /// `closeBoundLanes` reclaims every bound secondary stream on session teardown/revoke).
+    /// Defaulted to a no-op below so a fake that never binds needn't implement it.
+    func close()
+}
+
+extension LaneStreamSender {
+    func close() {}
 }
 
 extension PortviewConnection: LaneStreamSender {}
@@ -45,6 +53,10 @@ final class HostLaneRouter: @unchecked Sendable {
     private let lock = NSLock()
     private let primary: any LaneStreamSender
     private let bindWait: Duration
+    /// Per-session act-permission gate (han.4 Task 6, design §2/§4 finding 4/H-e). `send` drops
+    /// silently — never throws — when this flips invalid, so a revoked/torn-down session's
+    /// producers stop reaching the wire immediately.
+    private let capability: SessionCapability
     private var lanes: [Lane: any LaneStreamSender] = [:]
     /// Lanes permanently back on primary: flipped after a send failure, or unbound when the
     /// bounded wait resolved.
@@ -54,12 +66,18 @@ final class HostLaneRouter: @unchecked Sendable {
     /// True once `awaitLaneBindings` ran to completion: the lane set is frozen, later binds are
     /// ignored (one fallback decision, no upgrades mid-stream).
     private var resolved = false
+    /// Terminal — set once by `closeBoundLanes`. A `bind` racing (or arriving after) closure is
+    /// refused: discard-not-drain for lane binding (design §4, mirrors `InboundBuffer`'s
+    /// `finishDiscardingBuffered` shape), never re-opened.
+    private var closed = false
     private var authorizeAttempted = false
     private var keyframeRequester: (@Sendable () async -> Void)?
 
     /// `laneBindWait` is injectable so tests don't wait the production bound.
-    init(primary: any LaneStreamSender, laneBindWait: Duration = HostLaneRouter.laneBindWait) {
+    init(primary: any LaneStreamSender, capability: SessionCapability,
+         laneBindWait: Duration = HostLaneRouter.laneBindWait) {
         self.primary = primary
+        self.capability = capability
         self.bindWait = laneBindWait
     }
 
@@ -87,14 +105,30 @@ final class HostLaneRouter: @unchecked Sendable {
     }
 
     /// Bind one accepted lane stream. Ignored once the lane set resolved (a late-opening client
-    /// stays on primary), after the lane flipped (no reconnect), or for a lane the router never
-    /// routes (a client-opened .control/.input/etc stream must not be retained as an inert entry).
+    /// stays on primary), after the lane flipped (no reconnect), for a lane the router never
+    /// routes (a client-opened .control/.input/etc stream must not be retained as an inert entry),
+    /// or after `closeBoundLanes` terminalized the router (design §4/H-e — a late bind racing
+    /// closure must not survive it).
     func bind(_ lane: Lane, _ sender: any LaneStreamSender) {
         lock.lock()
         defer { lock.unlock() }
-        guard Self.routedLanes.contains(lane),
+        guard !closed, Self.routedLanes.contains(lane),
               laneCapable, !resolved, !fallenBack.contains(lane), lanes[lane] == nil else { return }
         lanes[lane] = sender
+    }
+
+    /// Terminalize the router (called from the serve-defer teardown, design §2/§4 finding 4/H-e):
+    /// sets the TERMINAL `closed` flag — refusing any later `bind` — and closes every retained
+    /// secondary-lane sender so a revoked/torn-down session's bound streams reclaim their
+    /// transport promptly. Idempotent: `lanes` is empty after the first call, so a repeat call
+    /// closes nothing further.
+    func closeBoundLanes() {
+        lock.lock()
+        closed = true
+        let bound = Array(lanes.values)
+        lanes.removeAll()
+        lock.unlock()
+        for sender in bound { sender.close() }
     }
 
     /// Route the keyframe a lane flip forces into the active capture's request path (the same
@@ -149,11 +183,16 @@ final class HostLaneRouter: @unchecked Sendable {
         return missing
     }
 
-    /// Send `message` on `lane`'s stream when one is bound, on primary otherwise. Primary-path
-    /// errors PROPAGATE — for video frames that keeps `pumpVideo`'s catch (encoder rebuild +
-    /// forced keyframe) exactly as today. A lane-path error is absorbed: the lane flips back to
-    /// primary once (logged, keyframe forced) and the errored message is NOT replayed.
+    /// Send `message` on `lane`'s stream when one is bound, on primary otherwise. Drops silently
+    /// (no throw) when the session's capability is invalid (design §2/§4 finding 4/H-e) — a
+    /// second, independent gate alongside the caller's own `capability.isValid` pre-check
+    /// (`pumpVideo`), so a capability that flips between the caller's check and this call is still
+    /// caught. Primary-path errors PROPAGATE — for video frames that keeps `pumpVideo`'s catch
+    /// (encoder rebuild + forced keyframe) exactly as today. A lane-path error is absorbed: the
+    /// lane flips back to primary once (logged, keyframe forced) and the errored message is NOT
+    /// replayed.
     func send(_ message: AnyMessage, lane: Lane) async throws {
+        guard capability.isValid else { return }
         guard let sender = boundSender(for: lane) else {
             try await primary.send(message)
             return

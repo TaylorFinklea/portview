@@ -104,9 +104,17 @@ final class OutboundLane<Message: Sendable>: @unchecked Sendable {
 }
 
 extension OutboundLane where Message == AnyMessage {
-    /// Production: drain into a live connection.
-    convenience init(connection: PortviewConnection) {
-        self.init(sink: { message in try? await connection.send(message) })
+    /// Production: drain into a live connection, capability-gated (han.4 Task 6, design §2/§4
+    /// finding 4/H-e). The gate re-checks `capability.isValid` HERE, inside the sink — i.e. after
+    /// `take()` has already removed the message from the queue — so a message accepted while the
+    /// capability was still valid is dropped if it flipped invalid before this sink actually ran.
+    /// Takes `any LaneStreamSender` (not the concrete `PortviewConnection`) so tests can gate a
+    /// scripted fake instead of opening a live socket.
+    convenience init(connection: any LaneStreamSender, capability: SessionCapability) {
+        self.init(sink: { message in
+            guard capability.isValid else { return }
+            try? await connection.send(message)
+        })
     }
 }
 

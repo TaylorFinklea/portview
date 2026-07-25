@@ -596,11 +596,19 @@ public struct HostRunner: Sendable {
         guard let firstDisplay = await registry.current().first else { connection.close(); return }
         didBuildScaffolding?()
 
+        // MINIMAL han.4 Task-6 compile-fix: OutboundLane/HostLaneRouter/pumpVideo now require a
+        // SessionCapability (design §2/§4 finding 4/H-e — each gates its post-encode send / sink
+        // on it). This is a THIRD standalone placeholder, distinct from `inboundEffectCapability`
+        // below and the ticket capability minted inline at `control.register` further down —
+        // nothing in THIS function invalidates any of the three yet. Unifying all three into ONE
+        // real per-session capability, invalidated Invalidate-First in this defer, is Task 8's job
+        // (see the report for the exact seam).
+        let outboundEffectCapability = SessionCapability()
         // One ordered outbound lane for this whole connection (survives display switches), owned
         // here and finished in the teardown defer: clipboard pushes, cursor confirmations, and
         // HostControl broadcast/file sends all enqueue onto it, so no fire-and-forget send can
         // reorder under load or outlive the session.
-        let outbound = OutboundLane(connection: connection)
+        let outbound = OutboundLane(connection: connection, capability: outboundEffectCapability)
         // The token minter runs only for a lane-capable handshake (negotiated >= laneVersion) —
         // an old client never gets a token minted or advertised (ServerHandshake stamps the
         // negotiated version, and ServerHello carries the token iff that stamp >= laneVersion).
@@ -611,7 +619,7 @@ public struct HostRunner: Sendable {
         // lane that dies or never opens — flow on primary. See HostLaneRouter for the
         // flip/fallback rules. Video keeps its back-pressured direct drain through the router;
         // it never rides the session's OutboundLane.
-        let router = HostLaneRouter(primary: connection)
+        let router = HostLaneRouter(primary: connection, capability: outboundEffectCapability)
         var laneBindTask: Task<Void, Never>?
         // MINIMAL han.4 Task-5 compile-fix: ClipboardSync/FileReceiver/InputInjector now require a
         // SessionCapability (design §2/§4 — each gates its irreducible effect boundary on it).
@@ -657,6 +665,11 @@ public struct HostRunner: Sendable {
             // Stops consuming the accepted-lane stream, which revokes the token's authorization
             // at the tunnel — a dead session's token can't bind new lanes.
             laneBindTask?.cancel()
+            // MINIMAL han.4 Task-6 wiring: terminalize the router so a late bind racing teardown
+            // is refused and every bound secondary-lane stream closes promptly (design §2/§4
+            // finding 4/H-e). Full Invalidate-First reordering (capability.invalidate() as this
+            // defer's FIRST statement, ahead of every cancel/close) is Task 8's job.
+            router.closeBoundLanes()
             currentCapture?.stop()
             outbound.finish()
             connection.close()
@@ -680,7 +693,7 @@ public struct HostRunner: Sendable {
             router.setKeyframeRequester { await capture.requestKeyframe() }
             let fps = requestedFPS
             let bitrate = requestedBitrate
-            videoTask = Task { await pumpVideo(router, display: display, capture: capture, fps: fps, bitrate: bitrate, feedback: clientFeedback, emit: emit) }
+            videoTask = Task { await pumpVideo(router, display: display, capture: capture, fps: fps, bitrate: bitrate, feedback: clientFeedback, capability: outboundEffectCapability, emit: emit) }
             logger.info("Streaming display \(display.displayID, privacy: .public) source \(display.width, privacy: .public)x\(display.height, privacy: .public).")
         }
 
@@ -1024,6 +1037,7 @@ public struct HostRunner: Sendable {
         fps: Int = 60,
         bitrate: Int? = nil,
         feedback: ClientFeedbackHolder? = nil,
+        capability: SessionCapability,
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in }
     ) async {
         // Bounded wait for a lane-capable client's lane streams (HostLaneRouter.laneBindWait):
@@ -1038,8 +1052,13 @@ public struct HostRunner: Sendable {
         }
 
         // Forward system audio concurrently with video (audio lane when bound, else primary).
+        // `capability.isValid` is checked IMMEDIATELY before the send (design §2/§4 finding
+        // 4/H-e) — dropping just this frame, not tearing down the loop: the router's own
+        // `capability.isValid` gate (a second, independent check) is the actual backstop, and
+        // task cancellation (Task 8) is what eventually stops the loop itself.
         let audioTask = Task {
             for await audio in capture.audioFrames {
+                guard capability.isValid else { continue }
                 try? await router.send(.audioFrame(AudioFrame(
                     sampleRate: audio.sampleRate, channels: audio.channels,
                     ptsMicros: audio.ptsMicros, data: audio.data)), lane: .audio)
@@ -1108,17 +1127,22 @@ public struct HostRunner: Sendable {
                 let viewport = frame.region
                 // Primary-path errors still land in this loop's catch below (encoder rebuild +
                 // keyframe); a video-LANE error is absorbed by the router's flip, which forces
-                // the keyframe itself through the capture's request path.
-                try await router.send(.videoFrame(VideoFrame(
-                    sequence: sequence,
-                    ptsMicros: UInt64(max(0, CMTimeGetSeconds(frame.pts)) * 1_000_000),
-                    isKeyframe: sample.isKeyframe,
-                    displayID: UInt32(display.displayID),
-                    width: UInt32(bufferWidth), height: UInt32(bufferHeight),
-                    data: payload,
-                    viewportNormalizedX: viewport.minX, viewportNormalizedY: viewport.minY,
-                    viewportNormalizedW: viewport.width, viewportNormalizedH: viewport.height
-                )), lane: .video)
+                // the keyframe itself through the capture's request path. `capability.isValid` is
+                // checked IMMEDIATELY before this send (design §2/§4 finding 4/H-e) — the live
+                // code previously checked only `Task.isCancelled`, and only before the encode, so
+                // a frame encoded the instant before revoke still sent.
+                if capability.isValid {
+                    try await router.send(.videoFrame(VideoFrame(
+                        sequence: sequence,
+                        ptsMicros: UInt64(max(0, CMTimeGetSeconds(frame.pts)) * 1_000_000),
+                        isKeyframe: sample.isKeyframe,
+                        displayID: UInt32(display.displayID),
+                        width: UInt32(bufferWidth), height: UInt32(bufferHeight),
+                        data: payload,
+                        viewportNormalizedX: viewport.minX, viewportNormalizedY: viewport.minY,
+                        viewportNormalizedW: viewport.width, viewportNormalizedH: viewport.height
+                    )), lane: .video)
+                }
                 let liveViewport = await capture.currentViewport()
                 if let quality = stats.snapshotIfDue(
                     displayID: UInt32(display.displayID),
@@ -1129,7 +1153,11 @@ public struct HostRunner: Sendable {
                 ) {
                     // Stats ride the stats lane for lane-capable clients (a video burst can't
                     // delay the HUD); old-version sessions keep them on primary as today.
-                    try? await router.send(.qualityStats(quality), lane: .stats)
+                    // `capability.isValid` is checked IMMEDIATELY before this send too (its own
+                    // independent post-encode gate, not inherited from the video check above).
+                    if capability.isValid {
+                        try? await router.send(.qualityStats(quality), lane: .stats)
+                    }
                     emit(.sessionStats(HostSessionStats(
                         throughputMbps: quality.encodedMbps,
                         fps: quality.fps,

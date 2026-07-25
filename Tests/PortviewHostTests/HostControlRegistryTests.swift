@@ -26,7 +26,7 @@ import PortviewProtocol
     }
 
     private func lane(_ connection: PortviewConnection) -> OutboundLane<AnyMessage> {
-        OutboundLane(connection: connection)
+        OutboundLane(connection: connection, capability: SessionCapability())
     }
 
     private func makeControl(_ backend: KeepAwakeBackend = NoopKeepAwakeBackend()) -> HostControl {
@@ -290,7 +290,7 @@ import PortviewProtocol
         // Thread A: register — its sessionBegan → startLocked → beginPreventingSleep PARKS while
         // holding the HostControl lock.
         Thread.detachNewThread {
-            _ = control.register("new", conn, outbound: OutboundLane(connection: conn), authClass: .authenticated,
+            _ = control.register("new", conn, outbound: OutboundLane(connection: conn, capability: cap), authClass: .authenticated,
                                  ticket: AdmissionTicket(keyID: nil, generation: 0), capability: cap)
             registerDone.signal()
         }

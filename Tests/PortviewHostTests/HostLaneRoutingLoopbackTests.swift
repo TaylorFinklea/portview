@@ -96,7 +96,7 @@ private func serveRouterHost(_ listener: PortviewListener, token: [UInt8],
             Task {
                 for await message in connection.inbound {
                     guard case .clientHello = message else { continue }
-                    let router = HostLaneRouter(primary: connection)
+                    let router = HostLaneRouter(primary: connection, capability: SessionCapability())
                     if let lanes = router.authorizeLanesOnce({ connection.acceptLanes(sessionToken: token) }) {
                         Task {
                             for await accepted in lanes {
