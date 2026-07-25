@@ -610,16 +610,41 @@ effect**:
    `drainInFlightEffect()` takes that same lock, so each effect runs fully or is skipped, and anything
    that queued behind an in-flight effect observes the mark instead of running. Because the boundary is
    irreducible, a drain waits **at most one** such effect, whatever the message size — and the mark
-   that precedes it never waits at all.
+   that precedes it **never waits on an effect** (it takes only `flagLock`, which is never held across
+   an effect; it is an uncontended-in-practice lock acquisition, not a wait-free operation — "does not
+   wait for an effect", not "cannot wait at all", Sol re-review C1).
 
-**1b. Host-local session-control effects are gated too (Sol review I4a, R9).** The serve loop's
-`.startSession`/`.switchDisplay` (build a `CaptureEngine`, swap the injector/capture, start the video
-task), `.viewport` (re-crop the live capture), `.clientFeedback` (steer the encoder) and
-`.requestKeyframe` branches mutate HOST-side session state rather than sending, so the outbound gates
-of §4.5 never covered them: an R9 residual message could reconfigure — or START — screen capture for
-an already-revoked peer. Each now runs its effect through `HostRunner.applySessionControl`, an
-`isValid` check immediately before the effect and after any preceding `await`. It is a pre-check, not
-a `perform`: these effects `await` an actor, which the synchronous capability lock cannot span (R2).
+**1b. Host-local session-control effects gate at their OWN effect boundary too (Sol review I4a,
+re-review I4; R9).** The serve loop's `.startSession`/`.switchDisplay` (build a `CaptureEngine`, swap
+the injector/capture, start the video task), `.viewport` (re-crop the live capture), `.clientFeedback`
+(steer the encoder) and `.requestKeyframe` branches mutate HOST-side session state rather than
+sending, so the outbound gates of §4.5 never covered them: an R9 residual message could reconfigure —
+or START — screen capture for an already-revoked peer.
+
+The **first** fix put an `isValid` check on the branch (`HostRunner.applySessionControl`). That was
+check-then-use around an ASYNC effect and did not hold: every one of these effects is separated from
+its branch by at least one suspension (`display(forID:)`'s registry read, `CaptureEngine`'s
+`AsyncGate.enter()`, the `ViewportState` actor hop), the check was not coupled to `effectLock`, and
+`drainInFlightEffect()` therefore returned immediately while such an effect was in flight. A revoke
+landing in the gap still applied a withdrawn peer's crop and still let capture START.
+
+v3 pushes each gate DOWN to the irreducible boundary, so no suspension separates the check from the
+privileged call and every one of them is drain-coupled. `applySessionControl` is **deleted**; each
+unit self-guards and the serve loop calls it UNWRAPPED (the `FileReceiver` idiom):
+   - capture start: `CaptureEngine.start` issues `SCStream.startCapture` inside
+     `capability.perform`; `pumpVideo` propagates its `false` and never enters the frame loop. The
+     serve branch additionally wraps the synchronous `startVideo` scaffolding build in `perform` (a
+     second, independent gate — scaffolding for a withdrawn peer is never even built);
+   - live re-crop / fps retarget: `CaptureEngine.setViewport` / `setMaxFPS` mutate the shared
+     `SCStreamConfiguration` **and** issue `updateConfiguration` inside ONE `capability.perform`. This
+     is possible because the **completion-handler** form of the call is synchronous to *issue* — only
+     the OS's own completion runs later — so the async form's suspension is kept out of the critical
+     section. A refused gate mutates no field and issues nothing;
+   - keyframe request: gated INSIDE the `ViewportState` actor (`requestKeyframe(gatedBy:)`),
+     synchronously with the write, i.e. after the hop a caller-side check could not span;
+   - encoder feedback: `ClientFeedbackHolder` self-guards its one irreducible write.
+   A branch-level `isValid` survives only as a cheap early-out (top of `setViewport`/`setMaxFPS`,
+   `start`), never as the only gate.
 
 **2. Size caps so the pre-invalidate work is bounded too (H-b).** At the serve-loop boundary, before
 dispatch, each privileged inbound message is capped by type: `.typeText` well under
@@ -935,11 +960,27 @@ orphan-lastSeen residual.
    effect boundary — one CGEvent post, one pasteboard write, one file **creation**, one file-chunk
    write, one transfer **finalization** (`handle.close`), one over-cap **drop** (that file's
    close+unlink, deliberately unsplit) — never a compound message, so a drain waits at most one such
-   effect. Host-local **session-control** effects that must `await` (capture start / re-crop /
-   keyframe / encoder feedback) are gated by an `isValid` pre-check immediately before the effect
-   (`applySessionControl`) rather than by `perform`, which cannot span an `await` (R2). Buffered
-   inbound is **discarded, never drained**; a finished buffer drops and never re-arms the receive
-   loop.
+   effect. Host-local **session-control** effects (capture start / live re-crop / fps retarget /
+   keyframe / encoder feedback) are gated the SAME way — under `perform`, at the boundary, not at the
+   serve-loop branch (Sol re-review I4). Be precise about which boundaries are synchronous-under-
+   `perform` and which are not, because `perform` cannot span an `await` (R2):
+   - **Synchronous under `perform`** (check and privileged call in one critical section; a concurrent
+     `drainInFlightEffect()` waits for them): every CGEvent post; the pasteboard write; the four
+     `FileReceiver` boundaries; `SCStream.startCapture`; the config-mutate + *issue* of
+     `SCStream.updateConfiguration` (completion-handler form, so the issue is synchronous); the
+     `ViewportState` keyframe write (inside the actor); the `ClientFeedbackHolder` write; the
+     synchronous `startVideo` scaffolding build.
+   - **NOT under `perform`, post-suspension re-check only:** the outbound `send`s (§4.5) — a transport
+     write cannot run under a synchronous lock — and `admitSession`'s post-await recheck.
+   - **Residual after the fix.** Two things remain, both bounded and named: (i) the OS *completes* a
+     call that was already issued — `startCapture`/`updateConfiguration` finish asynchronously, so one
+     already-issued reconfiguration or capture start can take effect after the mark; the drain waits
+     for the **issue**, not for the OS's completion. (ii) `setViewport`'s post-success bookkeeping
+     (`viewportState.set` / `setAppliedRegion`) runs after that same effect and is not re-gated — it
+     is host-local frame-stamping state for an effect that was authorized when issued. Teardown stops
+     the stream (`currentCapture?.stop()`) and the outbound gates keep the frames off the wire.
+   Buffered inbound is **discarded, never drained**; a finished buffer drops and never re-arms the
+   receive loop.
 3. **Revoke never blocks the registry lock on an effect (H-b).** `beginRevoke` under `HostControl.lock`
    only bumps + fences + snapshots + unlinks; capability invalidation (which may briefly wait) and all
    transport teardown happen **out of the lock**. The lease-fence stays set under the lock for the
@@ -1043,7 +1084,10 @@ orphan-lastSeen residual.
   invalidate; mirror `InputInjectorGateTests`). **Mark/drain split (Sol review C1):** `markInvalid()`
   returns — and `isValid` reads false — while an effect is still parked mid-flight; the drain alone
   blocks until it finishes; a second `perform` that queued behind the in-flight effect is refused
-  after the mark (the ≤ one-effect residual bound). **Batch bound:** with two sessions under one key
+  after the mark (the ≤ one-effect residual bound — the test must PROVE the second caller was queued
+  on `effectLock` when the mark landed, not merely rejected by the fast path: signal at the gate, then
+  assert it stays blocked across the mark and returns only once the first effect is released).
+  **Batch bound:** with two sessions under one key
   each parked inside `perform`, `beginRevoke` marks BOTH before draining either, and the sibling
   cannot start a new effect while the first is still parked
   (`HostControlRegistryTests.beginRevoke_marksEverySiblingInvalidWhileASessionIsParkedInsidePerform`);
@@ -1052,8 +1096,16 @@ orphan-lastSeen residual.
   the transport close (observe the flag from inside the close closure), does not block on a parked
   in-flight effect, and a cancel that fires before the capability is published still withdraws the
   later-published one.
-- **R9 host-local gate (Sol review I4a):** `applySessionControl` runs the effect while valid and skips
-  it entirely after withdrawal (real `CaptureEngine` keyframe request / `ClientFeedbackHolder`).
+- **R9 host-local gate at the effect boundary (Sol review I4a, re-review I4):** the test must land the
+  mark AFTER the serve loop's branch check and BEFORE the effect — the interleaving a branch-level
+  check cannot survive — and assert the privileged effect did **not** occur. Real units, not a
+  factored helper: `CaptureEngine.setViewport` (through the `installConfigurationApplierForTesting`
+  seam — no live `SCStream`, mirroring why `InputInjector.postEvent` is a seam) issues no
+  `updateConfiguration` and mutates no config field after withdrawal; `CaptureEngine.requestKeyframe`
+  sets no flag; `ClientFeedbackHolder.update` refuses the write and leaves the previous snapshot.
+  Plus the drain coupling the old gate lacked: with a reconfiguration parked mid-issue, a concurrent
+  `drainInFlightEffect()` cannot return. The `SCStream.startCapture` boundary is gated but **not**
+  headlessly testable (no constructible `SCDisplay`).
 - **FileReceiver post-withdrawal boundaries (Sol review I4b):** a zero-length FINAL chunk does not
   finalize the transfer (it stays in flight for `cancelAll`) while the same chunk under a valid
   capability does; a quota-crossing chunk does not close+delete the partial file.
@@ -1218,7 +1270,17 @@ orphan-lastSeen residual.
   **mark-all → drain-all → tear down transports**. `perform` re-checks the flag *under* the effect
   lock, so a second effect that queued behind an in-flight one is refused rather than run. Restored
   bound: **≤ one already-in-flight irreducible effect per capability**, and one session's stall can
-  no longer extend any sibling's window. Verify: no path drains before every snapshot is marked; no
+  no longer extend any sibling's window.
+
+  **Where a global revoke actually linearizes (Sol re-review C1).** NOT at `beginRevoke` entry, and
+  NOT at the under-lock fence/generation write — those stop *new admission* for K, not the sessions
+  already holding a live capability. Authority for the set is withdrawn only at **completion of the
+  out-of-lock mark-all pass**: `markInvalid()` is per capability, so a capability later in that pass
+  is still valid — and may legitimately start and complete a whole irreducible effect — until its own
+  mark lands. The pass is O(sessions) with no blocking call in it, so that skew is short and bounded,
+  but it is real and must not be described as instantaneous. The two bounds that matter are stated
+  per capability, not per operation: no NEW effect after *that capability's* `markInvalid()` returns,
+  and ≤ one already-in-flight effect drained out by pass 1. Verify: no path drains before every snapshot is marked; no
   path withdraws *before* snapshotting (which would defeat Invalidate-First on the batch paths); the
   serve-defer path (synchronous mark+drain, not out-of-lock) has **zero** such window; and no
   `perform` closure ever calls back into its own capability (a re-entrant `perform`/drain deadlocks
@@ -1232,14 +1294,24 @@ orphan-lastSeen residual.
   **(a)** the serve loop's host-local session-control branches (`.startSession`/`.switchDisplay` →
   build a `CaptureEngine` and start the video task, `.viewport` → re-crop the live capture,
   `.clientFeedback` → steer the encoder, `.requestKeyframe`) had no capability check at all — only
-  *outbound* was gated — so a revoked peer could reconfigure or START screen capture; they now run
-  through `applySessionControl` (§4.1b). **(b)** `FileReceiver` gated only `createFile` and the
-  non-empty `handle.write`, leaving a zero-length final chunk able to finalize a transfer and a
-  quota-crossing chunk able to close **and delete** the partial file; both boundaries are now gated
-  (§4.1). Verify: every branch of the serve loop that mutates host state or touches the filesystem
-  passes a capability check immediately before its effect. Regressions:
-  `HostRunnerTests.applySessionControl_*`, `FileReceiverTests.emptyFinalChunk*` /
+  *outbound* was gated — so a revoked peer could reconfigure or START screen capture. The first fix
+  added a check at the BRANCH (`applySessionControl`); Sol's re-review showed that was still broken
+  (check-then-use across a suspension, and no `effectLock` coupling, so a drain returned at once), so
+  the gates now sit at the irreducible boundary inside `CaptureEngine`/`ViewportState`/
+  `ClientFeedbackHolder` and `applySessionControl` is gone (§4.1b). **(b)** `FileReceiver` gated only
+  `createFile` and the non-empty `handle.write`, leaving a zero-length final chunk able to finalize a
+  transfer and a quota-crossing chunk able to close **and delete** the partial file; both boundaries
+  are now gated (§4.1). Verify: every branch of the serve loop that mutates host state or touches the
+  filesystem reaches a capability check that is not separated from its effect by a suspension.
+  Regressions: `CaptureEngineTests.aRevokeLandingAfterTheServeLoopCheckStopsTheLiveRecropAtTheOSBoundary`
+  / `…StopsTheKeyframeRequest` / `drainWaitsForAnInFlightLiveRecropInsteadOfReturningAtOnce` /
+  `aKeyframeRequestQueuedOnTheEffectLockIsRefusedByTheUnderLockRecheck`,
+  `HostRunnerTests.clientFeedbackHolderRefusesTheEncoderWriteAfterWithdrawal`,
+  `FileReceiverTests.emptyFinalChunk*` /
   `quotaCrossingChunkUnderInvalidatedCapabilityDoesNotDeleteThePartialFile`.
+  **Not closed headlessly:** the `SCStream.startCapture` boundary is gated but has no test —
+  `SCDisplay`/`SCContentFilter` cannot be constructed without a real display and a test must never
+  touch the live capture surface.
 - **R11 — NEW: the revocation-intent item is now on the authorization path (§6d, I5).** Unlike lastSeen,
   this third item **gates** authorization, so it adds a keychain dependency to every cold authorization
   decision: an unreadable/undecodable intent item denies EVERYONE (deliberate, symmetric with an

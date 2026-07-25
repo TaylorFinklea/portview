@@ -465,11 +465,26 @@ public struct HostRunner: Sendable {
     final class ClientFeedbackHolder: @unchecked Sendable {
         private let lock = NSLock()
         private var latestValue: ClientFeedback?
+        /// Session authority (Sol re-review I4). This snapshot steers the live encoder's bitrate and
+        /// the SCStream's fps, so it is a host-local privileged effect: self-guarded here, at the one
+        /// irreducible write, rather than at the serve-loop branch (which is separated from the write
+        /// by the loop's own `await`s). Defaults to a fresh always-valid capability for the
+        /// non-session callers (`pumpVideo`'s own default).
+        private let capability: SessionCapability
 
-        func update(_ feedback: ClientFeedback) {
-            lock.lock()
-            latestValue = feedback
-            lock.unlock()
+        init(capability: SessionCapability = SessionCapability()) {
+            self.capability = capability
+        }
+
+        /// Called UNWRAPPED from the serve loop (mirroring `FileReceiver`) — an outer `perform` would
+        /// self-deadlock on the effect lock. Returns `false` when the capability was withdrawn.
+        @discardableResult
+        func update(_ feedback: ClientFeedback) -> Bool {
+            capability.perform {
+                lock.lock()
+                latestValue = feedback
+                lock.unlock()
+            }
         }
 
         func latest() -> ClientFeedback? {
@@ -529,20 +544,6 @@ public struct HostRunner: Sendable {
     static func cancelServe(_ capabilities: SessionCapabilityBox, close: () -> Void) {
         capabilities.markInvalid()
         close()
-    }
-
-    /// R9 backstop for HOST-LOCAL session-control effects (Sol review I4a, design §10 R9). The
-    /// parked-waiter residual can hand the serve loop ONE inbound message after invalidation, and the
-    /// session-control branches mutate host-side state rather than sending — so they were not covered
-    /// by the outbound `isValid` gates (§4.5/H-e). Every such branch runs its effect through here,
-    /// checked immediately before the effect and after any preceding `await`. An `isValid` pre-check
-    /// (not `perform`): these effects `await` an actor, which the synchronous capability lock cannot
-    /// span (R2). Named and static so the gate is testable without a live display.
-    @discardableResult
-    static func applySessionControl(_ capability: SessionCapability, _ effect: () async -> Void) async -> Bool {
-        guard capability.isValid else { return false }
-        await effect()
-        return true
     }
 
     /// `internal` (not `private`) so the auth-gate loopback integration tests can drive it
@@ -721,7 +722,7 @@ public struct HostRunner: Sendable {
         let fileReceiver = FileReceiver(capability: capability)
         // Latest client-reported receive-side quality snapshot for THIS connection, read by the video
         // pump's adaptive rate controller each stats interval.
-        let clientFeedback = ClientFeedbackHolder()
+        let clientFeedback = ClientFeedbackHolder(capability: capability)
         // Set when `.deviceConnected` is emitted (after ServerHello), so the teardown emits a matching
         // `.deviceDisconnected` only for a session that was actually announced.
         var connectedDeviceID: String?
@@ -766,7 +767,7 @@ public struct HostRunner: Sendable {
         func startVideo(on display: SCDisplay) {
             videoTask?.cancel()
             injector = makeInjector(for: display, cursorPump: cursorPump, capability: capability)
-            let capture = CaptureEngine(width: display.width, height: display.height)
+            let capture = CaptureEngine(width: display.width, height: display.height, capability: capability)
             currentCapture = capture
             // A lane-death flip forces its keyframe through THIS capture's request path (the same
             // consumeKeyframeRequest plumbing a client `.requestKeyframe` uses); re-pointed on every
@@ -839,24 +840,26 @@ public struct HostRunner: Sendable {
                 do { try server.handle(start) } catch { logger.error("startSession error: \(error, privacy: .public)"); return }
                 requestedFPS = StreamParameters.captureFPS(requested: start.maxFPS)
                 requestedBitrate = StreamParameters.encoderBitrate(requested: start.targetBitrate)
-                // (R9, Sol review I4a) STARTING capture is a host-local privileged effect: gated
-                // immediately before it, after the registry read's await — a revoked peer must not be
-                // able to stand up a fresh CaptureEngine + video pump through the residual window.
+                // (R9, Sol re-review I4) STARTING capture is a host-local privileged effect. The
+                // registry read above SUSPENDS, so the gate is `perform` — synchronous and atomic with
+                // the scaffolding build — and the irreducible OS call (`SCStream.startCapture`) is
+                // gated a SECOND time inside `CaptureEngine.start`, which is where the video task
+                // actually reaches it. A revoked peer must not be able to stand up a fresh
+                // CaptureEngine + video pump through the residual window.
                 let startTarget = await display(forID: start.displayID)
-                await Self.applySessionControl(capability) { startVideo(on: startTarget) }
+                capability.perform { startVideo(on: startTarget) }
             case .switchDisplay(let switchMessage):
                 let switchTarget = await display(forID: switchMessage.displayID)
-                await Self.applySessionControl(capability) { startVideo(on: switchTarget) }
+                capability.perform { startVideo(on: switchTarget) }
             case .viewport(let viewport):
                 // Magnifier: re-crop the live capture. The viewport now travels in every VideoFrame,
-                // so no separate echo is needed — just apply the crop. Gated (R9): re-cropping the
-                // live capture is a host-local privileged effect.
-                let capture = currentCapture
-                await Self.applySessionControl(capability) {
-                    _ = await capture?.setViewport(
-                        normalizedX: viewport.normalizedX, normalizedY: viewport.normalizedY,
-                        normalizedW: viewport.normalizedW, normalizedH: viewport.normalizedH)
-                }
+                // so no separate echo is needed — just apply the crop. Called UNWRAPPED: `setViewport`
+                // self-guards at its OS boundary (the check and `updateConfiguration` are issued inside
+                // ONE `capability.perform`), which a branch-level check could not do — its
+                // `AsyncGate.enter()` suspends between any such check and the privileged call.
+                _ = await currentCapture?.setViewport(
+                    normalizedX: viewport.normalizedX, normalizedY: viewport.normalizedY,
+                    normalizedW: viewport.normalizedW, normalizedH: viewport.normalizedH)
             case .typeText(let text):
                 // Serve-boundary size cap (H-b): an over-cap typeText is skipped WHOLE, never partially
                 // injected. The injector self-gates each CGEvent on the capability (Task 5).
@@ -895,16 +898,18 @@ public struct HostRunner: Sendable {
             case .pong:
                 break
             case .clientFeedback(let feedback):
-                // Gated (R9): this snapshot steers the live encoder's bitrate/fps, so a revoked peer
-                // must not keep driving it.
-                guard await Self.applySessionControl(capability, { clientFeedback.update(feedback) }) else { break }
+                // Called UNWRAPPED: the holder self-guards its one irreducible write (R9) — this
+                // snapshot steers the live encoder's bitrate/fps, so a revoked peer must not keep
+                // driving it.
+                guard clientFeedback.update(feedback) else { break }
                 logger.notice("client feedback fps=\(feedback.receivedFPS, privacy: .public) mbps=\(feedback.receivedMbps, privacy: .public) decodeMs=\(feedback.averageDecodeMs, privacy: .public) dropped=\(feedback.droppedFrames, privacy: .public)")
             case .requestKeyframe:
                 // Client asked for a fresh keyframe (e.g. it just returned to the foreground and its
                 // delta chain has a gap). Force the next encoded frame to a keyframe on the active
-                // capture so the stream recovers without waiting for the periodic keyframe. Gated (R9).
-                let keyframeCapture = currentCapture
-                await Self.applySessionControl(capability) { await keyframeCapture?.requestKeyframe() }
+                // capture so the stream recovers without waiting for the periodic keyframe. Called
+                // UNWRAPPED: `requestKeyframe` self-guards INSIDE `ViewportState`, after the actor hop
+                // that a branch-level check could not span (R9).
+                await currentCapture?.requestKeyframe()
             default:
                 break
             }
@@ -1261,7 +1266,14 @@ public struct HostRunner: Sendable {
         // Instant for legacy sessions and on re-entry (display switch).
         await router.awaitLaneBindings()
         do {
-            try capture.start(display: display, maxFPS: fps)
+            // (Sol re-review I4) `awaitLaneBindings()` above SUSPENDS — a revoke can land between the
+            // serve loop's branch check and here — so the capability is re-checked at the OS boundary
+            // INSIDE `start`, atomically with `SCStream.startCapture`. `false` means withdrawn: screen
+            // capture was never started.
+            guard try capture.start(display: display, maxFPS: fps) else {
+                logger.notice("capture start refused — session capability withdrawn")
+                return
+            }
         } catch {
             logger.error("capture start error: \(error, privacy: .public)")
             return

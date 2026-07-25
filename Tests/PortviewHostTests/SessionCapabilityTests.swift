@@ -5,10 +5,18 @@ import Testing
 @testable import PortviewHostCore
 
 /// `SessionCapability` (han.4 Task 1): a per-session act-permission flag gating whether a session
-/// may still perform effects. `perform` and `invalidate` share ONE lock so a concurrent invalidate
-/// can never interleave with an in-flight perform — either the effect runs to completion under the
-/// lock and THEN invalidate flips it, or invalidate wins the lock first and perform never runs its
-/// effect at all. No torn interleave (the flag flipping WHILE an effect is mid-flight) is possible.
+/// may still perform effects. Withdrawal is TWO operations over TWO locks (Sol review C1), and the
+/// flag deliberately DOES flip while an effect is mid-flight:
+///
+/// - `markInvalid()` takes only `flagLock`, so it returns — and `isValid` reads false — with an
+///   effect still parked inside `perform`. That is what lets a batch teardown withdraw every
+///   sibling's authority before waiting on any one of them.
+/// - `drainInFlightEffect()` takes `effectLock`, so IT is the half that cannot return until the
+///   in-flight effect finishes. `invalidate()` is mark-then-drain, so it blocks too — but its mark
+///   has already landed by then.
+/// - `perform` re-checks the flag UNDER `effectLock`, which is what bounds the residual to at most
+///   ONE effect: a caller that queued behind an in-flight effect observes the mark on acquiring the
+///   lock and never runs its own effect.
 @Suite struct SessionCapabilityTests {
     /// Lock-guarded flag box for observing state mutated from a background thread (mirrors the
     /// `Counter`/`Overlap` idiom in InputInjectorGateTests/AsyncGateTests).
@@ -40,10 +48,14 @@ import Testing
         #expect(resultAfterInvalidate == false)
     }
 
-    @Test func performAndInvalidateAreMutuallyExclusive() {
+    /// `invalidate()` is mark-then-drain: its MARK lands immediately (observably — `isValid` reads
+    /// false while the effect is still parked), and its DRAIN is what cannot return until that effect
+    /// finishes. The effect itself is never torn: `perform` holds `effectLock` for its whole duration,
+    /// so the already-running effect completes — that is the ≤ one-effect residual, not an exclusion.
+    @Test func invalidateMarksAtOnceButItsDrainCannotReturnMidEffect() {
         let capability = SessionCapability()
         // The effect parks here until the test releases it, so `perform` is guaranteed to be
-        // holding the lock (mid-effect) when `invalidate()` is fired on another thread.
+        // holding the effect lock (mid-effect) when `invalidate()` is fired on another thread.
         let enteredEffect = DispatchSemaphore(value: 0)
         let releaseEffect = DispatchSemaphore(value: 0)
         let effectRan = Flag()
@@ -77,19 +89,19 @@ import Testing
             group.leave()
         }
 
-        // Bounded window for invalidate() to reach (and block on) the shared lock. It must NOT
-        // have completed yet — proof invalidate() cannot return while perform()'s effect is still
-        // in flight, i.e. the flag never flips mid-effect. (Deliberately does not read
-        // `capability.isValid` here: that getter takes the SAME lock the parked effect is holding,
-        // so calling it before releasing the effect would deadlock this thread too.)
+        // Bounded window for invalidate() to mark and then block in its drain. The MARK is already
+        // visible (`isValid` takes only `flagLock`, which no effect ever holds — reading it here does
+        // NOT deadlock), while invalidate() itself has NOT returned: its drain is queued on the
+        // effect lock the parked effect holds.
         Thread.sleep(forTimeInterval: 0.05)
+        #expect(capability.isValid == false)
         #expect(invalidateCompleted.current == false)
 
         releaseEffect.signal()
         #expect(group.wait(timeout: .now() + 10) == .success)
 
-        // Exactly one ordering: perform ran its effect to completion (and returned true) THEN
-        // invalidate flipped the flag.
+        // The in-flight effect ran to completion and `perform` returned true — the flag flipping
+        // under it does not tear it — and only THEN could invalidate's drain return.
         #expect(effectRan.current == true)
         #expect(performResult.current == true)
         #expect(invalidateCompleted.current == true)
@@ -141,12 +153,24 @@ import Testing
     /// The residual a non-blocking mark accepts is **at most one** effect per capability, and that
     /// bound is enforced by `perform`'s re-check UNDER the effect lock: a second caller that queued
     /// behind the in-flight effect sees the mark when it finally acquires the lock, and its effect
-    /// never runs. (Robust either way — a caller that had not yet passed the fast-path check is
-    /// rejected there instead; neither path may run the effect.)
-    @Test func aSecondEffectQueuedBehindAnInFlightOneIsRejectedAfterTheMark() {
+    /// never runs.
+    ///
+    /// The point of this test is that the second caller really is *queued on the lock* when the mark
+    /// lands — a bare sleep could not tell that apart from "still short of the fast-path check", in
+    /// which case the fast path would reject it and the authoritative under-lock re-check would never
+    /// be exercised. Two ordering facts pin it down, no sleep needed:
+    ///   1. `atGate` proves the second thread is running and about to call `perform`, and at that
+    ///      moment the capability is still **valid** — so neither the fast path nor the under-lock
+    ///      check can reject it, and the effect lock is held by the parked first effect, so it cannot
+    ///      run either. Not completing therefore means: blocked on the effect lock.
+    ///   2. It stays blocked ACROSS the mark and returns only once `releaseFirst` frees the lock — a
+    ///      fast-path rejection would have returned immediately at the mark instead.
+    /// So the `false` it returns can only have come from the re-check under the lock.
+    @Test func aSecondEffectQueuedBehindAnInFlightOneIsRejectedByTheUnderLockRecheck() {
         let capability = SessionCapability()
         let enteredFirst = DispatchSemaphore(value: 0)
         let releaseFirst = DispatchSemaphore(value: 0)
+        let atGate = DispatchSemaphore(value: 0)
         let secondDone = DispatchSemaphore(value: 0)
         let secondRan = Flag()
         let secondResult = Flag()
@@ -155,14 +179,21 @@ import Testing
         #expect(enteredFirst.wait(timeout: .now() + 10) == .success)
 
         Thread.detachNewThread {
+            atGate.signal()
             let result = capability.perform { secondRan.set(true) }
             secondResult.set(result)
             secondDone.signal()
         }
-        Thread.sleep(forTimeInterval: 0.05)  // let the second caller reach the effect lock
-        capability.markInvalid()
-        releaseFirst.signal()
+        #expect(atGate.wait(timeout: .now() + 10) == .success)
+        // (1) Still valid, effect lock held → the only state it can be in is queued on that lock.
+        #expect(capability.isValid == true)
+        #expect(secondDone.wait(timeout: .now() + 0.2) == .timedOut)
 
+        capability.markInvalid()
+        // (2) The mark alone must not release it — it is past the fast path.
+        #expect(secondDone.wait(timeout: .now() + 0.2) == .timedOut)
+
+        releaseFirst.signal()
         #expect(secondDone.wait(timeout: .now() + 10) == .success)
         #expect(secondRan.current == false)
         #expect(secondResult.current == false)

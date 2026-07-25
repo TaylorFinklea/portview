@@ -44,8 +44,13 @@ private actor ViewportState {
 
     /// Flag a keyframe WITHOUT changing the crop — used to honor a client `.requestKeyframe` so the
     /// video pump forces the next frame to a keyframe.
-    func requestKeyframe() {
-        keyframeRequested = true
+    /// Gated INSIDE the actor (Sol re-review I4): the caller's `await` hop is the suspension that
+    /// used to separate the serve loop's `isValid` check from this mutation, so the check has to
+    /// happen here — synchronously with the write, under `perform` so a concurrent
+    /// `drainInFlightEffect()` waits for it instead of returning at once.
+    @discardableResult
+    func requestKeyframe(gatedBy capability: SessionCapability) -> Bool {
+        capability.perform { keyframeRequested = true }
     }
 
     func consumeKeyframeRequest() -> Bool {
@@ -77,6 +82,13 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     // Without it, an interleaved failure rollback can restore stale fields and desync the
     // unchanged-check baseline from the live stream (the wedge the rollback exists to prevent).
     private let configUpdateGate = AsyncGate()
+    /// Session authority for THIS capture (Sol re-review I4). Every privileged ScreenCaptureKit call
+    /// this engine issues — `startCapture` and the live `updateConfiguration` re-crop/fps retarget —
+    /// is checked against it at the OS boundary, because the serve loop's branch-level check is
+    /// separated from the call by at least one suspension (`display(forID:)`, `AsyncGate.enter()`,
+    /// the actor hop) and a revoke can land in that gap. Defaults to a fresh always-valid capability
+    /// so non-session callers (tests of pure sizing/keyframe behavior) are unaffected.
+    private let capability: SessionCapability
     private let continuation: AsyncStream<SendableFrame>.Continuation
     let frames: AsyncStream<SendableFrame>
     private let audioContinuation: AsyncStream<SendableAudioFrame>.Continuation
@@ -94,10 +106,22 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     // is encoded 1:1 — full resolution, no stretch — which is what makes high zoom crisp.
     private var config: SCStreamConfiguration?
 
+    /// Issues ONE live-stream reconfiguration to the OS. Deliberately completion-handler shaped, not
+    /// `async`: the call must be *issued* synchronously inside `capability.perform`, so no suspension
+    /// can separate the capability check from the privileged call (Sol re-review I4). Bound to the
+    /// real `SCStream` by `start()`; a headless test installs a recorder
+    /// (`installConfigurationApplierForTesting`) so that gate is exercisable without a display — the
+    /// same reason `InputInjector.postEvent` is a seam.
+    typealias ConfigurationApplier = (SCStreamConfiguration, @escaping @Sendable ((any Error)?) -> Void) -> Void
+    private var applyConfiguration: ConfigurationApplier?
+
     func currentViewport() async -> CGRect { await viewportState.get() }
     func consumeKeyframeRequest() async -> Bool { await viewportState.consumeKeyframeRequest() }
     /// Force the next encoded frame to a keyframe (client `.requestKeyframe`), without a re-crop.
-    func requestKeyframe() async { await viewportState.requestKeyframe() }
+    /// Self-guarding (called UNWRAPPED from the serve loop, mirroring `FileReceiver`): the gate runs
+    /// inside `ViewportState`, synchronously with the write, AFTER this actor hop.
+    @discardableResult
+    func requestKeyframe() async -> Bool { await viewportState.requestKeyframe(gatedBy: capability) }
 
     private func setAppliedRegion(_ rect: CGRect) {
         regionLock.lock(); appliedRegion = rect; regionLock.unlock()
@@ -106,22 +130,48 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         regionLock.lock(); defer { regionLock.unlock() }; return appliedRegion
     }
 
-    private func setStreamAndConfig(_ stream: SCStream?, _ config: SCStreamConfiguration?) {
-        configLock.lock(); self.stream = stream; self.config = config; configLock.unlock()
+    private func setStreamAndConfig(_ stream: SCStream?, _ config: SCStreamConfiguration?,
+                                   applier: ConfigurationApplier?) {
+        configLock.lock()
+        self.stream = stream
+        self.config = config
+        self.applyConfiguration = applier
+        configLock.unlock()
     }
-    private func currentStreamAndConfig() -> (SCStream?, SCStreamConfiguration?) {
-        configLock.lock(); defer { configLock.unlock() }; return (stream, config)
+    private func currentStream() -> SCStream? {
+        configLock.lock(); defer { configLock.unlock() }; return stream
+    }
+    private func currentApplierAndConfig() -> (ConfigurationApplier?, SCStreamConfiguration?) {
+        configLock.lock(); defer { configLock.unlock() }; return (applyConfiguration, config)
     }
 
-    init(width: Int, height: Int) {
+    /// Test seam (headless): install a configuration + applier without a live `SCStream`, so the
+    /// capability gate wrapping the privileged reconfiguration call can be driven without a display.
+    /// A test must NEVER reach the real ScreenCaptureKit surface.
+    func installConfigurationApplierForTesting(_ config: SCStreamConfiguration,
+                                               _ applier: @escaping ConfigurationApplier) {
+        setStreamAndConfig(nil, config, applier: applier)
+    }
+
+    init(width: Int, height: Int, capability: SessionCapability = SessionCapability()) {
         self.width = width
         self.height = height
+        self.capability = capability
         (frames, continuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(2))
         (audioFrames, audioContinuation) = AsyncStream.makeStream(bufferingPolicy: .bufferingNewest(8))
         super.init()
     }
 
-    func start(display: SCDisplay, maxFPS: Int) throws {
+    /// Returns `false` — with NOTHING issued to the OS — when the session capability was withdrawn
+    /// before `startCapture` could be issued (Sol re-review I4). The check and the OS call are ONE
+    /// synchronous critical section under `capability.perform`: `pumpVideo` reaches here only after
+    /// `awaitLaneBindings()`, and the serve loop reached `startVideo` only after a registry `await`,
+    /// so a branch-level check cannot cover this — a revoke landing in either gap must not be able to
+    /// START screen capture for a withdrawn peer.
+    @discardableResult
+    func start(display: SCDisplay, maxFPS: Int) throws -> Bool {
+        // Cheap early-out: an already-withdrawn session never even builds the SCStream.
+        guard capability.isValid else { return false }
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let outputSize = CaptureSizing.outputSize(
             width: width, height: height, pointPixelScale: filter.pointPixelScale
@@ -137,9 +187,15 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: audioQueue)
-        setStreamAndConfig(stream, config)
-        stream.startCapture { error in
-            if let error { logger.error("capture start error: \(error, privacy: .public)") }
+        // Authoritative gate at the OS boundary: issued under `perform`, so no suspension separates
+        // the check from `startCapture` and a concurrent `drainInFlightEffect()` waits for the issue.
+        return capability.perform {
+            setStreamAndConfig(stream, config, applier: { configuration, completion in
+                stream.updateConfiguration(configuration, completionHandler: completion)
+            })
+            stream.startCapture { error in
+                if let error { logger.error("capture start error: \(error, privacy: .public)") }
+            }
         }
     }
 
@@ -152,10 +208,12 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     /// no-op change (same rect and output dims) returns `true` without reconfiguring.
     func setViewport(normalizedX nx: Double, normalizedY ny: Double,
                      normalizedW nw: Double, normalizedH nh: Double) async -> Bool {
+        // Cheap early-out only — the authoritative gate is the `perform` around the OS call below.
+        guard capability.isValid else { return false }
         await configUpdateGate.enter()
         defer { configUpdateGate.leave() }
-        let (streamOpt, configOpt) = currentStreamAndConfig()
-        guard let stream = streamOpt, let config = configOpt else { return false }
+        let (applyOpt, configOpt) = currentApplierAndConfig()
+        guard let apply = applyOpt, let config = configOpt else { return false }
         // Snap the captured region's SIZE to the discrete ladder (snapped up so it still covers the
         // requested window), keeping the requested center; the encoder output is sized from the SAME
         // snapped fractions, so the buffer's aspect matches the captured region exactly (no stretch)
@@ -187,6 +245,8 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
             && abs(newRect.width - current.width) < 1 && abs(newRect.height - current.height) < 1
         let unchangedSize = config.width == outputSize.width && config.height == outputSize.height
         if unchangedRect && unchangedSize {
+            // No OS call — but the region stamp is still session state, so gate it too.
+            guard capability.isValid else { return false }
             await viewportState.set(normalizedRect, requestKeyframe: false)
             setAppliedRegion(normalizedRect)
             return true
@@ -197,29 +257,42 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
         let priorRect = config.sourceRect
         let priorWidth = config.width
         let priorHeight = config.height
-        config.sourceRect = newRect
-        config.width = outputSize.width
-        config.height = outputSize.height
-        do {
-            try await stream.updateConfiguration(config)
-            // Only a size change (a zoom-rung crossing) needs a forced keyframe; a pure pan moves the
-            // sourceRect at the same output size, so the P-frame stream stays valid — forcing a keyframe
-            // on every pan step put ~6.6 large keyframes/sec on the wire and produced a periodic hitch.
-            let requestKeyframe = CaptureSizing.cropRequiresKeyframe(
-                from: CaptureSizing.Size(width: priorWidth, height: priorHeight), to: outputSize)
-            await viewportState.set(normalizedRect, requestKeyframe: requestKeyframe)
-            // Mark the new region as applied AFTER updateConfiguration completes (Apple's signal it's in
-            // effect), so buffers produced from here on are stamped with it; in-flight old-crop buffers
-            // captured before this point keep the old region.
-            setAppliedRegion(normalizedRect)
-            return true
-        } catch {
+        // The IRREDUCIBLE effect boundary (Sol re-review I4): the config mutation AND the issue of
+        // `updateConfiguration` run inside ONE `capability.perform`, so (a) no suspension separates
+        // the capability check from the privileged OS call — the `await configUpdateGate.enter()`
+        // above and the serve loop's own `await`s are all upstream of it — and (b) a concurrent
+        // `drainInFlightEffect()` waits for the issue instead of returning immediately. `nil` means
+        // the capability was withdrawn: no field was mutated and nothing reached the OS.
+        let applied: Bool? = await withCheckedContinuation { (continuation: CheckedContinuation<Bool?, Never>) in
+            let issued = capability.perform {
+                config.sourceRect = newRect
+                config.width = outputSize.width
+                config.height = outputSize.height
+                apply(config) { error in
+                    if let error { logger.error("viewport update failed: \(error, privacy: .public)") }
+                    continuation.resume(returning: error == nil)
+                }
+            }
+            if !issued { continuation.resume(returning: nil) }
+        }
+        guard let applied else { return false }
+        guard applied else {
             config.sourceRect = priorRect
             config.width = priorWidth
             config.height = priorHeight
-            logger.error("viewport update failed: \(error, privacy: .public)")
             return false
         }
+        // Only a size change (a zoom-rung crossing) needs a forced keyframe; a pure pan moves the
+        // sourceRect at the same output size, so the P-frame stream stays valid — forcing a keyframe
+        // on every pan step put ~6.6 large keyframes/sec on the wire and produced a periodic hitch.
+        let requestKeyframe = CaptureSizing.cropRequiresKeyframe(
+            from: CaptureSizing.Size(width: priorWidth, height: priorHeight), to: outputSize)
+        await viewportState.set(normalizedRect, requestKeyframe: requestKeyframe)
+        // Mark the new region as applied AFTER updateConfiguration completes (Apple's signal it's in
+        // effect), so buffers produced from here on are stamped with it; in-flight old-crop buffers
+        // captured before this point keep the old region.
+        setAppliedRegion(normalizedRect)
+        return true
     }
 
     /// Retarget the live capture's max frame rate (the adaptive rate controller's fps output)
@@ -229,26 +302,36 @@ final class CaptureEngine: NSObject, SCStreamOutput, SCStreamDelegate, @unchecke
     /// `setViewport`'s rollback).
     func setMaxFPS(_ maxFPS: Int) async -> Bool {
         guard maxFPS > 0 else { return false }
+        // Cheap early-out only — the authoritative gate is the `perform` around the OS call below.
+        guard capability.isValid else { return false }
         await configUpdateGate.enter()
         defer { configUpdateGate.leave() }
-        let (streamOpt, configOpt) = currentStreamAndConfig()
-        guard let stream = streamOpt, let config = configOpt else { return false }
+        let (applyOpt, configOpt) = currentApplierAndConfig()
+        guard let apply = applyOpt, let config = configOpt else { return false }
         let interval = CMTime(value: 1, timescale: CMTimeScale(maxFPS))
         guard config.minimumFrameInterval != interval else { return true }
         let prior = config.minimumFrameInterval
-        config.minimumFrameInterval = interval
-        do {
-            try await stream.updateConfiguration(config)
-            return true
-        } catch {
+        // Same irreducible boundary as `setViewport`: mutate + issue under ONE `perform`.
+        let applied: Bool? = await withCheckedContinuation { (continuation: CheckedContinuation<Bool?, Never>) in
+            let issued = capability.perform {
+                config.minimumFrameInterval = interval
+                apply(config) { error in
+                    if let error { logger.error("fps update failed: \(error, privacy: .public)") }
+                    continuation.resume(returning: error == nil)
+                }
+            }
+            if !issued { continuation.resume(returning: nil) }
+        }
+        guard let applied else { return false }
+        guard applied else {
             config.minimumFrameInterval = prior
-            logger.error("fps update failed: \(error, privacy: .public)")
             return false
         }
+        return true
     }
 
     func stop() {
-        let (stream, _) = currentStreamAndConfig()
+        let stream = currentStream()
         stream?.stopCapture { _ in }
         continuation.finish()
         audioContinuation.finish()

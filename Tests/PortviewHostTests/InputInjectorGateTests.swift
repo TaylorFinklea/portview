@@ -58,10 +58,13 @@ import PortviewProtocol
     /// through `capability.perform` INDIVIDUALLY — never the whole `.typeText` message — so
     /// `invalidate()` is checked atomically with each event, not once for the whole compound
     /// message. Proven with real cross-thread contention (mirrors
-    /// `SessionCapabilityTests.performAndInvalidateAreMutuallyExclusive`): the first `postEvent`
-    /// call parks inside `perform`'s lock, and `invalidate()` is confirmed BLOCKED on that SAME
-    /// lock (cannot complete) while it's parked — so invalidate can only win once that one event's
-    /// effect returns. Exactly which iteration wins the freed lock next is a genuine OS scheduling
+    /// `SessionCapabilityTests.invalidateMarksAtOnceButItsDrainCannotReturnMidEffect`): the first
+    /// `postEvent` call parks inside `perform`'s EFFECT lock, and `invalidate()` is confirmed
+    /// BLOCKED (cannot complete) while it's parked — its mark has already landed on the separate
+    /// flag lock, but its DRAIN is queued on the effect lock, so it returns only once that one
+    /// event's effect finishes. Every later event in the message then observes the mark — at the
+    /// fast path or at the re-check under the lock — and posts nothing. Exactly which iteration
+    /// observes it first is a genuine OS scheduling
     /// race (the design's own defined residual — §10 R2/R8: "one irreducible effect" may still be
     /// in flight around an invalidation), so this asserts a generous bound, not an exact count —
     /// what matters for H-b is that the gate stops WELL short of the whole 10,000-event message,
@@ -93,9 +96,10 @@ import PortviewProtocol
 
         #expect(enteredFirstEvent.wait(timeout: .now() + 10) == .success)
 
-        // invalidate() must block on the SAME lock the parked first `perform` call holds — it
-        // cannot complete until that call returns, proving the two are mutually exclusive here
-        // too (not just in SessionCapabilityTests' own unit test).
+        // invalidate()'s DRAIN must block on the same effect lock the parked first `perform` call
+        // holds — it cannot complete until that call returns, proving the injection path is
+        // drain-coupled here too (not just in SessionCapabilityTests' own unit test). Its mark, on
+        // the separate flag lock, has already landed by then.
         let invalidateCompleted = Flag()
         let invalidateGroup = DispatchGroup()
         invalidateGroup.enter()
@@ -105,10 +109,10 @@ import PortviewProtocol
             invalidateGroup.leave()
         }
 
-        // Bounded window for invalidate() to reach (and block on) the shared lock. It must NOT
-        // have completed yet — proof it cannot return while the first event's `perform` is still
-        // parked, i.e. invalidate wins only AFTER that event returns, never mid-event.
+        // Bounded window for invalidate() to mark and then block in its drain. The mark is already
+        // visible while the first event is still parked; invalidate() itself must NOT have returned.
         Thread.sleep(forTimeInterval: 0.05)
+        #expect(capability.isValid == false)
         #expect(invalidateCompleted.current == false)
 
         releaseFirstEvent.signal()

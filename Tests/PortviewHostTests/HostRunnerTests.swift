@@ -146,40 +146,37 @@ import PortviewProtocol
         #expect(performDone.wait(timeout: .now() + 10) == .success)
     }
 
-    // MARK: - Sol review I4(a): R9 backstop on host-local session-control effects
+    // MARK: - Sol re-review I4: host-local session-control effects gate at their EFFECT boundary
 
     /// The serve loop's session-control branches (`.startSession`/`.switchDisplay` → capture start,
     /// `.viewport` → live re-crop, `.clientFeedback` → encoder feedback, `.requestKeyframe`) mutate
-    /// HOST-side state and had no capability guard, so a residual message delivered to a parked
-    /// waiter after invalidation (design §10 R9) could still reconfigure — or START — screen capture
-    /// for a revoked peer. Outbound was already gated; this is the host-side half.
-    @Test func applySessionControl_runsWhileValidAndSkipsTheEffectAfterWithdrawal() async {
+    /// HOST-side state, so a residual message delivered to a parked waiter after invalidation (design
+    /// §10 R9) could reconfigure — or START — screen capture for a revoked peer. A check at the
+    /// BRANCH was not enough: every one of those effects is separated from its branch by at least one
+    /// suspension, so the mark could land in between. Each now gates at its own irreducible boundary;
+    /// the capture-side boundaries are covered by `CaptureEngineTests`, this is the feedback holder.
+    ///
+    /// `.clientFeedback` steers the live encoder's bitrate and the SCStream's fps, so a withdrawn peer
+    /// must not keep driving it. Self-guarded at the one irreducible write (called UNWRAPPED from the
+    /// serve loop, mirroring `FileReceiver`).
+    @Test func clientFeedbackHolderRefusesTheEncoderWriteAfterWithdrawal() {
         let capability = SessionCapability()
-        let capture = CaptureEngine(width: 640, height: 480)
+        let holder = HostRunner.ClientFeedbackHolder(capability: capability)
+        let steady = ClientFeedback(receivedFPSX100: 3000, receivedMbpsX100: 500,
+                                    averageDecodeMsX100: 400, decodeQueueDepth: 1,
+                                    droppedFrames: 0, rttMicros: 1000)
+        #expect(holder.update(steady))                          // positive control
+        #expect(holder.latest()?.receivedFPSX100 == 3000)
 
-        #expect(await HostRunner.applySessionControl(capability) { await capture.requestKeyframe() })
-        #expect(await capture.consumeKeyframeRequest() == true)
-
-        capability.markInvalid()
-        #expect(await HostRunner.applySessionControl(capability) { await capture.requestKeyframe() } == false)
-        #expect(await capture.consumeKeyframeRequest() == false)   // the gated effect never ran
+        #expect(capability.isValid)                             // the branch check would pass here …
+        capability.markInvalid()                                // … and the revoke lands in the gap
+        let starved = ClientFeedback(receivedFPSX100: 200, receivedMbpsX100: 10,
+                                     averageDecodeMsX100: 9000, decodeQueueDepth: 40,
+                                     droppedFrames: 500, rttMicros: 900_000)
+        #expect(holder.update(starved) == false)
+        #expect(holder.latest()?.receivedFPSX100 == 3000)       // the revoked peer never steered it
     }
 
-    /// Same gate over the feedback holder the adaptive rate controller reads: a revoked peer must not
-    /// keep steering the encoder.
-    @Test func applySessionControl_gatesClientFeedbackUpdates() async {
-        let capability = SessionCapability()
-        let holder = HostRunner.ClientFeedbackHolder()
-
-        capability.markInvalid()
-        #expect(await HostRunner.applySessionControl(capability) {
-            holder.update(ClientFeedback(receivedFPSX100: 3000, receivedMbpsX100: 500,
-                                         averageDecodeMsX100: 400, decodeQueueDepth: 1,
-                                         droppedFrames: 0, rttMicros: 1000))
-        } == false)
-
-        #expect(holder.latest() == nil)
-    }
 }
 
 private func firstValue<Element>(from stream: AsyncStream<Element>) async -> Element? {
