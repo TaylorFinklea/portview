@@ -706,7 +706,15 @@ public struct HostRunner: Sendable {
                         // reconnect the old session's disconnect must not evict the new one's entry.
                         let sessionID = UUID().uuidString
                         connectedDeviceID = sessionID
-                        control?.register(sessionID, connection, outbound: outbound, authClass: sessionAuthClass)
+                        // MINIMAL han.4 Task-4 compile-fix: the register signature now requires a
+                        // ticket + capability. The real admission wiring (ticket captured at
+                        // authorization, capability threaded through every effect boundary, the
+                        // post-await recheck) is Task 8; until then this constructs a fresh capability
+                        // and a legacy/nil-keyID ticket so the call compiles and behaves as today
+                        // (legacy tickets skip the fence/generation check).
+                        control?.register(sessionID, connection, outbound: outbound, authClass: sessionAuthClass,
+                                          ticket: AdmissionTicket(keyID: nil, generation: 0),
+                                          capability: SessionCapability())
                         emit(.deviceConnected(id: sessionID, name: sanitizedDeviceName))
                         // Seed this client with the current lock state (the live broadcast only reaches
                         // already-connected clients), so one that connects while locked pauses at once.

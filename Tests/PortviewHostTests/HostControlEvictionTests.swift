@@ -48,9 +48,11 @@ import PortviewProtocol
         let control = HostControl(keepAwake: KeepAwake(backend: NoopKeepAwakeBackend()))
         let (connA, connB) = try await twoHostConnections(listener, port: port)
         control.register("legacy", connA, outbound: OutboundLane(connection: connA),
-                         authClass: .legacyAdmitted)
+                         authClass: .legacyAdmitted,
+                         ticket: AdmissionTicket(keyID: nil, generation: 0), capability: SessionCapability())
         control.register("authed", connB, outbound: OutboundLane(connection: connB),
-                         authClass: .authenticated)
+                         authClass: .authenticated,
+                         ticket: AdmissionTicket(keyID: nil, generation: 0), capability: SessionCapability())
         #expect(control.activeSessionIDs() == ["legacy", "authed"])
 
         control.evictLegacyAdmitted()

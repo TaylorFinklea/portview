@@ -331,7 +331,8 @@ import PortviewProtocol
         let (legacyListener, legacyConnection) = try await standaloneConnection()
         defer { legacyListener.cancel() }
         control.register("legacy", legacyConnection, outbound: OutboundLane(connection: legacyConnection),
-                         authClass: .legacyAdmitted)
+                         authClass: .legacyAdmitted,
+                         ticket: AdmissionTicket(keyID: nil, generation: 0), capability: SessionCapability())
         #expect(control.activeSessionIDs() == ["legacy"])
 
         let host = runHost(listener, hostCert: hostCert, policy: .required, pairings: pairings,
