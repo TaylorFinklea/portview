@@ -1010,7 +1010,15 @@ set):
    which contradicts the thrown error, the emitted `approved: false`, and this section's own claim.
    `enroll` now inserts the id into a process-local `unverifiedIntentFence` before throwing;
    `authorizedMap()` subtracts that fence as well as the intent set, and `pendingRevocations()`
-   surfaces it so the denial is visible rather than silent. It is lifted **only** by
+   surfaces it — **under its own `enrollmentFenced` tag, never merged into the durable set (Sol pass 4
+   F1)** — so the denial is visible without being mistaken for a revoke. The first version of this
+   surfacing unioned the fence into one untagged set, and the app then rendered the fenced device as an
+   ordinary incomplete revoke offering **Retry**, which called `pairings.revoke` with no confirmation
+   and no `LAContext`: a *destructive* durable removal, for a device whose history contains an
+   authenticated ADMIT and no authenticated revoke, reachable with zero local presence. Visibility was
+   the right goal; discarding provenance was not. The tagged result plus the "every durable `revoke`
+   carries confirm + `LAContext`" rule (invariant 6b) close it, and the fence's own recovery is the
+   authenticated re-admission below, not a revoke. It is lifted **only** by
    `dischargeRevocationIntent` succeeding — i.e. by a genuine read of the durable item proving the id
    carries no intent (a successful re-enroll, or the attended Cancel hatch). Deliberately a per-id
    fence rather than poisoning `intentCache`: dropping the warm cache would deny every *other* live
@@ -1172,6 +1180,36 @@ still denies K from a cold store. That case is `.durabilityUnknown`, and its reg
    owner re-paired in person — and if that clear cannot be made durable, `enroll` **throws** instead of
    reporting an enrollment the gate would refuse (§6d item 8) **and fences the id for the rest of the
    process**, so the key it just refused is not authorizable here either (§6d item 8a).
+
+   **What `pendingRevocations()` means, stated precisely (Sol pass 4 F1 — the prose above used to
+   overstate it).** It is NOT "the set of devices with a pending revoke". It is *every id
+   `authorizedMap()` currently denies for a reason the surface must render*, and it returns them
+   **tagged by provenance**, in two disjoint sets:
+   - `durable` — a revoke was **asked for** (an authenticated `revoke` ran) and its intent is durably
+     recorded. Continuing that removal is continuing a decision the owner already authenticated.
+   - `enrollmentFenced` — **nobody asked to revoke this device.** Its own `enroll` could not verify
+     that no intent is pending, so this process fences it (item 8a). The only authenticated decision
+     in its history is an ADMIT.
+
+   Merging the two — which the first implementation of item 8a did — is not a cosmetic loss. The app
+   defaulted an untagged row to the ordinary revoke-incomplete state, whose **Retry** ran a durable
+   `PairingStore.revoke` with no confirmation dialog and no `LAContext`; a device nobody had ever asked
+   to remove became destroyable by a click an injected `CGEvent` can deliver (the han.3 "GLM2" threat
+   model). **Every action that runs a durable `revoke` — Revoke and Retry alike — now carries both
+   gates**, and the fitting recovery for a fence is not a revoke at all but the authenticated
+   re-admission (`cancelRevocationIntent`, surfaced as "Finish pairing"), which lifts the fence exactly
+   by doing the thing the fence stands in for: a genuine read of the durable item proving no intent is
+   pending. The two provenances are disjoint by construction — `durable` wins for an id in both, since
+   a recorded intent is both the restart-surviving fact and the proof a revoke was requested.
+
+   **One state, one voice (Sol pass 4 F2).** The row copy and the activity-log copy are rendered from
+   the SAME `DeviceRowStatus` (`DeviceStatusCopy`), so the row can no longer say "couldn't re-check"
+   while the main-window log simultaneously warns of restart re-admission — the contradiction the
+   two-way→three-way split left behind in `noteRevokeDurability`. Both take their restart sentence from
+   the status's single `restartClaim`; a status that may not raise re-admission raises it in neither
+   surface. Regressions: `PortviewHostTests/DeviceStatusCopyTests` (whole-status table), and a log line
+   that no longer overflows the activity log's 160-character filter for a realistic device name — which
+   the pre-fix `.unverified` copy did, silently dropping the loudest warning in the feature.
 6c. **Authorization mutations never write from a warm cache (§6d, Sol review C2).** `enroll`/`revoke`
    and every intent write re-read their durable item immediately before the read-modify-write and
    propagate a read failure. The authorization READ path keeps its warm cache on purpose (mid-session
@@ -1215,6 +1253,23 @@ still denies K from a cold store. That case is `.durabilityUnknown`, and its reg
 ---
 
 ## 8. Test plan
+
+### Where these tests live (Sol pass 4 F3)
+
+Two suites, and until pass 4 only the first existed:
+
+- **`swift test`** covers the SPM modules (`PortviewTransport`, `PortviewHostCore`, …).
+- **`make test-host` → `PortviewHostTests`** covers the **macOS app layer**, `apps/PortviewHost`,
+  which had **no test target at all**. Every finding in review cycles 3, 4 and 5 lived there —
+  including a security regression — which is exactly what an untested layer looks like from the
+  outside. It is a LOGIC-test bundle: no `TEST_HOST`, so the app is never launched and nothing touches
+  the keychain, `LAContext`, the pasteboard, IOPM, `CGEvent` or `SCStream`. The decision logic under
+  test is therefore factored into pure, injectable types (`DeviceRowStatus.swift` — the same move as
+  `RevokeDurabilityCopy`, `DecisionTokenRegistry`, `SASAttemptLimiter`) and compiled straight into the
+  bundle. Those types EXPOSE state; they grant no authority — the confirmation dialog stays in the
+  view and the `LAContext` gate stays in `HostAppModel`, and nothing in the seam can skip either.
+  `apps/PortviewHost/project.yml` is not tracked as an `.xcodeproj`: after editing it run
+  `xcodegen generate` in `apps/PortviewHost`.
 
 ### Pure / TDD (land with the code, adversarially reviewed pre-commit)
 
@@ -1462,7 +1517,11 @@ still denies K from a cold store. That case is `.durabilityUnknown`, and its reg
   has, categorically only in the proven case. Verify: the UI
   surfaces the incomplete state, Retry re-attempts under the same lease and lifts on success, and the
   LAContext-gated Cancel is the only path that lifts the fence without a durable revoke (deliberate,
-  authenticated re-admission of a still-enrolled key).
+  authenticated re-admission of a still-enrolled key). **Retry is itself destructive and carries the
+  same confirmation dialog + `LAContext` gate as Revoke (Sol pass 4 F1)** — the old "it only continues
+  an already-authenticated revoke" argument does not hold: a post-restart Retry is driven by a durable
+  intent carrying no in-process authentication at all, and an untagged pending set briefly let a failed
+  ENROLLMENT reach it. No path runs `pairings.revoke` without proven local presence.
 - **R6 — Order-A straddle semantics (CONFIRMED).** A handshake straddling a revoke→re-enroll is forced
   to reconnect (killed at register on a stale generation) rather than surviving into the new
   enrollment. Confirmed the correct conservative direction; a surviving straddle would require capturing
@@ -1603,6 +1662,19 @@ still denies K from a cold store. That case is `.durabilityUnknown`, and its reg
   precisely to keep the item-7 mid-session-lock resilience intact for every *other* device. Verify: a
   thrown `enroll` leaves its key unauthorizable in the SAME process even when the intent cache is warm
   and empty, while an unrelated enrolled device stays authorized.
+
+  **Fifth consequence (Sol pass 4 F1) — a denial the UI can SEE is not yet a denial the UI can
+  ACT on correctly.** Surfacing the fence created a second, structurally different reason for a row to
+  be denied, and the accessor originally returned both under one untagged `Set`. `PendingRevocations`
+  is therefore now `case known(durable:enrollmentFenced:)`: the two sets are disjoint (durable wins),
+  and the app routes them to different rows with different recovery actions. **The general rule this
+  establishes: a fail-closed fence may be made visible only together with its provenance** — an
+  accessor that reports *that* a device is denied but not *why* invites the caller to pick a recovery
+  the denial never authorized, which here meant an ungated destructive revoke. Verify: the failed-enroll
+  regression asserts the tag (`.known(durable: [], enrollmentFenced: [K])`) and that nothing durable
+  was in fact written; `aDurablyRecordedIntentOutranksTheEnrollmentFenceForTheSameKey` asserts the
+  disjointness; and the host-app suite (`PortviewHostTests`) asserts that a fenced row never offers the
+  destructive Retry and that every offered action carries its gates.
 - **R10 — NEW: shutdown-path withdrawal is a MARK, not a drain (Sol review I3).** `serve`'s
   cancellation handler now marks the session capability (through `SessionCapabilityBox`) before
   `connection.close()`, so Invalidate-First holds on host shutdown. It deliberately does **not**

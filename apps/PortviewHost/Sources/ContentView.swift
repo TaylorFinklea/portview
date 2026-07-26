@@ -366,7 +366,7 @@ struct ContentView: View {
     /// The concise operational log — CLI-only multi-line artifacts (the ASCII box + terminal QR) are
     /// filtered out so the GUI log stays clean; no lines are fabricated.
     private var displayedLog: [String] {
-        model.messages.filter { !$0.contains("\n") && $0.count < 160 }
+        model.messages.filter { !$0.contains("\n") && $0.count < DeviceStatusCopy.activityLogCharacterLimit }
     }
 
     private var activityLog: some View {

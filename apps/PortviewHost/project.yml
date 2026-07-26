@@ -52,10 +52,35 @@ targets:
         # without one. Opt in via Portview.local.xcconfig once the account is set up; the app
         # fails soft (CloudKitBeaconStore checks the entitlement) when built without it.
         CODE_SIGN_ENTITLEMENTS: $(PORTVIEW_HOST_ENTITLEMENTS)
+  # Host-app unit tests (Sol pass 4 F3). Every finding in review cycles 3-5 — including a security
+  # regression — lived in this app layer, which had no test target at all.
+  #
+  # Deliberately a LOGIC-test bundle: it declares NO dependency on the PortviewHost app target, so
+  # xcodegen sets no TEST_HOST and the app is never launched to run these. Hosting the bundle in the
+  # app would boot `PortviewHostApp` (menu-bar extra, window, permission polling, the real keychain-
+  # backed `PairingStore`) for every `make test-host`, which the test-live-side-effects rule forbids.
+  # Instead the pure decision logic under test is compiled straight into the bundle by naming its
+  # file below — the same reason that logic was factored out of `@MainActor HostAppModel` in the
+  # first place. Adding a source file here is how a new pure type joins the suite.
+  PortviewHostTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - Tests
+      - Sources/DeviceRowStatus.swift
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(PORTVIEW_BUNDLE_ID_PREFIX).portview.host.tests
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   PortviewHost:
     build:
       targets:
         PortviewHost: all
+        PortviewHostTests: [test]
+    test:
+      targets:
+        - PortviewHostTests
     run:
       config: Debug

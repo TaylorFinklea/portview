@@ -428,7 +428,7 @@ import PortviewProtocol
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
         #expect(await restarted.isAuthorized(id: c.id) == false)
-        #expect(await restarted.pendingRevocations() == .known([c.id]))
+        #expect(await restarted.pendingRevocations() == .known(durable: [c.id], enrollmentFenced: []))
 
         // Retry WITHOUT a lease (there is none to reuse in a fresh process).
         try await restarted.revoke(id: c.id)
@@ -454,7 +454,7 @@ import PortviewProtocol
         // ...and a fresh instance (cold intent cache) reads the same empty set.
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
-        #expect(await restarted.pendingRevocations() == .known([]))
+        #expect(await restarted.pendingRevocations() == .known(durable: [], enrollmentFenced: []))
     }
 
     @Test func attendedReEnrollClearsAStaleRevocationIntent() async throws {
@@ -567,7 +567,7 @@ import PortviewProtocol
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
         #expect(await restarted.isAuthorized(id: c.id) == false)
-        #expect(await restarted.pendingRevocations() == .known([c.id]))
+        #expect(await restarted.pendingRevocations() == .known(durable: [c.id], enrollmentFenced: []))
     }
 
     /// Sol pass 3, N2: a FAILED enrollment must not leave an authorizable key in THIS process. The
@@ -606,10 +606,48 @@ import PortviewProtocol
         // must not re-admit what the failed enrollment already reported as refused.
         intents.failRead = false
         #expect(await pairing.isAuthorized(id: c.id) == false)
-        #expect(await pairing.pendingRevocations() == .known([c.id]))
+        // The denial is VISIBLE — and visible AS WHAT IT IS (Sol pass 4 F1). The fence must arrive
+        // under `enrollmentFenced`, never merged into `durable`: the durable tag means "an
+        // authenticated revoke was requested and recorded", which is false here (the only decision in
+        // this key's history is an ADMIT), and the app routes a durable-tagged row to a Retry that
+        // runs a destructive `revoke`.
+        #expect(await pairing.pendingRevocations() == .known(durable: [], enrollmentFenced: [c.id]))
+        // …and nothing durable was in fact recorded for it, which is what makes the tag load-bearing
+        // rather than cosmetic.
+        #expect(try durableIntents(intents).isEmpty)
         // Only a discharge that genuinely READS the durable item lifts it — the attended Cancel hatch.
         try await pairing.cancelRevocationIntent(id: c.id)
         #expect(await pairing.isAuthorized(id: c.id) == true)
+        #expect(await pairing.pendingRevocations() == .known(durable: [], enrollmentFenced: []))
+    }
+
+    /// The disjointness rule (Sol pass 4 F1): when an id carries BOTH a durably recorded intent and
+    /// this process's enrollment fence, it is reported as `durable` only. The durable tag is the
+    /// stronger fact — it survives a restart AND it proves an authenticated revoke was requested — so
+    /// the row correctly stays a revoke row, and the two sets never double-count a device.
+    @Test func aDurablyRecordedIntentOutranksTheEnrollmentFenceForTheSameKey() async throws {
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+
+        // A revoke wedges: the intent IS durably recorded, the removal is not.
+        auth.failWrite = true
+        await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
+        auth.failWrite = false
+        #expect(try durableIntents(intents) == [c.id])
+
+        // An attended re-enroll of the same key now fails its discharge read → it also lands in the
+        // process fence, so the id is in BOTH sources.
+        intents.failRead = true
+        await #expect(throws: (any Error).self) {
+            try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        }
+        intents.failRead = false
+        #expect(await pairing.isAuthorized(id: c.id) == false)
+        #expect(await pairing.pendingRevocations() == .known(durable: [c.id], enrollmentFenced: []))
     }
 
     /// Ruling item 2: Retry must RE-ATTEMPT the intent write, so a transient keychain failure heals
@@ -640,7 +678,7 @@ import PortviewProtocol
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
         #expect(await restarted.isAuthorized(id: c.id) == false)
-        #expect(await restarted.pendingRevocations() == .known([c.id]))
+        #expect(await restarted.pendingRevocations() == .known(durable: [c.id], enrollmentFenced: []))
     }
 
     /// The enroll-false-success finding. `authorizedMap()` subtracts pending intents, so a clear that
@@ -671,7 +709,7 @@ import PortviewProtocol
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
         #expect(await restarted.isAuthorized(id: c.id) == false)
-        #expect(await restarted.pendingRevocations() == .known([c.id]))
+        #expect(await restarted.pendingRevocations() == .known(durable: [c.id], enrollmentFenced: []))
     }
 
     /// Same false success via the UNREADABLE intent item rather than a failed write: a cold
@@ -766,7 +804,7 @@ import PortviewProtocol
         let other = newClient()
         try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
         try await pairing.enroll(publicKey: other.publicKey, deviceName: "iPad")
-        #expect(await pairing.pendingRevocations() == .known([]))
+        #expect(await pairing.pendingRevocations() == .known(durable: [], enrollmentFenced: []))
 
         auth.failWrite = true
         await #expect(throws: (any Error).self) { try await pairing.revoke(id: c.id) }
@@ -774,7 +812,7 @@ import PortviewProtocol
 
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
-        #expect(await restarted.pendingRevocations() == .known([c.id]))  // only the wedged one
+        #expect(await restarted.pendingRevocations() == .known(durable: [c.id], enrollmentFenced: []))  // only the wedged one
         #expect(await restarted.isAuthorized(id: other.id) == true)      // its sibling is unaffected
         try await restarted.revoke(id: c.id)                              // Retry, no lease needed
         // Clear-on-completion is asserted against the DURABLE item. `pendingRevocations()` alone
@@ -782,7 +820,7 @@ import PortviewProtocol
         // took K out of that set — so a lingering intent for K would be filtered away and the old
         // `.isEmpty` assertion passed whether or not the clear ever ran.
         #expect(try durableIntents(intents).isEmpty)
-        #expect(await restarted.pendingRevocations() == .known([]))
+        #expect(await restarted.pendingRevocations() == .known(durable: [], enrollmentFenced: []))
     }
 
     @Test func cancelRevocationIntentReAdmitsTheStillEnrolledDevice() async throws {
@@ -803,7 +841,7 @@ import PortviewProtocol
         #expect(await restarted.isAuthorized(id: c.id) == false)
         try await restarted.cancelRevocationIntent(id: c.id)
         #expect(await restarted.isAuthorized(id: c.id) == true)
-        #expect(await restarted.pendingRevocations() == .known([]))
+        #expect(await restarted.pendingRevocations() == .known(durable: [], enrollmentFenced: []))
         // The re-admission was DURABLE, not just this instance's cache.
         let afterAnotherRestart = PairingStore(store: auth, revokeIntentStore: intents,
                                                now: { Date(timeIntervalSince1970: 4000) })
@@ -828,7 +866,7 @@ import PortviewProtocol
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
         #expect(await restarted.isAuthorized(id: c.id) == false)
-        #expect(await restarted.pendingRevocations() == .known([c.id]))
+        #expect(await restarted.pendingRevocations() == .known(durable: [c.id], enrollmentFenced: []))
     }
 
     @Test func aPendingIntentForOneKeyNeverFencesAnother() async throws {
@@ -867,7 +905,7 @@ import PortviewProtocol
         #expect(try durableIntents(intents) == Set([a.id, b.id]))
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
-        #expect(await restarted.pendingRevocations() == .known(Set([a.id, b.id])))
+        #expect(await restarted.pendingRevocations() == .known(durable: Set([a.id, b.id]), enrollmentFenced: []))
         #expect(await restarted.isAuthorized(id: a.id) == false)
     }
 
@@ -885,7 +923,7 @@ import PortviewProtocol
         #expect(try durableIntents(intents).isEmpty)
         let restarted = PairingStore(store: auth, revokeIntentStore: intents,
                                      now: { Date(timeIntervalSince1970: 3000) })
-        #expect(await restarted.pendingRevocations() == .known([]))
+        #expect(await restarted.pendingRevocations() == .known(durable: [], enrollmentFenced: []))
     }
 
     // MARK: - lastSeen split (§6c, han.4 H-a): touch can never resurrect a revoked key

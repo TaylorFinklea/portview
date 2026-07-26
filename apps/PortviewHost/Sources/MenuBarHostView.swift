@@ -14,9 +14,20 @@ struct MenuBarHostView: View {
     /// Expand/collapse for the "Paired devices (N)" surface — collapsed by default so it never
     /// crowds the 300pt popover.
     @State private var showPairedDevices = false
-    /// The row awaiting the destructive-action confirmation dialog (product decision 1). Non-nil ⇒
-    /// the dialog is presented; confirming calls `model.revoke`, which then runs the LAContext gate.
-    @State private var pendingRevoke: PairedDeviceRow?
+    /// The row + destructive action awaiting the confirmation dialog (product decision 1). Non-nil ⇒
+    /// the dialog is presented; confirming calls the model, which then runs the LAContext gate. Retry
+    /// is carried here too (Sol pass 4 F1): it runs the same durable, destructive `PairingStore.revoke`
+    /// as Revoke, so it owes the same confirmation.
+    @State private var pendingDestructive: PendingDestructiveAction?
+
+    /// One queued destructive action. `RecoveryAction.requiresConfirmation` is what decides whether a
+    /// button routes through here at all, so the dialog can never be skipped for a destructive action
+    /// by forgetting a call site.
+    private struct PendingDestructiveAction: Identifiable {
+        let row: PairedDeviceRow
+        let action: RecoveryAction
+        var id: String { "\(row.id)-\(action.title)" }
+    }
 
     private var readyDetails: HostReadyDetails? {
         if case .ready(let details) = model.state { return details } else { return nil }
@@ -45,22 +56,34 @@ struct MenuBarHostView: View {
             model.startPermissionMonitoring() // refresh permission status when the popover opens
             await model.refreshEnrolledDevices() // §1a step 1: paired-devices surface-open refresh
         }
-        // Destructive-action gate part 1 (product decision 1): confirm BEFORE the LAContext gate in
-        // `model.revoke`. "Revoke 'iPhone'? It will lose access immediately."
+        // Destructive-action gate part 1 (product decision 1): confirm BEFORE the LAContext gate the
+        // model runs. "Revoke 'iPhone'? It will lose access immediately."
         .confirmationDialog(
-            pendingRevoke.map { "Revoke '\($0.name)'?" } ?? "Revoke device?",
-            isPresented: Binding(get: { pendingRevoke != nil },
-                                 set: { presented in if !presented { pendingRevoke = nil } }),
+            pendingDestructive.map { "\($0.action.confirmation?.verb ?? "Revoke") '\($0.row.name)'?" } ?? "Revoke device?",
+            isPresented: Binding(get: { pendingDestructive != nil },
+                                 set: { presented in if !presented { pendingDestructive = nil } }),
             titleVisibility: .visible,
-            presenting: pendingRevoke
-        ) { row in
-            Button("Revoke", role: .destructive) {
-                model.revoke(row.id)
-                pendingRevoke = nil
+            presenting: pendingDestructive
+        ) { pending in
+            Button(pending.action.confirmation?.verb ?? "Revoke", role: .destructive) {
+                perform(pending.action, on: pending.row)
+                pendingDestructive = nil
             }
-            Button("Cancel", role: .cancel) { pendingRevoke = nil }
-        } message: { _ in
-            Text("It will lose access immediately.")
+            Button("Cancel", role: .cancel) { pendingDestructive = nil }
+        } message: { pending in
+            Text(pending.action.confirmation?.message ?? "It will lose access immediately.")
+        }
+    }
+
+    /// Route one recovery action to the model. Destructive actions are never invoked from here without
+    /// having passed the confirmation dialog first — `recoveryButton` sends them there — and the model
+    /// runs the LAContext gate on every one of them.
+    private func perform(_ action: RecoveryAction, on row: PairedDeviceRow) {
+        switch action {
+        case .revoke: model.revoke(row.id)
+        case .retryRevoke: model.retryRevoke(row.id)
+        case .cancelRevoke: model.cancelRevoke(row.id)
+        case .finishPairing: model.finishPairing(row.id)
         }
     }
 
@@ -255,68 +278,46 @@ struct MenuBarHostView: View {
         }
     }
 
-    /// The one-line status next to Retry / Cancel. Never categorical for an unknown durability: the
-    /// device IS blocked right now in every case, and only the proven case may claim what happens
-    /// after a restart.
-    private static func revokeStatusLine(_ durability: HostAppModel.RevokeDurabilityCopy) -> String {
-        switch durability {
-        case .durable: "revoke incomplete"
-        case .notDurable: "blocked only while Portview runs"
-        case .unverified, .unverifiedFenceLastSeen: "blocked now — durability unverified"
+    /// One recovery button. Destructive actions (`requiresConfirmation`) go to the confirmation dialog
+    /// first and reach the model only after it; the rest call straight through to a model method that
+    /// runs its own LAContext gate. Routing through `RecoveryAction` is what keeps the dialog from
+    /// being skipped by an inconsistent call site.
+    private func recoveryButton(_ action: RecoveryAction, _ row: PairedDeviceRow) -> some View {
+        Button(action.title) {
+            if action.requiresConfirmation {
+                pendingDestructive = PendingDestructiveAction(row: row, action: action)
+            } else {
+                perform(action, on: row)
+            }
         }
+        .buttonStyle(OutlineButtonStyle(tint: action.isDestructive ? Glass.danger : Glass.text2))
     }
 
     private func pairedDeviceRow(_ row: PairedDeviceRow) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        // The ONE provenance-aware state the whole row reads (Sol pass 4 F1/F2): its warning copy, its
+        // status line, the activity-log line the model appends, and which actions it may offer all
+        // come from here, so no two of them can describe the device differently. A device fenced by a
+        // FAILED ENROLLMENT is `.enrollmentUnverified` — never the revoke row — because that row's
+        // Retry runs a durable, destructive removal nobody authorized for it.
+        let status = model.status(of: row.id)
+        return VStack(alignment: .leading, spacing: 4) {
             Text(row.name)
                 .font(.system(size: 13, weight: .semibold)).foregroundStyle(Glass.text1Bright)
             Text(row.fingerprint)
                 .font(.mono(10)).foregroundStyle(Glass.text2)
             Text("last seen \(row.lastSeen, format: .relative(presentation: .named))")
                 .font(.mono(9)).foregroundStyle(Glass.text3)
-            if model.revokeIncomplete(row.id) {
-                // Durable revoke threw — the fence is held (K unauthorizable), by this process's
-                // retained lease and/or the durable revocation intent that survives a restart. Retry
-                // re-runs the durable removal; Cancel is the LAContext-gated re-admit hatch.
-                //
-                // The incomplete states are NOT interchangeable (Sol re-review I5 follow-up; three-way
-                // split, Sol pass 3 N1). Proven-not-durable says the re-admission outright. UNKNOWN
-                // durability must hedge — an earlier attempt's intent may still be denying the device,
-                // so a categorical warning would be false — and when the last known pending set still
-                // lists this row, it must not raise re-admission at all, or the row would contradict
-                // its own pending state.
-                let durability = model.revokeDurability(row.id)
-                switch durability {
-                case .durable:
-                    EmptyView()
-                case .notDurable:
-                    Text("revoke NOT saved — regains access if Portview restarts")
-                        .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
-                        .fixedSize(horizontal: false, vertical: true)
-                case .unverified:
-                    Text("couldn't verify the revoke was saved — it MAY regain access if Portview restarts")
-                        .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
-                        .fixedSize(horizontal: false, vertical: true)
-                case .unverifiedFenceLastSeen:
-                    Text("couldn't re-check the saved revoke — the pairing store is unreadable")
-                        .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
-                        .fixedSize(horizontal: false, vertical: true)
+            if let warning = DeviceStatusCopy.rowWarning(status) {
+                Text(warning)
+                    .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                if let line = DeviceStatusCopy.rowStatusLine(status) {
+                    Text(line).font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
                 }
-                HStack(spacing: 8) {
-                    Text(Self.revokeStatusLine(durability))
-                        .font(.mono(9, .semibold)).foregroundStyle(Glass.dangerText)
-                    Spacer()
-                    Button("Retry") { model.retryRevoke(row.id) }
-                        .buttonStyle(OutlineButtonStyle(tint: Glass.degraded))
-                    Button("Cancel") { model.cancelRevoke(row.id) }
-                        .buttonStyle(OutlineButtonStyle(tint: Glass.text2))
-                }
-            } else {
-                HStack {
-                    Spacer()
-                    Button("Revoke") { pendingRevoke = row }
-                        .buttonStyle(OutlineButtonStyle(tint: Glass.danger))
-                }
+                Spacer()
+                ForEach(status.recoveryActions, id: \.self) { recoveryButton($0, row) }
             }
         }
         .padding(.vertical, 6).padding(.horizontal, 10)

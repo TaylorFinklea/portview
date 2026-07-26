@@ -67,12 +67,29 @@ public enum RevokeIncomplete: Error, Sendable, Equatable {
     }
 }
 
-/// The UI view of durably-recorded revocation intents. `.unreadable` is DELIBERATELY distinct from
-/// `.known([])`: when the intent item cannot be read, `authorizedMap()` denies EVERY device (fail
-/// closed, §6d), so rendering a clean empty list would tell the user "nothing pending, all good"
-/// at the exact moment nothing at all is authorized. Fail loud instead.
+/// The UI view of the ids `authorizedMap()` currently denies for a reason the surface must render.
+/// `.unreadable` is DELIBERATELY distinct from an empty `.known`: when the intent item cannot be read,
+/// `authorizedMap()` denies EVERY device (fail closed, §6d), so rendering a clean empty list would
+/// tell the user "nothing pending, all good" at the exact moment nothing at all is authorized. Fail
+/// loud instead.
+///
+/// **`.known` is TAGGED BY PROVENANCE, never one flat set (Sol pass 4 F1).** Two structurally
+/// different denials reach this accessor and they are NOT interchangeable:
+///
+/// - `durable` — a revoke was ASKED FOR (an authenticated `revoke`) and its intent is durably
+///   recorded, so the device is denied across a restart. Retrying the durable removal is continuing
+///   a decision the owner already authenticated.
+/// - `enrollmentFenced` — nobody ever asked to revoke this device. Its own `enroll` could not verify
+///   that no intent is pending, so THIS PROCESS fences it (`unverifiedIntentFence`, §6d item 8a). The
+///   only authenticated decision in its history is an ADMIT.
+///
+/// Unioning the two into one untagged set let the app default an enrollment fence to the ordinary
+/// "revoke incomplete" row — whose Retry ran a durable, destructive `revoke` with no confirmation and
+/// no `LAContext`, i.e. a destructive action reachable with zero local presence. The provenance is
+/// therefore part of the type, and the two sets are disjoint by construction (`durable` wins: a
+/// recorded intent IS an authenticated revoke).
 public enum PendingRevocations: Sendable, Equatable {
-    case known(Set<String>)
+    case known(durable: Set<String>, enrollmentFenced: Set<String>)
     case unreadable
 }
 
@@ -287,15 +304,27 @@ public actor PairingStore {
     /// (Sol re-review, enroll-false-success finding). The caller renders the store-unreadable state
     /// instead of a clean list.
     ///
-    /// Also surfaces this process's `unverifiedIntentFence` (N2): those rows are denied by
+    /// Also surfaces this process's `unverifiedIntentFence` (N2) — those rows are denied by
     /// `authorizedMap()` too, and a denial the surface cannot see is the same silent lie in a new
-    /// costume — the row needs its Retry / Cancel, and a successful Cancel is exactly what lifts that
-    /// fence (it proves, by reading the durable item, that no intent is pending).
+    /// costume — but under its OWN tag, never merged into the durable set (Sol pass 4 F1). A merged
+    /// set discards the one fact the caller needs to pick a recovery: whether an authenticated REVOKE
+    /// was ever requested for the id. It was not, for a fence — its history holds an authenticated
+    /// ADMIT — so continuing a "revoke" there would run a destructive durable removal nobody asked
+    /// for. What lifts a fence is a discharge (a genuine read of the durable item proving no intent is
+    /// pending), which is the same authenticated re-admit hatch `cancelRevocationIntent` provides.
+    ///
+    /// The two sets are DISJOINT: an id carrying a durably recorded intent is reported as `durable`
+    /// even if it also sits in the fence, because the recorded intent is the stronger, restart-surviving
+    /// fact — and it is the one that proves a revoke was genuinely requested.
     public func pendingRevocations() -> PendingRevocations {
         guard let intents = revocationIntents() else { return .unreadable }
-        let fenced = intents.union(unverifiedIntentFence)
-        guard !fenced.isEmpty else { return .known([]) }
-        return .known(fenced.intersection(enrolledMap().keys))
+        guard !intents.isEmpty || !unverifiedIntentFence.isEmpty else {
+            return .known(durable: [], enrollmentFenced: [])
+        }
+        let enrolled = Set(enrolledMap().keys)
+        let durable = intents.intersection(enrolled)
+        return .known(durable: durable,
+                      enrollmentFenced: unverifiedIntentFence.intersection(enrolled).subtracting(durable))
     }
 
     /// Drop a recorded revocation intent WITHOUT removing the enrollment (§1a step 5 Cancel): the
