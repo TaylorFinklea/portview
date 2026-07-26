@@ -22,6 +22,7 @@ apps/*/*-Info.plist
 
 # Claude Code workflow worktrees (transient; created by isolation: 'worktree')
 .claude/worktrees/
+.worktrees/
 
 # Secrets / signing
 *.p12
