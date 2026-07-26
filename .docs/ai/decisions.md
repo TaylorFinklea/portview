@@ -2,6 +2,276 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-25] Revoke + epoch registry (han.4): lease-fenced, invalidate-first, live-session kill (ACCEPTED)
+
+**Context**: the last sub-bead of the mutual-auth epic `portview-han`, and the one that makes
+enrollment meaningful — a device you can enroll but not *withdraw* is a one-way trust decision.
+Design `docs/superpowers/specs/2026-07-24-revoke-and-registry-design.md` (v3, dual-reviewed
+pre-implementation by Opus 5 + GPT-5.6 Sol), plan `docs/superpowers/plans/2026-07-24-revoke-and-
+registry.md` (11 tasks, subagent-driven-development). 18 commits `3e91819..613e3a5`.
+User decisions (2026-07-24): revoke is gated by **confirmation dialog + LAContext** (both, not
+either); revoking the **last** device leaves the host **locked out until an in-person re-pair**
+(no remote self-recovery — intended fail-closed).
+
+**The core problem**: revoke has two authorities — the durable `PairingStore` (keychain) and the
+in-process `HostControl` session registry — and a naive implementation writes both independently.
+Between those two writes a queued enrollment or an in-flight handshake can interleave and admit a
+session stamped with pre-revoke authority. The design makes revoke **one lease-owned, ordered
+operation** instead.
+
+**Decisions**
+
+1. **Order-A — the admission ticket is captured AT AUTHORIZATION, not at register.** `serveAuthGate`
+   stamps an immutable `AdmissionTicket(keyID:generation:)` immediately after signature verify and
+   *before* the durable `authorizedClient` lookup. The generation therefore reflects the
+   authorization instant, never the (much later) register instant (finding 1).
+2. **Fence-then-durable, not durable-then-fence** (finding 2). v1 did `await pairings.revoke` then
+   `control.revoke`; between those awaits a queued enrollment could stamp the *old* generation. The
+   synchronous bump + fence now come first, and the durable removal is ordered *inside* the
+   operation. It is the lease-owned fence — not durable-write ordering — that closes the window.
+3. **Invalidate-First on every terminal path.** One `SessionCapability` per session, threaded into
+   every irreducible effect boundary (CGEvent post, pasteboard write, file create + file write,
+   every outbound send). Every teardown — revoke, serve-defer, register-reject, post-await recheck,
+   legacy evict, disconnect-all — calls `capability.invalidate()` **before** any transport close,
+   `outbound.finish()`, or deregister. Closing first would drain; invalidation must land first.
+4. **Discard-not-drain, no graceful `bye`.** A revoked peer's buffered inbound is discarded and the
+   connection closed at once — unlike `disconnectAll`, which is polite. A de-trusted peer loses
+   access immediately.
+5. **Fail-closed on durable failure — durably, not just in-process.** If the keychain write throws,
+   `endRevoke` is **not** called: the in-process fence stays and the UI surfaces an "incomplete" row
+   offering Retry (same lease) or an LAContext-gated Cancel that deliberately re-admits. The live
+   kill and the generation bump already happened and are permanent, so a failed durable step can
+   never resurrect a *killed session*.
+   **This was originally in-process only, which made the guarantee false across a restart** (found by
+   the final review — see dispositions). A fresh process got a new `HostControl` with no fence and an
+   empty failure map while the authorization record was still present, so the next signed handshake
+   was admitted at generation 0 — the user asked to revoke, the UI said "incomplete", and a restart
+   silently re-admitted the device with no trace. Now a **revocation intent** is recorded in its own
+   keychain item (mirroring the lastSeen split) *before* the durable removal is attempted and cleared
+   only on success; while an intent is recorded the key is denied by `isAuthorized`/`authorizedClient`
+   even from a cold store. Retry therefore works lease-free after a restart, and Cancel is the
+   LAContext-gated clearing of the durable intent (which bails fail-closed if that write throws).
+   `enroll` clears a stale intent — the attended, LAContext-and-window-gated valve against a
+   permanent lockout.
+6. **`touch` can never resurrect a revoked key — by construction (H-a).** `lastSeen` moved into its
+   **own keychain item**. The earlier plan (make `touch` re-read before writing) was insufficient:
+   `SecItemUpdate` gives no cross-process CAS, so a warm CLI's whole-map write could clobber the
+   app's revoke. Now the authorization item is mutated *only* by `enroll`/`revoke`, and a cosmetic
+   lastSeen bump physically cannot rewrite the authorization set.
+   **The authorization mutations themselves had the same disease** (found by the final review):
+   `mutableState()` returned the warm process-local cache and never re-read before a whole-map write,
+   so P1 revoking K and writing `{J}` could be clobbered by P2 — warm on a stale `{K, J}` — revoking J
+   and writing `{K}`, durably resurrecting K with both calls reporting success. §9 had accepted
+   last-writer-wins *on a fresh read* as out of scope; a stale-cache read-modify-write is materially
+   wider than that. Every authorization/intent **mutation** now re-reads the durable item and
+   propagates failure; the **authorization read** path deliberately keeps its warm cache so a keychain
+   that locks mid-session cannot brick a live host. This narrows the window to the actual
+   read-modify-write; it does **not** make it atomic — a genuine cross-process CAS remains out of
+   scope and is filed as `portview-auf`.
+7. **No cross-process live invalidation** — explicitly out of scope and documented, not implied.
+   Revoke is authoritative for the process that owns hosting (the app). A separately-running CLI
+   with a warm cache still authorizes K until its cache goes cold. The UI copy stays honest: this is
+   not a fleet-wide kill switch.
+8. **No typed "revoked" wire signal** (no-oracle stance, consistent with han.3's deny/timeout
+   decision). The client infers revocation from the drop plus gate failure.
+9. **Per-key generation is in-memory and single-process, deliberately.** It does not survive a host
+   restart, and does not need to — a restart has no live sessions to protect.
+
+**Accepted residuals** (documented in design §10). **R7** cosmetic cross-process `lastSeen` race (a
+`touch` racing a delete can leave an inert orphan — pruning filed as `portview-1z1`). **R8** the
+out-of-lock withdrawal window, ≤ one already-in-flight irreducible effect per capability;
+invalidation deliberately happens *outside* `HostControl`'s lock because it may wait on an in-flight
+effect and nothing that can wait may run under that lock. **R9** a `next()` waiter parked at the
+instant of discard can receive one already-dequeued message, backstopped by the per-effect capability
+guard. **R11** an orphan revocation intent if the final clear write fails — inert (it names a key that
+is no longer enrolled, so it authorizes nobody, and the next enroll/revoke clears it).
+
+**R8's bound was asserted but did not actually hold, and the first fix for it was wrong.** Capability
+withdrawal was a single `invalidate()` that acquired the *same* lock `perform` holds for an effect's
+whole duration. So a batch teardown blocked on the first session whose effect was in flight (a stalled
+`FileHandle.write`), while every later session under the same key stayed valid **with its inbound still
+open** — a revoked device with two concurrent sessions kept full keyboard/pointer/clipboard/file
+control for the entire stall. An intermediate fix split the loop into invalidate-all-then-close-all,
+which was the wrong axis: it separated invalidation from *transport teardown* but not "mark" from
+"wait". Withdrawal is now genuinely two operations over two locks — a **non-blocking `markInvalid()`**
+(after which no new effect can start) and a **blocking `drainInFlightEffect()`** — and all three batch
+teardowns mark **every** snapshotted capability before draining any of them. The ≤1 bound is now real
+per capability, and the authoritative flag re-check *under* the effect lock is what enforces it.
+
+**R9 was an adjudication, not a concession.** A task reviewer rated it CRITICAL and prescribed
+serializing the discard with the receive queue. The implementer measured the prescription and it was
+**worse** (46/100 vs 1/100 leaked messages). Ruling as Lead: discard-not-drain clears the *backlog*
+completely; the parked-waiter case is a bounded single-message residual already caught by the layer-1
+guard. The design's over-claim was corrected and R9 registered rather than the code being changed to
+match a wrong claim. The re-review accepted the adjudication independently.
+
+**Review dispositions.** Design v3 dual-reviewed pre-implementation. Every one of the 11 tasks ran
+its own implementer → review → fix → re-review loop. The whole branch was then reviewed **twice, by
+different model lineages, and the two disagreed sharply — which is the single most valuable thing that
+happened to this bead.**
+
+**Pass 1 (Opus 5)** attacked all 8 load-bearing invariants and returned **SHIP-WITH-FIXES, 0
+CRITICAL**. Three findings folded TDD in `613e3a5`:
+
+- **I-1 (IMPORTANT)** — `control?.admissionTicket(for:) ?? AdmissionTicket(keyID:generation: 0)`
+  conflated two distinct `nil`s. `control` is always non-nil in production, so a **fenced** key's
+  `nil` was masked into a live `(K, 0)` ticket and the gate-level `.revoking` rejection was dead
+  code for four commits. `register`'s own fence still rejected the session, so admission was never
+  unsafe — but §1b step 4 specifies the gate as an independent layer, and in the
+  fenced-and-durably-removed window the masking routed the handshake to `.unknownKey` → the
+  enrollment ceremony instead of a clean reject. Fixed by extracting a named
+  `HostRunner.admissionTicketProvider` seam that keeps the two `nil`s distinct, with a test that
+  drives the **production** binding (an inline re-declared closure cannot catch a re-introduced
+  `??`). **Process note worth keeping**: the false "reached only by tests" comment was written by
+  the orchestrator during an earlier review fix, and three task-level reviews plus a Lead
+  verification passed over it. Optional-chaining collapsed into `??` is a recurring blind spot in
+  this bead — two of its findings had that exact shape.
+- **M-2** — `FileReceiver.offer` created its file un-gated, so a post-invalidate offer through the
+  R9 window left a 0-byte client-named file. Now self-guards its `createFile`, like `chunk`'s write.
+- **M-3** — `beginRevoke`'s out-of-lock teardown interleaved per session, leaving a second session
+  under the same key acting for the whole of the first's transport teardown. Now two passes:
+  invalidate **all**, then close all — restoring R8's documented per-capability bound.
+
+**Pass 2 (GPT-5.6 Sol, different lineage) returned RETURN** on the same branch Pass 1 had cleared —
+2 CRITICAL + 5 IMPORTANT + 2 MINOR, every one verified in code before acting. The two CRITICALs are
+decision items 5 and 6 above (the process-lifetime-only fail-closed guarantee, and the stale-cache
+authorization write that durably resurrects a revoked key); R8's broken bound is written up with the
+residuals. Also real and fixed: the host **shutdown** path closed transport before invalidating, so an
+already-dequeued `.typeText` could keep posting CGEvents past **Stop Hosting**; the serve loop had **no
+capability guard** on its session-control branches, letting a post-invalidation residual message start
+or reconfigure screen capture; `FileReceiver` left empty-final finalization and quota-crossing
+`dropTransfer` (close + **unlink**) ungated; and §1a contradicted §7 invariant 1 on Invalidate-First
+ordering. Fixed across two waves — `4ef66f1` (concurrency core) and `442b342` (durability), 29 new
+tests. Three findings were deliberately **routed** rather than rushed: `portview-5a5` (revoke between
+key-down and key-up leaves an unmatched press), `portview-auf` (a real cross-process CAS — needs its
+own design pass), `portview-1z1` (R7 orphan pruning).
+
+**Pass 2's RE-REVIEW returned RETURN a second time — two of those fixes were incomplete**, and both
+failures are instructive. **I4** had been "fixed" with `guard capability.isValid else { return };
+await effect()` — check-then-use around an *asynchronous* effect. The helper held no lock, so a
+concurrent drain returned immediately and the closure resumed *after* withdrawal: a revoked peer could
+still apply a crop or **start screen capture**. Because `perform` is synchronous-only by design, the
+real fix was to delete the helper and push each gate down to the synchronous instant before the OS
+call (`SCStream.startCapture`, the *issue* of `updateConfiguration`, the keyframe write, the feedback
+write). **I5** recorded its revocation intent best-effort and proceeded regardless, so the *correlated*
+failure — both writes failing, which is the likely case since both items live in the same keychain —
+recreated the exact process-lifetime-only bug the intent was introduced to fix. And the tests could not
+have caught it: they failed only the authorization store while leaving the intent store healthy.
+Closed in `99797aa` and `d518693`.
+
+**On I5, one reviewer demand was declined as unsatisfiable.** The proposed decisive test — fail both
+writes, restore the keychain, open a fresh store, assert the key is still denied — cannot be satisfied
+by *any* implementation: if nothing durable could be written, nothing durable can deny after a restart.
+Rather than contort the design chasing it, the guarantee was made **honest**: `revoke` now reports
+`.notDurable` distinctly from `.fencedDurably`, the UI says "revoke NOT saved — regains access if
+Portview restarts", Retry re-attempts the intent write and self-heals, and §1a/§6d/invariant 6b are now
+**conditional** on that write landing. A wrong guarantee stated confidently is worse than a narrower
+one stated plainly.
+
+**The sharpest finding in the re-review was about tests, not code.** Seven of the new regression tests
+passed without exercising their own counterexamples — `successfulRevokeLeavesNoIntentBehind` re-enrolled
+before asserting, and `enroll` itself clears the intent, so it passed even if `revoke` never cleared
+anything. This is the same defect described two paragraphs above, reproduced *inside the wave that was
+fixing it*, in work the orchestrator reviewed. The rewrite proved the old tests vacuous **empirically**
+— running the unmodified test file against a store with each mechanism removed and watching all five
+still pass — then verified each replacement with one-at-a-time mutations. That method, not the
+individual fixes, is the durable outcome.
+
+**Pass 3 returned RETURN a third time — no CRITICALs, and the findings had converged to two logic
+errors plus test rigor.** Closed in `4738d06`. (1) `.notDurable` **conflated "proven absent" with
+"unknown"**: `recordRevocationIntent` returned `false` both when a write failed and when the item
+could not be *read*, so after an earlier attempt had durably recorded K's intent, a failed re-read
+made the UI announce "regains access on restart" while a fresh process would in fact still read `{K}`
+and deny K. Wrong in the safe direction, but wrong — and honest reporting was the entire point of the
+preceding wave. Now three states are distinguished (confirmed / confirmed-absent / unknown) with
+conditional copy for the unknown case. (2) **A failed enrollment could still be authorized in the same
+process**: with `intentCache` warm at `[]`, `enroll` persisted K into the authorization cache, *then*
+its intent re-read failed and it threw `enrollmentStillFenced` — the ceremony reported `approved:
+false` while K's next handshake was admitted from the warm cache. Enrollment said it failed and the key
+worked. (3) `setViewport`'s tolerance-qualified no-op still did check-then-await; it now performs no
+state writes at all.
+
+**Four concurrency tests still could not fail.** Each marked the capability invalid *before* calling
+the gated operation, so the cheap early-out caught it and removing the authoritative inner `perform`
+left them green. Fixed with an internal `effectLockHook` seam (nil in production) that fires between
+the fast-path check and the lock acquisition, letting a test pin the exact interleaving instead of
+inferring it from sleeps. **Verified by running the mutation rather than reading the test**: deleting
+the under-lock re-check makes the rewritten barrier test fail with `secondRan == true` — the effect
+executing after withdrawal. The version this ADR's author had previously reviewed and called rigorous
+stayed green under that same mutation.
+
+**Two process lessons worth more than the findings.** (1) **Same-lineage review is not sufficient
+on a security boundary.** Sol's findings were not stylistic — they were two paths by which a revoked
+device keeps control or comes back. Pass 1, three task-level reviews, and the orchestrator's own
+verification all missed them. The cross-lineage second pass has now earned its keep on three of the
+four han sub-beads. (2) **Every finding that survived came from reading the primitive, not the layer
+above it.** I-1 was `control?.x ?? y` collapsing two distinct nils; C1 was `invalidate()` sharing a
+lock with `perform`; C2 was `mutableState()` returning a cache. Each was invisible to anyone reasoning
+about the *caller*, and each was covered by a green test that asserted the intent rather than the
+mechanism — including one the orchestrator reviewed and approved by name. Grep for `?? ` beside
+optional-chaining, and read what a lock actually guards, before trusting the layer above it.
+(Recorded as `bd remember optional-chain-nil-conflation`.)
+
+**One known limitation the fixes introduced**, accepted deliberately: the revocation-intent item now
+sits on the authorization path, so an intent item that **exists but is corrupt** denies every device.
+Fail-closed is correct here (treating a corrupt intent set as empty would re-admit a key whose revoke
+was pending) and it is symmetric with the pre-existing corrupt-authorization-item behavior — but the
+brick surface went from one item to two, and the attended LAContext-gated repair path is deferred to
+`portview-oj5`. The re-review also caught that this state made `enroll` report **success while the
+intent gate kept denying the key just enrolled** — the UI lying about an authorization outcome, which
+is precisely the class this bead exists to prevent. Now `enroll`'s intent clear throws
+`enrollmentStillFenced`, and the ceremony's existing fail-closed `catch` turns it into an honest
+enrollment failure.
+
+**Pass 4 returned RETURN a fourth time, on a defect the previous wave had *created*.** Widening
+`pendingRevocations()` so a process-only fence would be visible merged two different kinds of "pending"
+into one untagged set. A failed-enrollment fence therefore rendered as an ordinary durable
+"revoke incomplete" row offering **Retry** — and `retryRevoke` called `pairings.revoke` with no
+confirmation, no `LAContext` and no `beginRevoke`. That was safe only while Retry could exclusively
+continue a *previously authenticated revoke*; a failed enrollment carries an authenticated **admit**
+decision, never a revoke one. So a destructive durable revoke became reachable with zero local
+presence — the exact hole the LAContext gate exists to close, under the same injected-click threat
+model as han.3's GLM2 finding. Closed in `9c340b9`: provenance is preserved end-to-end
+(`PendingRevocations.known(durable:enrollmentFenced:)`, sets disjoint), a failed-enrollment fence gets
+its own state and its own recovery — `finishPairing`, an LAContext-gated discharge that *finishes the
+admit* rather than executing a revoke nobody authorized — and both `pairings.revoke` call sites now sit
+behind a fresh positive `LAContext`. The same commit made the row copy and the activity-log copy render
+from one provenance-aware state, so they can no longer contradict each other.
+
+**The root cause was structural, and fixing it is the most durable thing in this bead.**
+`apps/PortviewHost/project.yml` declared only an application target — no tests. Every finding in review
+cycles 3, 4 and 5 lived in that layer, which is why five rounds of careful reading kept missing them.
+`9c340b9` adds a `PortviewHostTests` logic bundle (23 tests, no `TEST_HOST`, the app never launches)
+and a `make test-host` verify leg. It earned its keep immediately: the `.unverified` warning — the
+loudest thing this feature can say, that a revoke did not persist and the device may return — was 149
+characters plus the device name against `ContentView`'s 160-character display filter, so for any device
+name longer than about six characters **it was being silently discarded before reaching the screen**.
+No reviewer found that in five cycles; the first test run did.
+
+**And that fix was itself vacuous — the cleanest example in the whole bead.** Pass 5 found the same
+warning still dropped for a realistic name. The wave had shortened the prose until its own test passed,
+and that test used a comfortable 24-character sample; `DeviceNameSanitizer`'s actual contract is **64**.
+Re-pinning the test at the real bound turned one reported failure into **six**: at 64 characters *every*
+log line this feature emits was being discarded, and `.unverified` already vanished at 35 — "Taylor's
+Personal iPhone 17 Pro Max". The test had moved; the bug had not. `logLine` now builds through a
+name-taking closure and re-interpolates a shortened name when the full one would overflow, so the line
+clears the filter **by construction** for any name the sanitizer can produce; when something must give
+it is the device name, never the warning, with a 12-character floor so the message still identifies its
+device. **The lesson is not "test the edge case" — it is that a test written to pass is not a test.**
+Assert the contract the production code actually permits, then delete the mechanism and watch it fail.
+
+**Verify at close** (four legs, all on final HEAD `acc4fac`, 25 commits, each re-run by the
+orchestrator rather than taken from an agent report): `swift package clean && swift test --no-parallel`
+→ **716 tests / 110 suites** (`SWIFT=0`); `make build-host` SUCCEEDED (`BUILD_HOST=0`); `make test-ios`
+**81 tests, 0 failures** (`TEST_IOS=0`); `make test-host` **24 tests, 0 failures** (`TEST_HOST=0`, new leg). Capture real exit codes — `make … | tail` reports
+the *pipeline's* status, i.e. `tail`'s, and reading that as a passing build is how a leg gets marked
+green without evidence.
+(The clean build matters: SPM served *stale test objects* after `PairingStore`'s stored properties
+changed, producing 6 phantom failures. After a stored-property change, clean before trusting a red
+*or* a green.) Hardware checks are human-gated — bead `portview-myt` (live-session kill,
+durable-failure Retry/Cancel, last-device lockout banner, confirm-dialog presentation, Touch ID on
+revoke and cancel).
+
 ## [2026-07-23] Enrollment ceremony (han.3): local-presence prompt + dual-fingerprint compare (ACCEPTED)
 
 **Context**: spec §4-RESOLVED Option (a), implemented via the brainstorming → design-v2 → plan →
