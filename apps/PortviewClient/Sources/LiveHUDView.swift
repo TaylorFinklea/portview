@@ -14,6 +14,8 @@ struct LiveHUDView: View {
     @Binding var keyboardActive: Bool
     @Binding var armed: KeyModifiers
     @Binding var showFileImporter: Bool
+    @State private var keyboardTransition = KeyboardViewportTransition.empty
+    @State private var cropViewportSize: CGSize = .zero
 
     private let modifierKeys: [(label: String, mod: KeyModifiers)] = [
         ("⌘", .command), ("⇧", .shift), ("⌥", .option), ("⌃", .control)
@@ -24,14 +26,18 @@ struct LiveHUDView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let size = geo.size
-            // Used here only for the host crop request; the renderer's eased cursor-follow window is
-            // driven from the session (renderer.targetWindow).
-            let zoomGeometry = ZoomGeometry(
-                view: size, displaySize: session.displaySize,
+            let viewportSize = CGSize(
+                width: geo.size.width,
+                height: max(1, keyboardTransition.effectiveHeight(
+                    in: CGRect(origin: .zero, size: geo.size))))
+            let cropSize = cropViewportSize == .zero ? viewportSize : cropViewportSize
+            // Rendering follows the keyboard immediately; host re-cropping waits for the transition
+            // to settle so notification bursts cannot drive repeated capture reconfiguration.
+            let cropGeometry = ZoomGeometry(
+                view: cropSize, displaySize: session.displaySize,
                 cursor: session.cursorNormalized, zoom: zoom)
 
-            ZStack {
+            ZStack(alignment: .top) {
                 TrackpadVideoView(
                     renderer: session.renderer,
                     zoom: zoom,
@@ -40,15 +46,15 @@ struct LiveHUDView: View {
                     onClick: { session.sendClick() },
                     onZoom: { zoom = min(6, max(1, $0)) }
                 )
-                .frame(width: size.width, height: size.height)
+                .frame(width: viewportSize.width, height: viewportSize.height)
                 // Zoom is applied in the Metal shader (sampleRect), NOT as a CA scaleEffect — so the
                 // present is synchronized (no tear) and the on-screen window is invariant to host
                 // re-crops (no jump). The session computes the sample rect per-frame against each
                 // frame's own region (atomic); the view just supplies the zoom + its size.
                 .onChange(of: zoom) { _, z in session.magnifierZoom = z }
-                .onChange(of: size) { _, s in session.magnifierViewSize = s }
-                .onChange(of: zoomGeometry.cropRequest) { _, crop in
-                    session.requestViewport(crop: crop, window: zoomGeometry.visibleWindow)
+                .onChange(of: viewportSize) { _, s in session.magnifierViewSize = s }
+                .onChange(of: cropGeometry.cropRequest) { _, crop in
+                    session.requestViewport(crop: crop, window: cropGeometry.visibleWindow)
                 }
                 .allowsHitTesting(!isReconnecting && !isHostLocked)
                 .overlay {
@@ -70,12 +76,24 @@ struct LiveHUDView: View {
                     onSpecial: { key in
                         session.sendKey(key, modifiers: armed)
                         armed = []
+                    },
+                    onViewportTransition: { transition in
+                        if let animation = transition.animation {
+                            withAnimation(animation) {
+                                keyboardTransition = transition
+                            }
+                        } else {
+                            keyboardTransition = transition
+                        }
                     }
                 )
                 .frame(width: 0, height: 0)
 
-                chrome(size: size)
+                chrome(size: viewportSize)
+                    .frame(width: viewportSize.width, height: viewportSize.height)
             }
+            .frame(width: viewportSize.width, height: viewportSize.height, alignment: .top)
+            .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
             .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item]) { result in
                 if case .success(let url) = result {
                     guard url.startAccessingSecurityScopedResource() else { return }
@@ -87,8 +105,16 @@ struct LiveHUDView: View {
             }
             .onAppear {
                 session.renderer.samplerMode = samplerMode
-                session.magnifierViewSize = size
+                session.magnifierViewSize = viewportSize
                 session.magnifierZoom = zoom
+            }
+            .task(id: viewportSize) {
+                let duration = keyboardTransition.duration
+                if duration > 0 {
+                    try? await Task.sleep(for: .seconds(duration))
+                }
+                guard !Task.isCancelled else { return }
+                cropViewportSize = viewportSize
             }
         }
         .ignoresSafeArea()
