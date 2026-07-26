@@ -264,22 +264,49 @@ enum DeviceStatusCopy {
     /// The activity-log entry for a device that just ENTERED this status; `nil` when the status is not
     /// worth a log line.
     static func logLine(_ status: DeviceRowStatus, deviceName: String) -> String? {
+        guard let build = logLineBuilder(status) else { return nil }
+        return fitToActivityLog(build, deviceName: deviceName)
+    }
+
+    /// Each status's prose as a FUNCTION of the device name, so the name can be re-interpolated at a
+    /// shorter length when the full one would overflow the filter (see `fitToActivityLog`).
+    private static func logLineBuilder(_ status: DeviceRowStatus) -> ((String) -> String)? {
         let restart = restartPhrase(status.restartClaim)
         switch status {
         case .authorized:
             return nil
         case .revokeIncomplete(.durable):
-            return "\(deviceName) is now blocked even if Portview restarts, but the revoke still hasn't finished — keep retrying."
+            return { "\($0) is now blocked even if Portview restarts, but the revoke still hasn't finished — keep retrying." }
         case .revokeIncomplete(.notDurable):
             guard let restart else { return nil }
-            return "Couldn't record that revoke — \(deviceName) is blocked now, but \(restart.log). Retry until this clears."
+            return { "Couldn't record that revoke — \($0) is blocked now, but \(restart.log). Retry until this clears." }
         case .revokeIncomplete(.unverified):
             guard let restart else { return nil }
-            return "Couldn't check whether that revoke saved — \(deviceName) is blocked now, but \(restart.log). Retry until this clears."
+            return { "Couldn't check whether that revoke saved — \($0) is blocked now, but \(restart.log). Retry until this clears." }
         case .revokeIncomplete(.unverifiedFenceLastSeen):
-            return "Couldn't re-check that revoke — the pairing store is unreadable. \(deviceName) stays blocked; its saved revoke is still on record."
+            return { "Couldn't re-check that revoke — the pairing store is unreadable. \($0) stays blocked; its saved revoke is still on record." }
         case .enrollmentUnverified:
-            return "\(deviceName) never finished pairing and is blocked here. Confirm you're at this Mac to finish it, or revoke it."
+            return { "\($0) never finished pairing and is blocked here. Confirm you're at this Mac to finish it, or revoke it." }
         }
     }
+
+    /// Make the line clear `ContentView`'s length filter **by construction**, for any name
+    /// `DeviceNameSanitizer` can produce (it truncates to 64 clusters). A warning the filter drops is
+    /// a warning nobody reads, and these warnings are the entire point of the feature — so when
+    /// something has to give it is the DEVICE NAME, never the warning. Pinning the test at a
+    /// comfortable 24-character sample hid this: at the sanitizer's real 64-character contract EVERY
+    /// log line in this feature was being silently discarded (Sol pass 5).
+    private static func fitToActivityLog(_ build: (String) -> String, deviceName: String) -> String {
+        let full = build(deviceName)
+        guard full.count >= activityLogCharacterLimit else { return full }
+        let overflow = full.count - activityLogCharacterLimit + 1  // strictly under, not equal to
+        let keep = max(minimumIdentifyingNameLength, deviceName.count - overflow - 1)  // -1 for the ellipsis
+        guard keep < deviceName.count else { return full }
+        return build(String(deviceName.prefix(keep)) + "…")
+    }
+
+    /// Never shorten a name past this: a warning that cannot identify its device is barely better than
+    /// one that never rendered. If prose ever grows enough that this floor can't fit,
+    /// `DeviceStatusCopyTests` fails rather than letting a line vanish again.
+    private static let minimumIdentifyingNameLength = 12
 }

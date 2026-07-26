@@ -77,12 +77,29 @@ final class DeviceStatusCopyTests: XCTestCase {
     /// for any device name longer than about six characters — so the loudest warning in the feature
     /// silently vanished for a device called "Taylor's iPhone".
     func testEveryLogLineSurvivesTheActivityLogFilterForALongDeviceName() {
-        let longName = String(repeating: "M", count: 24)  // "Taylor's iPhone 17 Pro" and then some
+        // Pin the SANITIZER'S ACTUAL CONTRACT, not a comfortable sample. `DeviceNameSanitizer`
+        // truncates to 64 grapheme clusters, so 64 is the longest name production can ever hand us —
+        // testing 24 proved only that the line fits for short names (Sol pass 5). A realistic
+        // "Taylor's Personal iPhone 17 Pro Max" is 35 and was still being silently dropped.
+        for count in [24, 35, 64] {
+            let longName = String(repeating: "M", count: count)
+            for status in DeviceRowStatus.all {
+                guard let line = DeviceStatusCopy.logLine(status, deviceName: longName) else { continue }
+                XCTAssertLessThan(line.count, DeviceStatusCopy.activityLogCharacterLimit,
+                                  "log line for \(status) at name length \(count) is dropped by the activity-log filter: \(line)")
+                XCTAssertFalse(line.contains("\n"), "multi-line log entries are filtered out too")
+            }
+        }
+    }
+
+    /// Fitting the line must not silently amputate the name to nothing — the user has to be able to
+    /// tell WHICH device the warning is about.
+    func testAFittedLogLineStillIdentifiesTheDevice() {
+        let longName = String(repeating: "M", count: 64)
         for status in DeviceRowStatus.all {
             guard let line = DeviceStatusCopy.logLine(status, deviceName: longName) else { continue }
-            XCTAssertLessThan(line.count, DeviceStatusCopy.activityLogCharacterLimit,
-                              "log line for \(status) is dropped by the activity-log filter: \(line)")
-            XCTAssertFalse(line.contains("\n"), "multi-line log entries are filtered out too")
+            XCTAssertTrue(line.contains(String(repeating: "M", count: 12)),
+                          "log line for \(status) no longer identifies the device: \(line)")
         }
     }
 
