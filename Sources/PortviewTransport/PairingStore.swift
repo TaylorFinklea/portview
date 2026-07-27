@@ -119,6 +119,23 @@ public struct EnrolledClient: Codable, Equatable, Sendable {
 protocol PairingRecordStore: Sendable {
     func read() throws -> Data?
     func write(_ data: Data) throws
+
+    /// Remove the item outright, treating "no such item" as success. Used ONLY by the attended
+    /// `resetPairingState` repair, and only after a plain `write` has already failed.
+    ///
+    /// It exists because `write` is SecItemUpdate-then-Add, and `SecItemUpdate` can fail on exactly
+    /// the damaged items a reset exists to cure (`errSecDecode`, `errSecAuthFailed`, ACL damage) —
+    /// an item whose `SecItemCopyMatching` throws may be equally un-updatable. Deleting first lets
+    /// the follow-up `write` take its `SecItemAdd` path against a clean slot.
+    ///
+    /// The default is a NO-OP, which is exactly correct for any store whose `write` unconditionally
+    /// replaces the blob (every in-memory store here): there is no update-vs-add distinction to
+    /// escape, so there is nothing to delete. Keychain-backed stores override it.
+    func delete() throws
+}
+
+extension PairingRecordStore {
+    func delete() throws {}
 }
 
 /// Revocable enrollment gate. `actor` (matches the actor direction the transport is moving to) so
@@ -494,6 +511,65 @@ public actor PairingStore {
         case .unknown: return .durabilityUnknown(reason: reason)
         }
     }
+    /// Attended, locally-present break-glass repair: return the store to "no devices enrolled, gate
+    /// still `.required`" WITHOUT reading any of it first.
+    ///
+    /// Not reading is the whole point. Reading is precisely what is broken in the modes this cures:
+    /// an unreadable authorization or revocation-intent item denies EVERY device (fail-closed, by
+    /// design), and `enroll` cannot repair the intent item because it must discharge through that
+    /// same unreadable item. Before this the only exit was deleting the keychain items by hand.
+    /// This is the sanctioned exception to "mutations never write from a warm cache" (design §7
+    /// invariant 6c, carved out in §6d item 9): it DISCARDS rather than merges, so there is no lost
+    /// update to lose — every pending revocation intent is deliberately dropped, which is also why
+    /// it must be attended and locally-present.
+    ///
+    /// **`migrationComplete` is forced TRUE, never cleared.** Clearing it would return the host to
+    /// `.bootstrap`, where a peer that completes pinned TLS and then simply stays SILENT on the
+    /// challenge is admitted un-authenticated. A reset restores a broken store; it must not lower
+    /// the auth bar. Re-pairing runs through the attended SAS + enrollment ceremony, which needs no
+    /// bootstrap.
+    ///
+    /// Per item the order is write-first, escalating to delete-then-write only if the write fails.
+    /// Deleting unconditionally would widen the window in which the authorization item is ABSENT —
+    /// and `readPersisted` decodes an absent item as `migrationComplete: false`, so an unconditional
+    /// delete whose follow-up write failed would reopen bootstrap by way of the repair itself.
+    ///
+    /// Throws if the authorization or intent item could not be repaired; `lastSeen` is cosmetic and
+    /// best-effort. CROSS-PROCESS: this updates the durable items, but another live Portview process
+    /// keeps authorizing from its own warm cache until it exits (design §9, invariant 15) — callers
+    /// must tell the user to quit any other Portview host rather than implying otherwise.
+    public func resetPairingState() throws {
+        let token = try acquireMutationLock()
+        defer { mutationLock.release(token) }
+
+        let cleared = Persisted(clients: [:], migrationComplete: true)
+        try repair(store, with: JSONEncoder().encode(cleared))
+        cache = cleared
+
+        try repair(intentStore, with: JSONEncoder().encode(Set<String>()))
+        intentCache = []
+
+        // Both durable items are now known-good, so no id's intent state is unverified any more.
+        // Belt-and-braces: the shipped caller quits, which discards this process-local set anyway.
+        unverifiedIntentFence.removeAll()
+
+        // lastSeen is cosmetic (§6c) — failing a break-glass repair on it would be pointless.
+        try? repair(lastSeenStore, with: JSONEncoder().encode([String: Date]()))
+    }
+
+    /// Overwrite one item with a known-good encoding, escalating to delete-then-write only when the
+    /// plain write fails. `write` is SecItemUpdate-then-Add, and `SecItemUpdate` can fail on the
+    /// same damaged items whose `SecItemCopyMatching` fails; deleting first gives the retry a clean
+    /// slot to `SecItemAdd` into. See `PairingRecordStore.delete`.
+    private func repair(_ target: PairingRecordStore, with data: Data) throws {
+        do {
+            try target.write(data)
+        } catch {
+            try target.delete()
+            try target.write(data)
+        }
+    }
+
     private func acquireMutationLock() throws -> Int32 {
         do {
             return try mutationLock.acquire()
@@ -699,6 +775,20 @@ public actor PairingStore {
     }
 }
 
+/// Shared deletion for the three pairing keychain items (see `PairingRecordStore.delete`). An
+/// absent item is success — the caller wants the slot empty, not proof it was occupied.
+private func deleteKeychainPairingItem(service: String, account: String) throws {
+    let query: [String: Any] = [
+        kSecClass as String: kSecClassGenericPassword,
+        kSecAttrService as String: service,
+        kSecAttrAccount as String: account,
+    ]
+    let status = SecItemDelete(query as CFDictionary)
+    guard status == errSecSuccess || status == errSecItemNotFound else {
+        throw PairingStoreError.keychainError(status)
+    }
+}
+
 /// Keychain-backed store: one generic-password item holding the encoded enrolled-client map,
 /// device-only (`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`), in its own `service` distinct
 /// from the TLS-identity item. Mirrors `KeychainIdentityStore`.
@@ -746,6 +836,8 @@ struct KeychainPairingStore: PairingRecordStore {
         }
         throw PairingStoreError.keychainError(update)
     }
+
+    func delete() throws { try deleteKeychainPairingItem(service: service, account: account) }
 }
 
 /// Keychain-backed store for the SEPARATE lastSeen item (§6c, han.4 H-a): a distinct `service`
@@ -796,6 +888,8 @@ struct KeychainLastSeenStore: PairingRecordStore {
         }
         throw PairingStoreError.keychainError(update)
     }
+
+    func delete() throws { try deleteKeychainPairingItem(service: service, account: account) }
 }
 
 /// Keychain-backed store for the SEPARATE pending-revocation-intent item (§6d, Sol re-review I5): a
@@ -849,6 +943,8 @@ struct KeychainRevokeIntentStore: PairingRecordStore {
         }
         throw PairingStoreError.keychainError(update)
     }
+
+    func delete() throws { try deleteKeychainPairingItem(service: service, account: account) }
 }
 
 /// Ephemeral in-memory fallback for the `lastSeenStore` / `revokeIntentStore` seams — the default

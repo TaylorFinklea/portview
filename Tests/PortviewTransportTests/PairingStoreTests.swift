@@ -17,6 +17,7 @@ import PortviewProtocol
         var failRead = false
         var failWrite = false
         private(set) var writeCount = 0
+        private(set) var deleteCount = 0
 
         init(_ blob: Data? = nil) { self.blob = blob }
 
@@ -31,9 +32,49 @@ import PortviewProtocol
             blob = data
             writeCount += 1
         }
+        func delete() throws {
+            lock.lock(); defer { lock.unlock() }
+            blob = nil
+            deleteCount += 1
+        }
         func rawBlob() -> Data? { lock.lock(); defer { lock.unlock() }; return blob }
     }
     private enum TestStoreError: Error { case injected }
+
+    /// The damaged-item class `resetPairingState` exists to cure, and the ONLY fake that can tell a
+    /// correct reset from a lazy one: `read` AND `write` both throw while the damaged item is still
+    /// present — mirroring a keychain item whose `SecItemCopyMatching` and `SecItemUpdate` both fail
+    /// (errSecDecode / ACL damage) — and both start working only once `delete` has cleared the slot.
+    ///
+    /// A reset that just calls `write` can never repair this store, so any test using it fails
+    /// unless the implementation actually escalates to delete-then-write.
+    private final class DamagedStore: PairingRecordStore, @unchecked Sendable {
+        private let lock = NSLock()
+        private var blob: Data?
+        private var damaged: Bool
+        private(set) var deleteCount = 0
+        private(set) var writeCount = 0
+
+        init(damaged: Bool = true) { self.damaged = damaged }
+
+        func read() throws -> Data? {
+            lock.lock(); defer { lock.unlock() }
+            if damaged { throw TestStoreError.injected }
+            return blob
+        }
+        func write(_ data: Data) throws {
+            lock.lock(); defer { lock.unlock() }
+            if damaged { throw TestStoreError.injected }
+            blob = data
+            writeCount += 1
+        }
+        func delete() throws {
+            lock.lock(); defer { lock.unlock() }
+            damaged = false           // the slot is now clean and writable
+            blob = nil
+            deleteCount += 1
+        }
+    }
 
     /// In-memory `PairingRecordStore` for the SEPARATE lastSeen item (§6c, han.4 H-a); mirrors
     /// `MemoryStore` above. Adds an optional read-pause hook — armed only by the cross-process
@@ -182,6 +223,149 @@ import PortviewProtocol
         try await pairing.revoke(id: c.id)
         #expect(await pairing.list().isEmpty)                    // no devices authorized
         #expect(await pairing.enrollmentSnapshot() == .populated) // but migration is permanent
+    }
+
+    // MARK: - resetPairingState (attended break-glass repair)
+
+    @Test func resetPairingStatePreservesMigrationComplete() async throws {
+        // THE test defending the reset's central architectural call. The reset must NOT reopen the
+        // legacy bootstrap: in `.bootstrap` a peer that completes pinned TLS and then simply stays
+        // SILENT on the challenge is admitted un-authenticated (HostRunner.serveAuthGate). A reset
+        // exists to restore a broken store, not to lower the auth bar — recovery runs through the
+        // attended SAS + enrollment ceremony, which needs no bootstrap.
+        let auth = MemoryStore()
+        let pairing = PairingStore(store: auth, now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        #expect(await pairing.enrollmentSnapshot() == .populated)
+
+        try await pairing.resetPairingState()
+
+        #expect(await pairing.list().isEmpty)                     // every device is gone …
+        #expect(await pairing.enrollmentSnapshot() == .populated) // … but the gate stays .required
+    }
+
+    @Test func resetPairingStateMigrationMarkerSurvivesARestart() async throws {
+        // The marker must be DURABLE, not just warm in the actor that performed the reset — a fresh
+        // actor over the same backing store (i.e. the host relaunching after the reset quits it,
+        // which is exactly the shipped flow) must still read migration-complete.
+        let auth = MemoryStore()
+        let first = PairingStore(store: auth, now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        try await first.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        try await first.resetPairingState()
+
+        let second = PairingStore(store: auth, now: { Date(timeIntervalSince1970: 3000) })
+        #expect(await second.list().isEmpty)
+        #expect(await second.enrollmentSnapshot() == .populated)
+    }
+
+    @Test func resetPairingStateRepairsAnUnreadableIntentItem() async throws {
+        // The documented permanent-lockout mode (current-state.md): the intent item is on the auth
+        // path, so an unreadable one denies EVERY device — and `enroll` can't repair it either,
+        // because it must discharge the intent through that same unreadable item. Before this
+        // reset the only exit was deleting the keychain item by hand.
+        let auth = MemoryStore()
+        let intents = DamagedStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let c = newClient()
+        // Fail-closed while the intent item is unreadable: nobody is authorized, enroll throws.
+        await #expect(throws: (any Error).self) {
+            try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        }
+        #expect(await pairing.isAuthorized(id: c.id) == false)
+
+        try await pairing.resetPairingState()
+
+        // The item was un-writable until it was DELETED — a write-only reset cannot get here.
+        #expect(intents.deleteCount == 1)
+        // And the store is usable again: a fresh enrollment now authorizes.
+        let d = newClient()
+        try await pairing.enroll(publicKey: d.publicKey, deviceName: "iPad")
+        #expect(await pairing.isAuthorized(id: d.id) == true)
+    }
+
+    @Test func resetPairingStateRepairsAnUnreadableAuthorizationItem() async throws {
+        let auth = DamagedStore()
+        let pairing = PairingStore(store: auth, now: { Date(timeIntervalSince1970: 2000) })
+        #expect(await pairing.list().isEmpty)  // fail-closed while damaged
+
+        try await pairing.resetPairingState()
+
+        #expect(auth.deleteCount == 1)
+        #expect(await pairing.enrollmentSnapshot() == .populated)  // repaired, and still .required
+        let c = newClient()
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPhone")
+        #expect(await pairing.isAuthorized(id: c.id) == true)
+    }
+
+    @Test func resetPairingStateDoesNotDeleteAHealthyItem() async throws {
+        // Escalation is for damage only. Deleting unconditionally would widen the window in which
+        // the authorization item is ABSENT — and an absent item decodes as migrationComplete:false,
+        // i.e. bootstrap reopened. A plain write keeps the slot occupied the whole time.
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        try await pairing.enroll(publicKey: newClient().publicKey, deviceName: "iPhone")
+
+        try await pairing.resetPairingState()
+
+        #expect(auth.deleteCount == 0)
+        #expect(intents.deleteCount == 0)
+    }
+
+    @Test func resetPairingStateLetsAPreviouslyFencedKeyEnrollAgain() async throws {
+        // Test-honesty note: this asserts the USER-FACING property (a key wedged by a half-completed
+        // enroll can pair again after a reset), NOT that `resetPairingState` is what clears
+        // `unverifiedIntentFence`. It cannot prove the latter — once the reset has repaired the
+        // intent item, the re-enroll's own `dischargeRevocationIntent` lifts the fence per-id, so
+        // the test passes with or without the wholesale clear. The clear is kept in the
+        // implementation as cheap defence for a caller that does NOT quit afterwards; the shipped
+        // caller quits, which discards the process-local fence outright.
+        let auth = MemoryStore()
+        let intents = MemoryStore()
+        let pairing = PairingStore(store: auth, revokeIntentStore: intents,
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        let seed = newClient()
+        try await pairing.enroll(publicKey: seed.publicKey, deviceName: "Seed iPhone")
+        intents.failRead = true
+        let c = newClient()
+        await #expect(throws: (any Error).self) {
+            try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPad")
+        }
+        #expect(await pairing.isAuthorized(id: c.id) == false)  // fenced
+        intents.failRead = false
+
+        try await pairing.resetPairingState()
+
+        // Re-enrolling the SAME key must now work — the fence is keyed by id and would otherwise
+        // outlive the reset.
+        try await pairing.enroll(publicKey: c.publicKey, deviceName: "iPad")
+        #expect(await pairing.isAuthorized(id: c.id) == true)
+    }
+
+    @Test func resetPairingStateFailsClosedWhenTheMutationLockIsUnavailable() async throws {
+        // Same discipline as every other mutation: no lock, no writes. A reset that bypassed the
+        // lock would undo the cross-process serialization and could race a concurrent enroll.
+        let auth = MemoryStore()
+        let pairing = PairingStore(store: auth, lastSeenStore: MemoryStore(),
+                                   revokeIntentStore: MemoryStore(),
+                                   mutationLock: FailingMutationLock(),
+                                   now: { Date(timeIntervalSince1970: 2000) })
+        await #expect(throws: (any Error).self) { try await pairing.resetPairingState() }
+        #expect(auth.writeCount == 0)
+        #expect(auth.deleteCount == 0)
+    }
+
+    @Test func resetPairingStateThrowsWhenTheAuthorizationItemCannotBeRepaired() async throws {
+        // Honest failure. The caller quits the host on BOTH outcomes, so a store that could not be
+        // repaired is never served — but it must not be reported as a success.
+        let auth = MemoryStore()
+        auth.failWrite = true
+        let pairing = PairingStore(store: auth, now: { Date(timeIntervalSince1970: 2000) })
+        await #expect(throws: (any Error).self) { try await pairing.resetPairingState() }
     }
 
     @Test func migrationMarkerPersistsAcrossReload() async throws {

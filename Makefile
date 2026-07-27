@@ -34,15 +34,22 @@ check-tools:
 
 generate: $(HOST_PBXPROJ) $(CLIENT_PBXPROJ)
 
-# Regenerate only when the project definition or the shared xcconfig changes.
-$(HOST_PBXPROJ): apps/PortviewHost/project.yml apps/Portview.xcconfig | check-tools
+# XcodeGen enumerates the Sources/Tests trees, so the generated project depends on WHICH FILES
+# EXIST there, not just on project.yml — a new file must trigger a regenerate or the xcodebuild
+# legs below silently compile a project that omits it.
+HOST_INPUTS   := $(shell find apps/PortviewHost/Sources apps/PortviewHost/Tests -type f 2>/dev/null)
+CLIENT_INPUTS := $(shell find apps/PortviewClient/Sources apps/PortviewClient/Tests -type f 2>/dev/null)
+
+$(HOST_PBXPROJ): apps/PortviewHost/project.yml apps/Portview.xcconfig $(HOST_INPUTS) | check-tools
 	cd apps/PortviewHost && xcodegen generate
 
-$(CLIENT_PBXPROJ): apps/PortviewClient/project.yml apps/Portview.xcconfig | check-tools
+$(CLIENT_PBXPROJ): apps/PortviewClient/project.yml apps/Portview.xcconfig $(CLIENT_INPUTS) | check-tools
 	cd apps/PortviewClient && xcodegen generate
 
+# --no-parallel on purpose: PipelineLatencyTests asserts a wall-clock bound and flakes under
+# parallel load (bead portview-yur). A release gate has to be deterministic before it is fast.
 test-package:
-	swift test --package-path .
+	swift test --package-path . --no-parallel
 
 build-host: $(HOST_PBXPROJ)
 	xcodebuild build -project $(HOST_PROJECT) -scheme PortviewHost -destination 'platform=macOS'
