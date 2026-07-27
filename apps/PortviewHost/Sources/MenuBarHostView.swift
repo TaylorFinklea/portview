@@ -19,6 +19,9 @@ struct MenuBarHostView: View {
     /// is carried here too (Sol pass 4 F1): it runs the same durable, destructive `PairingStore.revoke`
     /// as Revoke, so it owes the same confirmation.
     @State private var pendingDestructive: PendingDestructiveAction?
+    /// Separate from `pendingDestructive`, which is device-scoped (every `RecoveryAction` needs a
+    /// `PairedDeviceRow`); the store-wide reset has no row.
+    @State private var resetConfirmationShown = false
 
     /// One queued destructive action. `RecoveryAction.requiresConfirmation` is what decides whether a
     /// button routes through here at all, so the dialog can never be skipped for a destructive action
@@ -368,6 +371,25 @@ struct MenuBarHostView: View {
                 }
                 .buttonStyle(NeutralButtonStyle())
             }
+            // Break-glass repair. It lives in the FOOTER, not in `pairedDevicesSection`, because
+            // that section renders only when `enrolledDevices` is non-empty — and in the very modes
+            // this cures (an unreadable authorization or intent item) `list()` fail-closes to empty
+            // while `lockedOut` stays false, so the whole section, banner included, draws nothing.
+            // A recovery action you cannot see in the state it recovers from is not a recovery.
+            Button("Reset pairing…") { resetConfirmationShown = true }
+                .buttonStyle(.plain)
+                .font(.mono(11))
+                .foregroundStyle(Glass.text3)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .confirmationDialog("Forget every paired device?",
+                                    isPresented: $resetConfirmationShown, titleVisibility: .visible) {
+                    Button("Forget all and quit", role: .destructive) { model.resetPairing() }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text("Repairs Portview's pairing store when no device can connect. Every pairing "
+                         + "is forgotten and every pending revocation is discarded — each device must "
+                         + "pair again in person. Portview will quit. Quit any other Portview host first.")
+                }
             Button("Quit Portview Host") { NSApp.terminate(nil) }
                 .buttonStyle(.plain)
                 .font(.mono(11))

@@ -182,6 +182,8 @@ final class HostAppModel {
     /// can't launch a second `LAContext` prompt for the same device (mirrors the enrollment Allow/Deny
     /// `DecisionTokenRegistry.beginIfIdle` guard). Cleared in each op's `defer`, covering every exit.
     @ObservationIgnored private var revokeInFlight: Set<String> = []
+    /// Same reentrancy guard for the store-wide reset, which is not keyed by device id.
+    @ObservationIgnored private var isResettingPairing = false
 
     /// Reload `enrolledDevices` from the shared `pairings` store, precomputing each row's compare
     /// fingerprint here so the view never imports `PortviewProtocol` or sees the raw `publicKey`.
@@ -410,6 +412,52 @@ final class HostAppModel {
             // longer a revoke whose durability could be misreported.
             self.revokeDurabilityWarnings[id] = nil
             await self.refreshEnrolledDevices()       // the still-enrolled device reappears in the list
+        }
+    }
+
+    /// Break-glass repair: forget every paired device and repair the pairing store, then QUIT.
+    ///
+    /// The single recovery path for every way the store can wedge — an unreadable authorization or
+    /// revocation-intent item denies EVERY device fail-closed, and `enroll` cannot repair the intent
+    /// item because it must discharge through that same item. Before this the only exit was deleting
+    /// the keychain items by hand.
+    ///
+    /// **Closing the pairing window FIRST is load-bearing, not tidiness.** While it is open, an
+    /// unknown signed key routes to the enrollment ceremony; a device could therefore be approved and
+    /// re-enrolled into the very store this is wiping. `endPairing` makes
+    /// `runEnrollmentCeremony`'s `sas?.isOpen()` guard fail, closing that window.
+    ///
+    /// **Quitting is the design, not a convenience.** Process death kills every live session with no
+    /// graceful `bye` (design §7 invariant 5 — a de-trusted peer must get no reconnect-suppressing
+    /// signal) and discards every `revoking` fence, retained `RevokeLease`, warm cache and
+    /// `unverifiedIntentFence` by construction. Doing it in-process would need a new batch
+    /// de-trust primitive in `HostControl` plus its own invalidate-first, keep-awake-under-lock and
+    /// fence-lift sequencing — all of which quitting gets for free. It also means a store that could
+    /// NOT be repaired is never served: we quit on both outcomes, only the message differs.
+    func resetPairing() {
+        guard !isResettingPairing else { return }   // no second LAContext from a double tap
+        isResettingPairing = true
+        Task {
+            defer { self.isResettingPairing = false }
+            let context = LAContext()
+            let approved = (try? await context.evaluatePolicy(
+                .deviceOwnerAuthentication,
+                localizedReason: "Forget every paired device and repair Portview's pairing store")) ?? false
+            guard approved else { return }
+
+            self.endPairing()   // must precede the wipe — see the doc comment
+            do {
+                try await self.pairings.resetPairingState()
+                self.messages.append("Pairing store reset. Every device has been forgotten — "
+                                     + "reopen Portview and pair again in person. Quit any other "
+                                     + "Portview host first; it keeps authorizing from its own cache until it exits.")
+            } catch {
+                self.messages.append("Pairing store could NOT be repaired (\(error)). Portview will "
+                                     + "quit; do not run it again until this succeeds or you delete "
+                                     + "Portview's keychain items by hand.")
+            }
+            self.stop()
+            NSApp.terminate(nil)
         }
     }
 
