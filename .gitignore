@@ -20,6 +20,13 @@ apps/*/*-Info.plist
 # Brainstorm visual-companion scratch (not source)
 .superpowers/
 
+# Agent working state. These were previously masked only by machine-local files
+# (~/.config/git/ignore, .git/info/exclude) which do NOT travel with a clone —
+# ai-scratch/ in particular is the designated home for transient secrets.
+ai-scratch/
+.beads/
+.pi-subagents/
+
 # Claude Code workflow worktrees (transient; created by isolation: 'worktree')
 .claude/worktrees/
 .worktrees/
