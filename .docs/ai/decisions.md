@@ -2,6 +2,29 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-26] Serialize pairing authorization and revocation-intent mutations with one file lock
+
+**Context**: fresh reads narrowed `PairingStore`'s stale-cache window but did not make either
+whole-item keychain read-modify-write atomic across the host app and `portview-host`. Concurrent
+revokes could still resurrect an authorization or drop another pending revocation intent.
+
+**Decision**: every cooperating production `PairingStore` mutation (`enroll`, `revoke`,
+`cancelRevocationIntent`) acquires one advisory `flock` lease on the stable, never-replaced
+`~/Library/Application Support/Portview/pairings.mutation.lock` inode. The lease spans all
+authorization and revocation-intent reads/writes and releases before cosmetic `lastSeen` work.
+Acquisition is nonblocking with bounded synchronous backoff and a two-second monotonic deadline;
+directory/open/lock/timeout failures fail closed. `revoke` preserves its existing honest outcome
+contract by mapping acquisition failure to durability-unknown.
+
+**Alternatives**: keychain CAS is unavailable; a generation field without an atomic compare/write
+still loses updates. Per-device keychain items remove map-wide RMWs but multiply migration,
+inventory, and intent-transaction complexity. App-only writes would make the CLI contract
+surprising and does not protect future cooperating writers.
+
+**Boundary**: this coordinates only same-user Portview processes resolving the same inode. It does
+not invalidate another process's warm authorization reads, coordinate non-Portview keychain
+writers, or serialize cosmetic `lastSeen` updates.
+
 ## [2026-07-25] Revoke + epoch registry (han.4): lease-fenced, invalidate-first, live-session kill (ACCEPTED)
 
 **Context**: the last sub-bead of the mutual-auth epic `portview-han`, and the one that makes

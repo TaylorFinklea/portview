@@ -1110,4 +1110,358 @@ import PortviewProtocol
         let entries = await pairing.list()
         #expect(entries.first?.lastSeen == entries.first?.enrolledAt)  // the write never landed
     }
+    private final class PausableStore: PairingRecordStore, @unchecked Sendable {
+        private let lock = NSLock()
+        private var blob: Data?
+        private var pauseNextRead = false
+        var failRead = false
+        private let paused = DispatchSemaphore(value: 0)
+        private let resumed = DispatchSemaphore(value: 0)
+        private let additionalRead = DispatchSemaphore(value: 0)
+
+        init(_ blob: Data? = nil) { self.blob = blob }
+
+        func armPauseOnNextRead() {
+            lock.lock(); pauseNextRead = true; lock.unlock()
+        }
+
+        func waitUntilPaused() -> Bool {
+            paused.wait(timeout: .now() + 5) == .success
+        }
+
+        func waitForAdditionalRead() -> Bool {
+            additionalRead.wait(timeout: .now() + 5) == .success
+        }
+
+        func resume() { resumed.signal() }
+
+        func read() throws -> Data? {
+            lock.lock()
+            if failRead { lock.unlock(); throw TestStoreError.injected }
+            let snapshot = blob
+            let shouldPause = pauseNextRead
+            if shouldPause { pauseNextRead = false }
+            lock.unlock()
+            if shouldPause {
+                paused.signal()
+                resumed.wait()
+            } else {
+                additionalRead.signal()
+            }
+            return snapshot
+        }
+
+        func write(_ data: Data) throws {
+            lock.lock(); blob = data; lock.unlock()
+        }
+
+        func rawBlob() -> Data? {
+            lock.lock(); defer { lock.unlock() }
+            return blob
+        }
+    }
+
+    private final class SharedMemoryMutationLock: PairingMutationLock, @unchecked Sendable {
+        private let condition = NSCondition()
+        private var held = false
+        private var nextToken: Int32 = 1
+        private var attempts = 0
+        private let secondAttempt = DispatchSemaphore(value: 0)
+
+        func acquire() throws -> Int32 {
+            condition.lock()
+            attempts += 1
+            if attempts == 2 { secondAttempt.signal() }
+            while held { condition.wait() }
+            held = true
+            let token = nextToken
+            nextToken += 1
+            condition.unlock()
+            return token
+        }
+
+        func release(_ token: Int32) {
+            condition.lock()
+            held = false
+            condition.broadcast()
+            condition.unlock()
+        }
+
+        func waitForSecondAttempt() -> Bool {
+            secondAttempt.wait(timeout: .now() + 5) == .success
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func concurrentRevokesPreserveBothRemovals(withLock: Bool) async throws {
+        let auth = PausableStore()
+        let intents = PausableStore()
+        let firstClient = newClient()
+        let secondClient = newClient()
+        let setup = PairingStore(store: auth, revokeIntentStore: intents)
+        try await setup.enroll(publicKey: firstClient.publicKey, deviceName: "K")
+        try await setup.enroll(publicKey: secondClient.publicKey, deviceName: "J")
+        let sharedLock = SharedMemoryMutationLock()
+        let lock: any PairingMutationLock = withLock ? sharedLock : NoopPairingMutationLock()
+        let first = PairingStore(store: auth, lastSeenStore: MemoryLastSeenStore(),
+                                 revokeIntentStore: intents, mutationLock: lock)
+        let second = PairingStore(store: auth, lastSeenStore: MemoryLastSeenStore(),
+                                  revokeIntentStore: intents, mutationLock: lock)
+
+        auth.armPauseOnNextRead()
+        let firstTask = Task { try await first.revoke(id: firstClient.id) }
+        guard auth.waitUntilPaused() else {
+            auth.resume()
+            Issue.record("first authorization read did not pause")
+            return
+        }
+        let secondTask = Task { try await second.revoke(id: secondClient.id) }
+        let overlapObserved = withLock ? sharedLock.waitForSecondAttempt() : auth.waitForAdditionalRead()
+        #expect(overlapObserved)
+        auth.resume()
+        try await firstTask.value
+        try await secondTask.value
+
+        let final = PairingStore(store: auth)
+        let ids = Set(await final.list().map { $0.id })
+        #expect(withLock ? ids.isEmpty : !ids.isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func concurrentEnrollAndRevokePreserveUnionOfEffects(withLock: Bool) async throws {
+        let auth = PausableStore()
+        let intents = PausableStore()
+        let revoked = newClient()
+        let retained = newClient()
+        let added = newClient()
+        let setup = PairingStore(store: auth, revokeIntentStore: intents)
+        try await setup.enroll(publicKey: revoked.publicKey, deviceName: "K")
+        try await setup.enroll(publicKey: retained.publicKey, deviceName: "J")
+        let sharedLock = SharedMemoryMutationLock()
+        let lock: any PairingMutationLock = withLock ? sharedLock : NoopPairingMutationLock()
+        let first = PairingStore(store: auth, lastSeenStore: MemoryLastSeenStore(),
+                                 revokeIntentStore: intents, mutationLock: lock)
+        let second = PairingStore(store: auth, lastSeenStore: MemoryLastSeenStore(),
+                                  revokeIntentStore: intents, mutationLock: lock)
+
+        auth.armPauseOnNextRead()
+        let enrollTask = Task { try await first.enroll(publicKey: added.publicKey, deviceName: "X") }
+        guard auth.waitUntilPaused() else {
+            auth.resume()
+            Issue.record("enrollment authorization read did not pause")
+            return
+        }
+        let revokeTask = Task { try await second.revoke(id: revoked.id) }
+        let overlapObserved = withLock ? sharedLock.waitForSecondAttempt() : auth.waitForAdditionalRead()
+        #expect(overlapObserved)
+        auth.resume()
+        try await enrollTask.value
+        try await revokeTask.value
+
+        let final = PairingStore(store: auth)
+        let ids = Set(await final.list().map { $0.id })
+        let expected: Set<String> = [retained.id, added.id]
+        #expect(withLock ? ids == expected : ids.contains(revoked.id))
+    }
+
+    @Test(arguments: [false, true])
+    func concurrentFailedRevokesPreserveBothIntents(withLock: Bool) async {
+        let auth = PausableStore()
+        auth.failRead = true
+        let intents = PausableStore()
+        let sharedLock = SharedMemoryMutationLock()
+        let lock: any PairingMutationLock = withLock ? sharedLock : NoopPairingMutationLock()
+        let first = PairingStore(store: auth, lastSeenStore: MemoryLastSeenStore(),
+                                 revokeIntentStore: intents, mutationLock: lock)
+        let second = PairingStore(store: auth, lastSeenStore: MemoryLastSeenStore(),
+                                  revokeIntentStore: intents, mutationLock: lock)
+
+        intents.armPauseOnNextRead()
+        let firstTask = Task { try? await first.revoke(id: "K") }
+        guard intents.waitUntilPaused() else {
+            intents.resume()
+            Issue.record("first intent read did not pause")
+            return
+        }
+        let secondTask = Task { try? await second.revoke(id: "J") }
+        let overlapObserved = withLock ? sharedLock.waitForSecondAttempt() : intents.waitForAdditionalRead()
+        #expect(overlapObserved)
+        intents.resume()
+        _ = await firstTask.value
+        _ = await secondTask.value
+
+        let final = intents.rawBlob()
+            .flatMap { try? JSONDecoder().decode(Set<String>.self, from: $0) } ?? []
+        #expect(withLock ? final == ["K", "J"] : final.count == 1)
+    }
+
+    private final class RecordingMutationLock: PairingMutationLock, @unchecked Sendable {
+        private let lock = NSLock()
+        private var held = false
+        private(set) var acquisitions = 0
+        private(set) var releases = 0
+
+        func acquire() throws -> Int32 {
+            lock.lock()
+            acquisitions += 1
+            held = true
+            lock.unlock()
+            return Int32(acquisitions)
+        }
+
+        func release(_ token: Int32) {
+            lock.lock()
+            held = false
+            releases += 1
+            lock.unlock()
+        }
+
+        func isHeld() -> Bool {
+            lock.lock(); defer { lock.unlock() }
+            return held
+        }
+    }
+
+    private final class LockCheckingStore: PairingRecordStore, @unchecked Sendable {
+        private let lock = NSLock()
+        private let mutationLock: RecordingMutationLock
+        private var blob: Data?
+        var failRead = false
+        private(set) var accessOutsideLock = false
+
+        init(mutationLock: RecordingMutationLock) {
+            self.mutationLock = mutationLock
+        }
+
+        func read() throws -> Data? {
+            lock.lock(); defer { lock.unlock() }
+            if !mutationLock.isHeld() { accessOutsideLock = true }
+            if failRead { throw TestStoreError.injected }
+            return blob
+        }
+
+        func write(_ data: Data) throws {
+            lock.lock(); defer { lock.unlock() }
+            if !mutationLock.isHeld() { accessOutsideLock = true }
+            blob = data
+        }
+    }
+
+    @Test func enrollAcquiresOnceAndKeepsAuthorizationAndIntentAccessesInsideLock() async throws {
+        let recordingLock = RecordingMutationLock()
+        let auth = LockCheckingStore(mutationLock: recordingLock)
+        let intents = LockCheckingStore(mutationLock: recordingLock)
+        let pairing = PairingStore(store: auth, lastSeenStore: MemoryLastSeenStore(),
+                                   revokeIntentStore: intents, mutationLock: recordingLock)
+        let client = newClient()
+
+        try await pairing.enroll(publicKey: client.publicKey, deviceName: "X")
+
+        #expect(recordingLock.acquisitions == 1)
+        #expect(recordingLock.releases == 1)
+        #expect(!auth.accessOutsideLock)
+        #expect(!intents.accessOutsideLock)
+    }
+
+    @Test func revokeAcquiresOnceAndReleasesOnEarlySuccess() async throws {
+        let recordingLock = RecordingMutationLock()
+        let auth = LockCheckingStore(mutationLock: recordingLock)
+        let intents = LockCheckingStore(mutationLock: recordingLock)
+        let pairing = PairingStore(store: auth, lastSeenStore: MemoryLastSeenStore(),
+                                   revokeIntentStore: intents, mutationLock: recordingLock)
+
+        try await pairing.revoke(id: "absent")
+
+        #expect(recordingLock.acquisitions == 1)
+        #expect(recordingLock.releases == 1)
+        #expect(!auth.accessOutsideLock)
+        #expect(!intents.accessOutsideLock)
+    }
+
+    @Test func cancelAcquiresOnceAndReleasesWhenStoreThrows() async {
+        let recordingLock = RecordingMutationLock()
+        let auth = LockCheckingStore(mutationLock: recordingLock)
+        let intents = LockCheckingStore(mutationLock: recordingLock)
+        intents.failRead = true
+        let pairing = PairingStore(store: auth, lastSeenStore: MemoryLastSeenStore(),
+                                   revokeIntentStore: intents, mutationLock: recordingLock)
+
+        await #expect(throws: TestStoreError.self) {
+            try await pairing.cancelRevocationIntent(id: "K")
+        }
+        #expect(recordingLock.acquisitions == 1)
+        #expect(recordingLock.releases == 1)
+        #expect(!auth.accessOutsideLock)
+        #expect(!intents.accessOutsideLock)
+    }
+
+    private struct FailingMutationLock: PairingMutationLock {
+        func acquire() throws -> Int32 { throw TestStoreError.injected }
+        func release(_ token: Int32) {}
+    }
+
+    @Test func lockFailureAbortsEnrollBeforeStoreAccess() async {
+        let store = MemoryStore()
+        let pairing = PairingStore(
+            store: store,
+            lastSeenStore: MemoryLastSeenStore(),
+            revokeIntentStore: MemoryStore(),
+            mutationLock: FailingMutationLock())
+        let client = newClient()
+
+        await #expect(throws: PairingStoreError.self) {
+            try await pairing.enroll(publicKey: client.publicKey, deviceName: "iPhone")
+        }
+        #expect(store.writeCount == 0)
+    }
+
+    @Test func revokeMapsLockFailureToUnknownDurability() async {
+        let pairing = PairingStore(
+            store: MemoryStore(),
+            lastSeenStore: MemoryLastSeenStore(),
+            revokeIntentStore: MemoryStore(),
+            mutationLock: FailingMutationLock())
+
+        do {
+            try await pairing.revoke(id: "K")
+            Issue.record("expected revoke to fail")
+        } catch let error as RevokeIncomplete {
+            #expect(error.isDurablyFenced == false)
+            #expect(error.isProvenNotDurable == false)
+        } catch {
+            Issue.record("unexpected error: \(error)")
+        }
+    }
+
+    @Test func fileMutationLockTimesOutThenAcquiresAfterRelease() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("pairings.mutation.lock")
+        let first = FilePairingMutationLock(url: url, timeout: 0.05)
+        let second = FilePairingMutationLock(url: url, timeout: 0.05)
+
+        let firstToken = try first.acquire()
+        #expect(throws: PairingStoreError.self) {
+            _ = try second.acquire()
+        }
+        first.release(firstToken)
+        let secondToken = try second.acquire()
+        second.release(secondToken)
+    }
+
+    @Test func fileMutationLockPathErrorFailsClosed() throws {
+        let parent = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try Data().write(to: parent)
+        defer { try? FileManager.default.removeItem(at: parent) }
+        let lock = FilePairingMutationLock(
+            url: parent.appendingPathComponent("pairings.mutation.lock"),
+            timeout: 0.05)
+
+        #expect(throws: PairingStoreError.self) {
+            _ = try lock.acquire()
+        }
+    }
+
 }

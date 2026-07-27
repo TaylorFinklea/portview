@@ -177,6 +177,7 @@ public actor PairingStore {
     private let lastSeenStore: PairingRecordStore
     private let intentStore: PairingRecordStore
     private let now: () -> Date
+    private let mutationLock: any PairingMutationLock
     /// Last known-good decoded state. `nil` = never read successfully yet.
     private var cache: Persisted?
     /// Last known-good decoded revocation-intent set. `nil` = never read successfully yet (the
@@ -206,30 +207,42 @@ public actor PairingStore {
     /// cross-instance (restart) revocation-intent behavior.
     init(store: PairingRecordStore, now: @escaping () -> Date = Date.init) {
         self.init(store: store, lastSeenStore: EphemeralPairingRecordStore(),
-                  revokeIntentStore: EphemeralPairingRecordStore(), now: now)
+                  revokeIntentStore: EphemeralPairingRecordStore(),
+                  mutationLock: NoopPairingMutationLock(), now: now)
     }
 
     /// lastSeen-injecting convenience (§6c, H-a) with an ephemeral intent item.
     init(store: PairingRecordStore, lastSeenStore: PairingRecordStore, now: @escaping () -> Date = Date.init) {
         self.init(store: store, lastSeenStore: lastSeenStore,
-                  revokeIntentStore: EphemeralPairingRecordStore(), now: now)
+                  revokeIntentStore: EphemeralPairingRecordStore(),
+                  mutationLock: NoopPairingMutationLock(), now: now)
     }
 
     /// Intent-injecting convenience (§6d, I5) with an ephemeral lastSeen item — the shape the
     /// restart tests need (a shared intent item across two instances).
     init(store: PairingRecordStore, revokeIntentStore: PairingRecordStore, now: @escaping () -> Date = Date.init) {
         self.init(store: store, lastSeenStore: EphemeralPairingRecordStore(),
-                  revokeIntentStore: revokeIntentStore, now: now)
+                  revokeIntentStore: revokeIntentStore,
+                  mutationLock: NoopPairingMutationLock(), now: now)
+    }
+
+    init(store: PairingRecordStore, lastSeenStore: PairingRecordStore,
+         revokeIntentStore: PairingRecordStore, now: @escaping () -> Date = Date.init) {
+        self.init(store: store, lastSeenStore: lastSeenStore,
+                  revokeIntentStore: revokeIntentStore,
+                  mutationLock: NoopPairingMutationLock(), now: now)
     }
 
     /// Full init: separate stores for the authorization item, the lastSeen item (§6c, H-a) and the
     /// pending-revocation-intent item (§6d, I5) — see `KeychainPairingStore` /
     /// `KeychainLastSeenStore` / `KeychainRevokeIntentStore` below for the real keychain-backed trio.
     init(store: PairingRecordStore, lastSeenStore: PairingRecordStore,
-         revokeIntentStore: PairingRecordStore, now: @escaping () -> Date = Date.init) {
+         revokeIntentStore: PairingRecordStore, mutationLock: any PairingMutationLock,
+         now: @escaping () -> Date = Date.init) {
         self.store = store
         self.lastSeenStore = lastSeenStore
         self.intentStore = revokeIntentStore
+        self.mutationLock = mutationLock
         self.now = now
     }
 
@@ -240,7 +253,8 @@ public actor PairingStore {
     /// fail-closed claim survive a process restart).
     public init() {
         self.init(store: KeychainPairingStore(), lastSeenStore: KeychainLastSeenStore(),
-                  revokeIntentStore: KeychainRevokeIntentStore())
+                  revokeIntentStore: KeychainRevokeIntentStore(),
+                  mutationLock: FilePairingMutationLock.canonical)
     }
 
     /// The canonical device id for a raw public key: `SHA256(publicKey)` hex. The id-to-key binding
@@ -333,6 +347,8 @@ public actor PairingStore {
     /// reports a re-admission that didn't durably happen (the device stays fenced instead).
     /// LAContext-gating is the caller's job (`HostAppModel.cancelRevoke`).
     public func cancelRevocationIntent(id: String) throws {
+        let token = try acquireMutationLock()
+        defer { mutationLock.release(token) }
         try dischargeRevocationIntent(id)
     }
 
@@ -371,22 +387,23 @@ public actor PairingStore {
     /// the device keeps a visible row the owner can Cancel/repair from) but nobody reports success.
     public func enroll(publicKey: Data, deviceName: String) throws {
         let id = Self.deviceID(forPublicKey: publicKey)
-        var state = try mutableState()
-        let enrolledAt = state.clients[id]?.enrolledAt ?? now()
-        state.clients[id] = EnrolledClient(id: id, publicKey: publicKey, deviceName: deviceName,
-                                           enrolledAt: enrolledAt, lastSeen: enrolledAt)
-        state.migrationComplete = true  // durable, monotonic: an enrollment ever happened.
-        try persist(state)
         do {
-            try dischargeRevocationIntent(id)
-        } catch {
-            // FAIL CLOSED IN THIS PROCESS TOO (Sol pass 3, N2). `persist` above already warmed the
-            // authorization cache with this key; if the discharge's own READ threw, a warm
-            // `intentCache` from before the failure still answers "nothing pending", so the next
-            // handshake would have authorized the very key this call is about to report as failed.
-            // The fence makes the thrown error and the gate agree.
-            unverifiedIntentFence.insert(id)
-            throw PairingStoreError.enrollmentStillFenced(id: id, reason: String(describing: error))
+            let token = try acquireMutationLock()
+            defer { mutationLock.release(token) }
+            var state = try mutableState()
+            let enrolledAt = state.clients[id]?.enrolledAt ?? now()
+            state.clients[id] = EnrolledClient(
+                id: id, publicKey: publicKey, deviceName: deviceName,
+                enrolledAt: enrolledAt, lastSeen: enrolledAt)
+            state.migrationComplete = true
+            try persist(state)
+            do {
+                try dischargeRevocationIntent(id)
+            } catch {
+                unverifiedIntentFence.insert(id)
+                throw PairingStoreError.enrollmentStillFenced(
+                    id: id, reason: String(describing: error))
+            }
         }
         seedLastSeen(id: id)
     }
@@ -422,27 +439,36 @@ public actor PairingStore {
     /// Deliberately recorded before the fresh authorization read too, so a revoke that cannot even
     /// READ the authorization item still leaves a durable fence behind.
     public func revoke(id: String) throws {
-        let intentDurability = recordRevocationIntent(id)
-        var state: Persisted
+        let token: Int32
         do {
-            state = try mutableState()
+            token = try acquireMutationLock()
         } catch {
-            throw Self.incomplete(intent: intentDurability, underlying: error)
+            throw Self.incomplete(intent: .unknown, underlying: error)
         }
-        guard state.clients.removeValue(forKey: id) != nil else {
-            // Not enrolled (never was, or another process already removed it): there is nothing to
-            // complete, so this is a success and must leave no fence behind — including one this call
-            // just recorded, or an inert orphan left by an earlier partial revoke.
+
+        var removed = false
+        do {
+            defer { mutationLock.release(token) }
+            let intentDurability = recordRevocationIntent(id)
+            var state: Persisted
+            do {
+                state = try mutableState()
+            } catch {
+                throw Self.incomplete(intent: intentDurability, underlying: error)
+            }
+            guard state.clients.removeValue(forKey: id) != nil else {
+                clearRevocationIntent(id)
+                return
+            }
+            do {
+                try persist(state)
+            } catch {
+                throw Self.incomplete(intent: intentDurability, underlying: error)
+            }
             clearRevocationIntent(id)
-            return
+            removed = true
         }
-        do {
-            try persist(state)
-        } catch {
-            throw Self.incomplete(intent: intentDurability, underlying: error)
-        }
-        clearRevocationIntent(id)
-        deleteLastSeen(id: id)
+        if removed { deleteLastSeen(id: id) }
     }
 
     /// What is durably TRUE about an id's revocation intent once `recordRevocationIntent` has run.
@@ -468,6 +494,16 @@ public actor PairingStore {
         case .unknown: return .durabilityUnknown(reason: reason)
         }
     }
+    private func acquireMutationLock() throws -> Int32 {
+        do {
+            return try mutationLock.acquire()
+        } catch let error as PairingStoreError {
+            throw error
+        } catch {
+            throw PairingStoreError.mutationLockUnavailable(reason: String(describing: error))
+        }
+    }
+
 
     /// Update a client's `lastSeen` (called on a successful authenticated handshake) in the
     /// SEPARATE lastSeen item ONLY (§6c, H-a) — never the authorization item. Best-effort: a
@@ -520,9 +556,9 @@ public actor PairingStore {
     /// returning the warm cache here made every read-modify-write a lost update against an
     /// arbitrarily OLD snapshot — P1 revokes K and writes {J}; P2, still warm on {K, J}, revokes J and
     /// writes {K}, durably RESURRECTING a revoked key while both calls report success. Re-reading
-    /// narrows the window to the actual read-modify-write; it does NOT make the RMW atomic (there is
-    /// no cross-process CAS on a whole-blob keychain item — bead `portview-auf`, design §9). The
-    /// authorization read path keeps its warm cache on purpose: a keychain that locks mid-session must
+    /// narrows the snapshot; the caller's process-shared mutation lease makes the enclosing
+    /// authorization/intent transaction atomic among cooperating Portview processes.
+    /// The authorization read path keeps its warm cache on purpose: a keychain that locks mid-session must
     /// not brick a live host, and a stale-but-known-good ALLOW there is bounded by the fence + the
     /// durable revocation intent, whereas a stale WRITE here is permanent.
     private func mutableState() throws -> Persisted {
@@ -827,6 +863,7 @@ private final class EphemeralPairingRecordStore: PairingRecordStore, @unchecked 
 
 enum PairingStoreError: Error {
     case keychainError(OSStatus)
+    case mutationLockUnavailable(reason: String)
     /// `enroll` persisted the authorization record but could NOT durably verify that the key is free
     /// of a pending revocation intent — so the key it just enrolled is not authorizable and the
     /// enrollment must not be reported as a success (Sol re-review, enroll-false-success finding).
