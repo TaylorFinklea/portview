@@ -443,13 +443,25 @@ final class HostAppModel {
         connectedSince = nil
 
         task = Task { [weak self, control, sasControl, authority, pairings] in
-            // Legacy-bootstrap until first-enroll auto-promotion flips this host to `.required`
-            // (han.3 revisits the open-ended expiry). `pairings` is the ONE shared PairingStore
-            // (stored property) — han.4's revoke UI mutates this SAME instance, so the serve loop
-            // authorizes against exactly the store revoke removes from. `authority` is likewise the
-            // ONE shared EnrollmentAuthority (see its stored property comment above).
+            // `.required`, never `.legacyBootstrap` (bead portview-0u2). This host previously ran
+            // `.legacyBootstrap(expiresAt: .distantFuture)`, which meant a FRESH install — empty
+            // store, `migrationComplete` false — resolved to `.bootstrap`, where `serveAuthGate`
+            // admits a peer that completes TLS and then simply STAYS SILENT on the challenge as
+            // `.legacyAdmitted`: full screen, input, clipboard and file authority. The host does not
+            // verify a client certificate (the pin is client-side, protecting the client from a fake
+            // host), so the bar was "reach host:port on the LAN" — and the popover auto-starts
+            // hosting, so that was the DEFAULT state of a new install.
+            //
+            // Bootstrap only ever existed to migrate legacy keyless clients. There are none: the
+            // client always mints and persists a Curve25519 identity, and under `.required` a signed
+            // unknown key still reaches the attended enrollment ceremony. Matches the CLI.
+            //
+            // `pairings` is the ONE shared PairingStore (stored property) — han.4's revoke UI mutates
+            // this SAME instance, so the serve loop authorizes against exactly the store revoke
+            // removes from. `authority` is likewise the ONE shared EnrollmentAuthority (see its
+            // stored property comment above).
             let events = HostRunner().events(identity: .app(displayName: Self.displayName), control: control, sasControl: sasControl,
-                                             authPolicy: .legacyBootstrap(expiresAt: .distantFuture),
+                                             authPolicy: .required,
                                              pairings: pairings,
                                              enrollment: authority)
             for await event in events {

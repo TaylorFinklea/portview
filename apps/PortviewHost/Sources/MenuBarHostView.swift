@@ -150,12 +150,26 @@ struct MenuBarHostView: View {
                 Text("Advertising as \(details.serviceName)")
                     .font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Glass.text1)
             }
+            // BOTH pairing paths — scanning this QR and typing the 6-digit code — end in the
+            // enrollment ceremony, which refuses unless the pairing window is open
+            // (`HostRunner.runEnrollmentCeremony` guards on `sas?.isOpen()`). A live-looking QR
+            // beside a closed window is a dead affordance: the client dials, signs the challenge,
+            // is classified `.unknownKey`, and is silently closed (bead portview-7hn). So the
+            // window governs the QR and the code alike — dim what cannot work, and say why.
             QRCodeView(string: details.pairingURL)
                 .frame(width: 132, height: 132)
                 .padding(8)
                 .background(Color(hex: 0x0A1416), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .strokeBorder(Glass.signal.opacity(0.2), lineWidth: 1))
+                .opacity(model.isPairing ? 1 : 0.2)
+                .overlay {
+                    if !model.isPairing {
+                        Text("Open the pairing\nwindow to scan")
+                            .font(.mono(10)).foregroundStyle(Glass.text1)
+                            .multilineTextAlignment(.center)
+                    }
+                }
                 .frame(maxWidth: .infinity, alignment: .center)
             Text("Pin  \(HostFormat.groupedPin(details.pinHex))")
                 .font(.mono(11)).foregroundStyle(Glass.text2)
@@ -163,6 +177,7 @@ struct MenuBarHostView: View {
                 Label("Copy pairing URL", systemImage: "doc.on.clipboard")
             }
             .buttonStyle(AccentButtonStyle())
+            .disabled(!model.isPairing)
 
             Divider().overlay(Glass.text3.opacity(0.2))
             if model.isPairing {
@@ -178,14 +193,15 @@ struct MenuBarHostView: View {
                         .foregroundStyle(Glass.signal)
                         .frame(maxWidth: .infinity, alignment: .center)
                 } else {
-                    Text("Pairing window open — tap the Mac on your iPhone, then enter the code shown here.")
+                    Text("Pairing window open — scan the QR above, or tap the Mac on your iPhone and enter the code shown here.")
                         .font(.mono(10)).foregroundStyle(Glass.text2)
                 }
                 Button("Cancel pairing") { model.endPairing() }
                     .buttonStyle(NeutralButtonStyle())
             } else {
+                // Governs BOTH pairing paths, not just the code — see the QR comment above.
                 Button { model.beginPairing() } label: {
-                    Label("Pair with a 6-digit code", systemImage: "number")
+                    Label("Open pairing window", systemImage: "lock.open")
                 }
                 .buttonStyle(NeutralButtonStyle())
             }
