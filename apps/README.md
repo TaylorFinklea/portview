@@ -94,19 +94,33 @@ Store Connect has not been run yet.
 
 ## Preflight gate (no hosted CI yet)
 
-There is deliberately no GitHub Actions workflow (hosted macOS-26 runners are unreliable). Run the full gate locally from the repo root:
+There is deliberately no GitHub Actions workflow. Hosted macOS-26 runners are unreliable, and
+the package suite needs a real Keychain (`KeychainIdentityStoreTests` exercises live `SecItem`
+on purpose), loopback QUIC listeners, and a hardware HEVC encoder — none of which a hosted
+runner provides. Run the full gate locally instead.
+
+**Fresh clone — run this first.** Both `.xcodeproj` bundles are generated from `project.yml`
+and are not tracked, so the `xcodebuild` legs have nothing to point at until you generate them:
 
 ```bash
-make preflight   # swift test + macOS host build + iOS simulator tests
+make bootstrap   # verifies xcodegen, generates both projects, arms the pre-push gate
 ```
 
-To run it automatically before every push, install the pre-push hook (either way):
+Then, from the repo root:
 
 ```bash
-cp scripts/pre-push .git/hooks/pre-push
-# or
+make preflight   # swift test + macOS host build + macOS host tests + iOS simulator tests
+```
+
+`make bootstrap` sets `core.hooksPath=scripts`, so `scripts/pre-push` runs `make preflight`
+before every push. To arm it without the rest of bootstrap:
+
+```bash
 git config core.hooksPath scripts
 ```
+
+`make generate` regenerates the projects on their own; it re-runs `xcodegen` only when a
+`project.yml` or `apps/Portview.xcconfig` is newer than the generated project.
 
 ## What works / what's next
 
