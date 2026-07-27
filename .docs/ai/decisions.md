@@ -2,6 +2,66 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-27] v1.0 scope: stop constructing, start proving — plus three fixes the auth epic hid
+
+**Context**: Portview is feature-complete on paper (M0–M6, 734 package tests) but the
+hardware-confirmed surface is only capture→HEVC→QUIC→Metal→trackpad, QR pairing, and the zoom
+path. The mutual-auth epic — 13,826 insertions in six days, 25% of all repo commits — has zero
+device minutes. Meanwhile the security track had entered a closed loop: 29% of production LOC and
+39% of test LOC is auth/pairing/revocation, `PairingStoreTests` is 1.7× the file it tests, 165
+comments cite a specific review finding, and the top of the ready queue (`oj5`, `5a5`, `1z1`) was
+the revoke spec's own out-of-scope list. Each review pass filed the beads that fed the next pass.
+
+**Decision**: v1.0 is a public, notarized, honestly-documented release reached by *verification*,
+not construction. Freeze the security track; add exactly one escape hatch; device-verify what
+exists; cut what fails verification rather than fixing it indefinitely. Standing rule: **no new
+adversarial-review cycles on the auth stack until it has run on hardware** — a finding from a
+device sitting outranks a finding from a re-read.
+
+**Reviewed by**: Fable 5 (architecture), GLM 5.2 (SHIP-WITH-FIXES), GPT-5.6 Sol (REDESIGN). Each
+found a different class of defect; the mixed panel was load-bearing. Fable found the implementation
+error (`SecItemUpdate` vs `SecItemDelete`), GLM the reasoning error (enrollment is not a universal
+backstop — `enroll` discharges through the same unreadable intent item), Sol the framing error
+(the plan protected `migrationComplete` from reopening bootstrap while the shipping GUI already ran
+in bootstrap permanently).
+
+**Consequences**:
+
+1. **The GUI host runs `.required`, never `.legacyBootstrap`** (was
+   `.legacyBootstrap(expiresAt: .distantFuture)`). A fresh install resolved to `.bootstrap`, where
+   `serveAuthGate` admits a peer that completes TLS and then stays silent as `.legacyAdmitted` —
+   full screen, input, clipboard and file authority. The host verifies no client certificate (the
+   pin is client-side), so the bar was "reach host:port on the LAN", and the popover auto-starts
+   hosting. Bootstrap only ever existed to migrate legacy keyless clients; there are none, and
+   under `.required` a signed unknown key still reaches the attended enrollment ceremony.
+
+2. **One break-glass reset replaces the per-failure-mode repair UI** (`portview-oj5` closed as
+   superseded). `PairingStore.resetPairingState()` blind-writes all three keychain items without
+   reading first (the §6d item 9 carve-out — it discards rather than merges, so there is no lost
+   update), forces `migrationComplete = true`, and escalates to delete-then-write only when a plain
+   write fails. It **quits** rather than adding a batch de-trust primitive: process death kills
+   every session with no graceful `bye` (§7 invariant 5) and discards every fence, lease, warm
+   cache and `unverifiedIntentFence` by construction.
+
+3. **`migrationComplete` is never cleared by the reset.** Clearing it would return the host to
+   `.bootstrap` — a reset restores a broken store, it must not lower the auth bar. Recovery runs
+   through the attended SAS + enrollment ceremony, which needs no bootstrap. Per-item order is
+   write-first because an *absent* authorization item decodes as `migrationComplete: false`, so an
+   unconditional delete whose follow-up write failed would reopen bootstrap via the repair itself.
+
+4. **Both pairing paths are governed by the pairing window.** The QR was rendered unconditionally
+   while only the 6-digit-code button opened the window `runEnrollmentCeremony` requires, so a
+   first-install QR scan silently failed. The action is now "Open pairing window".
+
+5. **Cut from v1.0**: the QUIC lane A/B (`portview-3ev`) and its dependent phase-2 per-frame
+   streams — the lanes stay dormant, `ProtocolVersion.current` stays 1, and off-LAN testing covers
+   the *current* transport. CloudKit re-wake stays in scope, which puts the host iCloud entitlement
+   on the notarization critical path (it is default-off today and fails silently, so a release
+   build would ship re-wake disabled).
+
+**Boundary**: none of items 1–4 has run on hardware. They are consistent with — and were only
+findable because of — the fact that the auth epic never has.
+
 ## [2026-07-26] Serialize pairing authorization and revocation-intent mutations with one file lock
 
 **Context**: fresh reads narrowed `PairingStore`'s stale-cache window but did not make either

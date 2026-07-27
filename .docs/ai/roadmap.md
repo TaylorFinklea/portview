@@ -33,6 +33,13 @@ script: `.docs/ai/phases/device-verify-plan-2026-07-08.md`.
 ## Now / Next / Later
 
 ### Now
+- [ ] **v1.0 push (2026-07-27)** — scope, panel review and consequences: `decisions.md` 2026-07-27;
+      loop state: `current-state.md`. Verification-first: freeze the security track, prove the built
+      surface on hardware, cut what fails. Landed: repo-level ignores, fresh-clone `make bootstrap`,
+      the break-glass pairing reset (supersedes `oj5`), GUI on `.required` (closed a fresh-install
+      legacy-admission hole), QR governed by the pairing window. **CUT from v1.0**: the QUIC lane
+      A/B (`3ev`) and phase-2 per-frame streams (`7fu`, deferred) — lanes stay dormant.
+      CAVEAT: none of the landed items has run on hardware; Sitting 1 is the gate.
 - [ ] **Product test** (staged 2026-07-15, new machine): (a) SIMULATOR smoke test — runnable now: `/Applications/PortviewHost.app` + client already installed in the booted iPhone 17 Pro sim; pair via SAS/manual (sim camera can't scan QR). NEW-MACHINE CAVEAT: host identity is fresh — saved pairings on real devices pin the OLD cert; re-pair on first connect. (b) Full device-verify sitting (`.docs/ai/phases/device-verify-plan-2026-07-08.md` + 2026-07-15 addendum) — needs an Apple ID signed into Xcode first (this machine has none; Sel iPad connected, Roshar unavailable).
 - [x] **Fleet: work `bd ready`** — queue DRAINED 2026-07-15 (djx review executed + 9 findings fixed, s86, e00, 8z9, identity-rotation fix; ADR decisions.md 2026-07-15). Suite 459→469. `jc3` scope lost with the beads DB — bead `portview-qhl` awaits the user restating intent.
 - [ ] **User-present**: (a) review + push the 3 unpushed commits on `main` (2026-07-16 debugging session: odd-height encode fix, zero-byte stream parking, host observability — the 2026-07-15 six are pushed); (b) **plug the iPhone in via USB** → install current client → re-verify the ~7-10s freeze (bead `portview-4x8` — the phone still runs the Jul 10-11 build, which is the prime suspect); (c) answer the `l4y` settings/onboarding questions; (d) `cqv.2` notarization (Apple-account-gated).
