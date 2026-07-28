@@ -59,23 +59,34 @@ struct MenuBarHostView: View {
             model.startPermissionMonitoring() // refresh permission status when the popover opens
             await model.refreshEnrolledDevices() // §1a step 1: paired-devices surface-open refresh
         }
-        // Destructive-action gate part 1 (product decision 1): confirm BEFORE the LAContext gate the
-        // model runs. "Revoke 'iPhone'? It will lose access immediately."
-        .confirmationDialog(
-            pendingDestructive.map { "\($0.action.confirmation?.verb ?? "Revoke") '\($0.row.name)'?" } ?? "Revoke device?",
-            isPresented: Binding(get: { pendingDestructive != nil },
-                                 set: { presented in if !presented { pendingDestructive = nil } }),
-            titleVisibility: .visible,
-            presenting: pendingDestructive
-        ) { pending in
-            Button(pending.action.confirmation?.verb ?? "Revoke", role: .destructive) {
-                perform(pending.action, on: pending.row)
-                pendingDestructive = nil
+    }
+
+    /// Destructive-action gate part 1 (product decision 1): confirm BEFORE the LAContext gate the
+    /// model runs.
+    ///
+    /// INLINE, not `.confirmationDialog` — device-found, Sitting 1 2026-07-28. `MenuBarExtra` with
+    /// `.menuBarExtraStyle(.window)` hosts this popover in a panel that closes on resign-key, and a
+    /// SwiftUI modal TAKES key: the dialog rendered, and clicking either button only dismissed the
+    /// popover, so Revoke was unreachable and the break-glass reset was unusable with it. The
+    /// enrollment Allow/Deny prompt below has always been inline and works on device, Touch ID
+    /// included — so the popover's own view hierarchy is the one presentation that survives here.
+    /// `LAContext` itself is fine from the popover; only the modal was broken.
+    @ViewBuilder
+    private func inlineConfirm(_ title: String, _ message: String, verb: String,
+                               confirm: @escaping () -> Void, cancel: @escaping () -> Void) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title).font(.system(size: 12.5, weight: .semibold)).foregroundStyle(Glass.text1)
+            Text(message).font(.mono(10)).foregroundStyle(Glass.text2)
+            HStack(spacing: 8) {
+                Button("Cancel", action: cancel).buttonStyle(NeutralButtonStyle())
+                Button(verb, action: confirm).buttonStyle(OutlineButtonStyle(tint: Glass.danger))
             }
-            Button("Cancel", role: .cancel) { pendingDestructive = nil }
-        } message: { pending in
-            Text(pending.action.confirmation?.message ?? "It will lose access immediately.")
         }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color(hex: 0x1A1012), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder(Glass.danger.opacity(0.35), lineWidth: 1))
     }
 
     /// Route one recovery action to the model. Destructive actions are never invoked from here without
@@ -338,6 +349,18 @@ struct MenuBarHostView: View {
                 Spacer()
                 ForEach(status.recoveryActions, id: \.self) { recoveryButton($0, row) }
             }
+            // The confirm replaces this row's buttons in place rather than presenting over them —
+            // see `inlineConfirm`. Scoped by row id so one pending confirm can't arm another device.
+            if let pending = pendingDestructive, pending.row.id == row.id {
+                inlineConfirm("\(pending.action.confirmation?.verb ?? "Revoke") '\(pending.row.name)'?",
+                              pending.action.confirmation?.message ?? "It will lose access immediately.",
+                              verb: pending.action.confirmation?.verb ?? "Revoke",
+                              confirm: {
+                                  perform(pending.action, on: pending.row)
+                                  pendingDestructive = nil
+                              },
+                              cancel: { pendingDestructive = nil })
+            }
         }
         .padding(.vertical, 6).padding(.horizontal, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -376,20 +399,25 @@ struct MenuBarHostView: View {
             // this cures (an unreadable authorization or intent item) `list()` fail-closes to empty
             // while `lockedOut` stays false, so the whole section, banner included, draws nothing.
             // A recovery action you cannot see in the state it recovers from is not a recovery.
-            Button("Reset pairing…") { resetConfirmationShown = true }
-                .buttonStyle(.plain)
-                .font(.mono(11))
-                .foregroundStyle(Glass.text3)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .confirmationDialog("Forget every paired device?",
-                                    isPresented: $resetConfirmationShown, titleVisibility: .visible) {
-                    Button("Forget all and quit", role: .destructive) { model.resetPairing() }
-                    Button("Cancel", role: .cancel) { }
-                } message: {
-                    Text("Repairs Portview's pairing store when no device can connect. Every pairing "
-                         + "is forgotten and every pending revocation is discarded — each device must "
-                         + "pair again in person. Portview will quit. Quit any other Portview host first.")
-                }
+            if resetConfirmationShown {
+                inlineConfirm("Forget every paired device?",
+                              "Repairs Portview's pairing store when no device can connect. Every "
+                              + "pairing is forgotten and every pending revocation is discarded — each "
+                              + "device must pair again in person. Portview will quit. Quit any other "
+                              + "Portview host first.",
+                              verb: "Forget all and quit",
+                              confirm: {
+                                  resetConfirmationShown = false
+                                  model.resetPairing()
+                              },
+                              cancel: { resetConfirmationShown = false })
+            } else {
+                Button("Reset pairing…") { resetConfirmationShown = true }
+                    .buttonStyle(.plain)
+                    .font(.mono(11))
+                    .foregroundStyle(Glass.text3)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
             Button("Quit Portview Host") { NSApp.terminate(nil) }
                 .buttonStyle(.plain)
                 .font(.mono(11))
