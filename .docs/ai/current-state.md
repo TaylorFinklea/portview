@@ -3,16 +3,16 @@
 > Loop state only (≤20 lines, per AGENTS.md). Rationale → `decisions.md`. Backlog → `bd ready`.
 > The pre-2026-07-27 session journal was pruned; it remains in git history.
 
-Branch: `main`, clean. 6 commits ahead of `origin/main` — **not pushed** (user reviews + pushes).
+Branch: `main`, clean. 9 commits ahead of `origin/main` — **not pushed** (user reviews + pushes).
 
-## Plan — v1.0 (rationale: `decisions.md` 2026-07-27)
+## Plan — v1.0 (rationale: `decisions.md` 2026-07-27, 2026-07-28)
 
-- [x] `.gitignore` covers `ai-scratch/`, `.beads/`, `.pi-subagents/` — Verify: `git check-ignore -v`
-- [x] Fresh clone buildable (`make bootstrap`) — Verify: clean clone → `make bootstrap` → `make build-host`
-- [x] Break-glass pairing reset (store + menu bar) — Verify: `make preflight`
-- [x] GUI runs `.required`; QR governed by the pairing window — Verify: `make preflight`
-- [ ] **Sitting 1 (device)**: `.required` first-enrollment happy path → QR + SAS first-install →
-      destructive LAST (revoke, last-device lockout, reset). Beads `portview-35d`, `portview-myt`.
+- [x] Repo ignores · fresh-clone `make bootstrap` · break-glass reset · GUI on `.required` · QR gated
+- [x] `portview-wyi` answered → 4 impl beads · `portview-qhl` closed (range drift split out)
+- [~] **Sitting 1 IN PROGRESS** (`portview-35d`, `portview-myt`; Roshar + Mandalore, fresh builds installed)
+  - [x] Leg A — `.required` enrollment ceremony works on hardware. The big unknown is retired.
+  - [x] Device-found: menu-bar `.confirmationDialog` unclickable → inline confirms (`e63d7ce`)
+  - [ ] Re-test revoke + last-device banner → THEN QR-with-window-closed (needs Roshar unenrolled) → reset
 - [ ] Sitting 2 feature sweep `portview-2u9` · Sitting 3 re-wake `portview-uma`
 - [ ] Release eng: hardened runtime + Developer ID + notarize; `LSUIElement`; iOS archive
       validation; camera-denial handling; `CFBundleURLTypes`; CHANGELOG + tag
@@ -20,8 +20,7 @@ Branch: `main`, clean. 6 commits ahead of `origin/main` — **not pushed** (user
 
 ## Blockers / open questions
 
-- `portview-qhl` — scope lost in the beads DB migration; user must restate or close.
-- `portview-wyi` — settings/first-run needs user product decisions.
-- Re-wake stays in v1.0 ⇒ the host iCloud entitlement (`PORTVIEW_HOST_ENTITLEMENTS`, empty today)
-  is on the notarization critical path. A release build today ships re-wake silently disabled.
-- **Nothing in the four checked items above has run on hardware.**
+- Re-wake stays in v1.0 ⇒ host iCloud entitlement (`PORTVIEW_HOST_ENTITLEMENTS`, empty) is on the
+  notarization critical path. A release build today ships re-wake silently disabled.
+- Leg-B caveat: an ENROLLED device re-dialing a pinned host needs no pairing window — correct, and
+  the `7hn` fix only governs UNKNOWN keys. Only testable after a revoke.

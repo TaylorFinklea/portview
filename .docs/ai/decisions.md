@@ -2,6 +2,38 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-07-28] Settings, first-run and lane defaults (closes `portview-wyi`)
+
+**Context**: `portview-wyi` had sat open as a definition bead whose questions were never written
+down. The state it was asking about: the Mac host has **no settings surface at all** (no `Settings`
+scene, no `UserDefaults`/`@AppStorage` anywhere in `apps/PortviewHost`), the iOS client has **no
+first-run experience** (zero hits for onboarding/welcome/first-run — it routes straight into Deck
+Home), and an authenticated client automatically receives screen, input, clipboard sync both ways,
+system audio, and file transfer both directions.
+
+**Decisions**:
+
+1. **The menu bar IS the app.** Drop the `WindowGroup` entirely and set `LSUIElement` — not merely
+   hide the Dock icon. Blocked on first moving permissions onboarding into the popover: it lives in
+   the window today, and `MenuBarHostView` literally says "Open the window to grant permissions", so
+   removing the window without that would leave a first-run user unable to grant TCC at all.
+2. **Host settings**: launch at login (`SMAppService` — nothing exists today, and a host you reach
+   from your phone is useless if it needs a manual launch after every reboot), a preferred port
+   (keeping the existing fallback when taken), and a remembered default display.
+3. **Clipboard and file transfer become opt-in**; screen and input stay on by default. Chosen over
+   keeping all lanes on. The gate must be enforced at the **host effect boundary**, not by hiding
+   client affordances — a client is untrusted input, so hiding a button changes nothing. Rationale
+   worth keeping: `ClipboardSync` polls `NSPasteboard` continuously, so it ships everything copied
+   on the Mac — passwords included — to whatever is paired.
+4. **Full iOS first-run walkthrough**, shown once and re-reachable from Settings. Chosen over a
+   minimal empty state. Carries a genuine bug regardless of onboarding scope: `QRScannerView`
+   guards on `AVCaptureDeviceInput` and silently returns on denial, leaving a permanent black
+   screen with no `authorizationStatus` check, no `requestAccess`, and no Settings deep link — a
+   dead end on the primary pairing path.
+
+**Consequence**: 3 is the one that reaches into the frozen auth subsystem, so it needs the
+`SessionCapability` effect-seam treatment and a device-verify pass rather than fleet dispatch.
+
 ## [2026-07-27] v1.0 scope: stop constructing, start proving — plus three fixes the auth epic hid
 
 **Context**: Portview is feature-complete on paper (M0–M6, 734 package tests) but the
