@@ -139,8 +139,13 @@ struct LiveHUDView: View {
         .padding(.top, 52)
         .padding(.bottom, 30)
         .overlay {
-            if isReconnecting { reconnectingCard }
-            else if isHostLocked { hostLockedCard }
+            // Purely informational, and full-bleed — so it must never intercept a touch meant for
+            // the toolbar it sits over (notably Disconnect, the only way out of either state).
+            Group {
+                if isReconnecting { reconnectingCard }
+                else if isHostLocked { hostLockedCard }
+            }
+            .allowsHitTesting(false)
         }
     }
 
@@ -186,6 +191,23 @@ struct LiveHUDView: View {
 
     private var toolbar: some View {
         VStack(spacing: 9) {
+            hostDependentTools
+                // Everything above acts ON the host — keyboard, paste, file send, display switch —
+                // so none of it means anything while we are re-binding. Disconnect is deliberately
+                // NOT in here: see below.
+                .disabled(isReconnecting)
+                .opacity(isReconnecting ? 0.5 : 1)
+            // Disconnect stays live while reconnecting. It is a purely LOCAL action —
+            // `unbindConnection()`, `task?.cancel()`, `status = .idle` — that never touches the
+            // host, and cancelling that task is the only way out of the reconnect loop. Disabling
+            // it with the rest of the toolbar left the user trapped on the reconnecting card with
+            // no exit but force-quitting the app (device-found, Sitting 1 2026-07-28).
+            toolButton("rectangle.portrait.and.arrow.right", danger: true) { session.disconnect() }
+        }
+    }
+
+    private var hostDependentTools: some View {
+        VStack(spacing: 9) {
             // Reset-zoom only appears while zoomed (interaction rule); core order then follows the
             // README: gauge → keyboard → paste → file, with sampler/display as conditional extras.
             if zoom > 1.01 {
@@ -218,10 +240,7 @@ struct LiveHUDView: View {
                     toolButtonLabel("rectangle.on.rectangle", active: false)
                 }
             }
-            toolButton("rectangle.portrait.and.arrow.right", danger: true) { session.disconnect() }
         }
-        .disabled(isReconnecting)
-        .opacity(isReconnecting ? 0.5 : 1)
     }
 
     private func toolButton(_ systemImage: String, active: Bool = false, danger: Bool = false, action: @escaping () -> Void) -> some View {
