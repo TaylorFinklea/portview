@@ -1,5 +1,8 @@
 # Swift Package Manager
 .build/
+
+# `make release` output (archive, exported .app, notarized zip)
+build/
 .swiftpm/
 Package.resolved
 

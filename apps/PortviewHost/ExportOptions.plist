@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Export options for the Developer-ID (direct download) host build — see `make release`.
+
+  Developer ID, not App Store: the host cannot be sandboxed (LockMonitor's lock detection uses
+  DistributedNotificationCenter, documented non-sandboxed-only, and the app needs SCStream,
+  CGEvent, Keychain, LAContext and IOPM), so the Mac App Store is not an available channel.
+
+  teamID matches PORTVIEW_DEVELOPMENT_TEAM in apps/Portview.xcconfig. A fork exporting under its
+  own account has to change it here too — unlike the xcconfig, a plist has no include mechanism,
+  so this one identifier is not covered by Portview.local.xcconfig.
+-->
+<plist version="1.0">
+<dict>
+	<key>method</key>
+	<string>developer-id</string>
+	<key>teamID</key>
+	<string>K7CBQW6MPG</string>
+	<key>signingStyle</key>
+	<string>automatic</string>
+	<key>destination</key>
+	<string>export</string>
+</dict>
+</plist>
