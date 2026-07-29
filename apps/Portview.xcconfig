@@ -20,12 +20,25 @@ PORTVIEW_BUNDLE_ID_PREFIX = dev.finklea
 // CloudKit re-wake beacon (host): applying apps/PortviewHost/PortviewHost.entitlements
 // requires a provisioning profile carrying the iCloud.dev.finklea.portview container,
 // which automatic signing can only mint with an Apple ID signed into Xcode (Settings ▸
-// Accounts) — so it defaults OFF to keep zero-config dev builds green. The app fails
-// soft without it (beacon writes are skipped; hosting unaffected). Opt in via
-// Portview.local.xcconfig:
+// Accounts) — so DEBUG defaults OFF to keep zero-config dev builds (and forks) green.
+// The app fails soft without it: CloudKitBeaconStore.isAvailable reads the entitlement
+// off SecTaskCreateFromSelf and log-and-drops beacon writes; hosting is unaffected.
 //
-//   PORTVIEW_HOST_ENTITLEMENTS = PortviewHost.entitlements
+// RELEASE is ON, and deliberately so. Release builds are cut only by the maintainer, who
+// has the container — and the failure mode is silent, so a release that quietly shipped
+// re-wake disabled would look identical to one that worked. Config-conditional keeps that
+// honest without a Portview.local.xcconfig, which is gitignored and therefore cannot be
+// relied on to reach a release build at all.
 PORTVIEW_HOST_ENTITLEMENTS =
+PORTVIEW_HOST_ENTITLEMENTS[config=Release] = PortviewHost.entitlements
+
+// Hardened Runtime is mandatory for notarization, and Release-only on purpose: it implies
+// get-task-allow=NO, which blocks the debugger, so a Debug build must not carry it. The host
+// is NOT sandboxed and cannot be — LockMonitor's lock detection uses
+// DistributedNotificationCenter (documented non-sandboxed-only), and the app needs SCStream,
+// CGEvent, Keychain, LAContext and IOPM. Hardened Runtime WITHOUT App Sandbox is the correct
+// Developer-ID shape, and it is also why the Mac App Store is not an available fallback.
+ENABLE_HARDENED_RUNTIME[config=Release] = YES
 
 // Version single-source: bump BOTH apps (host + client) here. The generated
 // Info.plists reference $(MARKETING_VERSION) / $(CURRENT_PROJECT_VERSION),
