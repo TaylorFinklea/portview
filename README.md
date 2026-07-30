@@ -7,22 +7,29 @@ Mac-to-Mac screen sharing feels instant because, when both ends are Apple, macOS
 No reverse-engineering of Apple's proprietary protocol. No servers. No VNC.
 
 - **Direct on the LAN**, or remote over your own Tailscale/WireGuard — nothing for us to host.
+- **Paired devices only.** Mutual authentication: the client pins the host's certificate, and the host serves only devices enrolled through an attended, Touch ID-gated pairing ceremony. Revocation kills live sessions. See [`SECURITY.md`](SECURITY.md).
 - **iPhone is a pure viewer/controller**, which sidesteps every iOS screen-capture restriction.
 - **Apple Silicon, macOS 26+ / iOS 26+.** Swift 6, the newest capture/encode/QUIC APIs.
 
-> Status: **early development.** See [`docs/superpowers/specs/2026-06-02-portview-design.md`](docs/superpowers/specs/2026-06-02-portview-design.md) for the full design, and [`.docs/ai/roadmap.md`](.docs/ai/roadmap.md) for the milestone roadmap.
+> Status: **approaching v1.0.** The Mac host ships as a notarized direct download; the iPhone app is built from source for now. See [`docs/superpowers/specs/2026-06-02-portview-design.md`](docs/superpowers/specs/2026-06-02-portview-design.md) for the full design.
 
 ## Architecture
 
 ```
-🖥️ Mac host (menu-bar agent)            📱 iPhone client (SwiftUI)
-   ScreenCaptureKit  ─ capture             NetworkConnection ─ QUIC
-   VideoToolbox      ─ HEVC encode   ⇄     VideoToolbox      ─ decode
-   CGEvent           ─ input inject  QUIC  CAMetalLayer      ─ render
-   Core Audio tap    ─ audio        (TLS)  gestures          ─ trackpad input
+🖥️ Mac host (menu-bar app)               📱 iPhone client (SwiftUI)
+   ScreenCaptureKit  ─ capture + audio      NetworkConnection ─ QUIC
+   VideoToolbox      ─ HEVC encode   ⇄      VideoToolbox      ─ decode
+   CGEvent           ─ input inject  QUIC   CAMetalLayer      ─ render
+   Keychain          ─ pairing store (TLS)  gestures          ─ trackpad input
 ```
 
-One QUIC connection carries six logical lanes: **video** and **audio** (push, drop-stale), **input** and **control** and **clipboard** and **files** (reliable). Input is tiny and prioritized so a file transfer can never stall your cursor.
+One QUIC connection carries video, audio, input, control, clipboard, file, and stats traffic; latency-critical input is tiny and prioritized so a file transfer can never stall your cursor. (Per-lane QUIC streams are implemented but deliberately dormant pending an on-device A/B.)
+
+## Install
+
+**Mac host** — download `PortviewHost.zip` from the latest GitHub release (Developer ID-signed, notarized, stapled — no Gatekeeper warning), unzip, and drag `PortviewHost.app` into `/Applications`. First run walks you through the Screen Recording and Accessibility permissions.
+
+**iPhone client** — build from source with your own Apple ID for now (see [`apps/README.md`](apps/README.md)); TestFlight distribution is planned.
 
 ## Roadmap
 
@@ -31,7 +38,8 @@ One QUIC connection carries six logical lanes: **video** and **audio** (push, dr
 | **M0** | Walking skeleton: protocol package + Mac→iPhone live video |
 | **M1** | Trackpad control, keyboard, Bonjour discovery, QR pairing |
 | **M2** | Clipboard sync · **M3** Multi-monitor · **M4** Audio · **M5** File transfer |
-| **M6** | Adaptive quality, reconnect, polish |
+| **Security** | Mutual auth: per-device keypairs, attended enrollment, live-session revoke, break-glass reset |
+| **M6** | Adaptive quality, reconnect + iCloud re-wake, polish |
 
 ## License
 

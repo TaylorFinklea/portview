@@ -3,7 +3,7 @@
 > Loop state only (≤20 lines, per AGENTS.md). Rationale → `decisions.md`. Backlog → `bd ready`.
 > The pre-2026-07-27 session journal was pruned; it remains in git history.
 
-Branch: `main`, clean. 2 commits ahead of `origin/main`.
+Branch: `main`, clean. 3 commits ahead of `origin/main`.
 
 ## Plan — v1.0 (rationale: `decisions.md` 2026-07-27, 2026-07-28)
 
@@ -18,8 +18,10 @@ Branch: `main`, clean. 2 commits ahead of `origin/main`.
 - [ ] Sitting 2 feature sweep `portview-2u9` — clipboard/audio/files/multi-monitor still unproven
 - [ ] Sitting 3 re-wake `portview-uma` — only meaningful on a PRODUCTION-signed build, so after ↑
 - [ ] `wyi` impl: menu-bar-is-the-app · host settings · clipboard+files opt-in · iOS walkthrough
-- [ ] iOS archive/upload validation · camera-denial · `CFBundleURLTypes` · CHANGELOG + tag
-- [ ] Doc truth pass — `SECURITY.md` still says mutual auth is "not yet implemented"
+- [x] Doc truth pass — SECURITY.md rewritten (mutual auth + enrollment + revoke + reset + iCloud
+      in the trust model, known limitations stated); README/apps-README/AGENTS.md honest;
+      CHANGELOG + CONTRIBUTING created; absolute paths stripped from public specs
+- [ ] iOS archive/upload validation · camera-denial · `CFBundleURLTypes` · tag
 
 ## Blockers / open questions
 

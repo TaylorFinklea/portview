@@ -69,7 +69,7 @@ The runner should stop cleanly when the app quits or the user stops hosting.
 
 Automated verification:
 
-- `swift test --package-path /Users/tfinklea/git/screenshare`
+- `swift test --package-path <repo>`
 - Build `PortviewHost.app` with `xcodebuild`.
 - Build the existing `portview-host` CLI to confirm the wrapper still compiles.
 

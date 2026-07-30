@@ -31,6 +31,6 @@
 - [ ] Add host stats accumulator tests where pure Swift, then host emission.
 - [ ] Add client diagnostics model and HUD.
 - [ ] Add Metal linear/nearest sampler switch.
-- [ ] Run `swift test --package-path /Users/tfinklea/git/screenshare`.
+- [ ] Run `swift test --package-path <repo>`.
 - [ ] Generate/build the iOS client project.
 - [ ] Update handoff docs and commit.

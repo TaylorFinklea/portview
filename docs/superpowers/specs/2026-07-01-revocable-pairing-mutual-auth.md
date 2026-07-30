@@ -130,7 +130,7 @@ know 30/31 skips rather than wedges during rollout.
   signing client proceeds to `ClientHello`.
 - **Enrollment**: a successful SAS match enrolls the client's pubkey (host `isAuthorized` true
   afterward).
-- Verify: `swift test --package-path /Users/tfinklea/git/screenshare --filter PairingStore`
+- Verify: `swift test --package-path <repo> --filter PairingStore`
   (t-store) and `--filter ClientAuth` (t-authgate). Device follow-up (human-gated): an unpaired
   client is refused on real hardware; a revoked device loses access on its next reconnect.
 

@@ -27,11 +27,11 @@
 ### Task 1: Extract Host Core Behind Tests
 
 - [x] Write `Tests/PortviewHostTests/HostRunnerTests.swift` against wished-for pure APIs: host-ready display text includes address/port/pin/pairing URL; permission guidance says app identity for app mode and terminal identity for CLI mode.
-- [x] Run `swift test --package-path /Users/tfinklea/git/screenshare --filter HostRunnerTests` and confirm it fails because `PortviewHostCore`/runner APIs do not exist yet.
+- [x] Run `swift test --package-path <repo> --filter HostRunnerTests` and confirm it fails because `PortviewHostCore`/runner APIs do not exist yet.
 - [x] Add `PortviewHostCore` product/target in `Package.swift` and move reusable host files into `Sources/PortviewHostCore/`.
 - [x] Implement `HostRunner`, host status/event structs, and CLI/app permission guidance helpers by moving existing `PortviewHostApp` logic rather than rewriting capture/session behavior.
 - [x] Replace `Sources/portview-host/PortviewHostApp.swift` with a CLI entry point that invokes `HostRunner.runForCLI()` and prints events.
-- [x] Run the focused host tests and `swift build --package-path /Users/tfinklea/git/screenshare --product portview-host`.
+- [x] Run the focused host tests and `swift build --package-path <repo> --product portview-host`.
 
 ### Task 2: Add macOS Host App Target
 
@@ -43,8 +43,8 @@
 
 ### Task 3: Verify End-To-End Build Paths And Docs
 
-- [x] Run `swift test --package-path /Users/tfinklea/git/screenshare`.
-- [x] Run `swift build --package-path /Users/tfinklea/git/screenshare --product portview-host`.
+- [x] Run `swift test --package-path <repo>`.
+- [x] Run `swift build --package-path <repo> --product portview-host`.
 - [x] Run the macOS app build command from Task 2 again after fixes.
 - [x] Update `apps/README.md` to make `PortviewHost.app` the primary Mac host run path and keep `swift run portview-host` as a developer fallback.
 - [x] Update `.docs/ai/roadmap.md` and `.docs/ai/current-state.md` with the app target status and remaining manual TCC/device retest.

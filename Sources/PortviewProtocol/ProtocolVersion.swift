@@ -19,7 +19,7 @@ public enum ProtocolVersion {
     public static let minimum: UInt16 = 1
 
     /// Wire version at which `ServerHello` gained its appended `sessionToken` field (QUIC lane
-    /// splitting, `screenshare-w6n`). A `ServerHello` whose `protocolVersion` is below this omits
+    /// splitting, 2026-07). A `ServerHello` whose `protocolVersion` is below this omits
     /// the field entirely on the wire; decode leaves `sessionToken` `nil` in that case, so an old
     /// peer that stops decoding after `chosenCodec` is unaffected.
     public static let laneVersion: UInt16 = 2

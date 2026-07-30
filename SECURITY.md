@@ -6,7 +6,7 @@ trust model, which versions receive fixes, and how to report a vulnerability.
 ## Trust model
 
 Portview streams your Mac's screen and accepts trackpad/keyboard input from an iPhone over
-a direct, encrypted connection — there is no server in between.
+a direct, encrypted connection — there is no Portview server in between.
 
 - **Network scope.** Portview targets a **local LAN**, or a private overlay you already
   control — **Tailscale** or **WireGuard**. It is not designed to be exposed on the open
@@ -21,18 +21,47 @@ a direct, encrypted connection — there is no server in between.
   code offline before the user compares it. Every connection after pairing is verified
   against the pinned fingerprint; a changed fingerprint is treated as a possible
   interception, not silently re-trusted.
+- **Client identity — mutual authentication is required.** Every client mints a persistent
+  per-device **Curve25519 keypair** (private key in the iOS Keychain, never on the wire)
+  and must answer a fresh challenge with a signature that also binds the host's certificate
+  hash, so a response can't be relayed to a different host. The host serves **only enrolled
+  devices**; there is no anonymous or legacy admission path.
+- **Enrollment is an attended ceremony.** A new device can enroll only while the pairing
+  window is explicitly open on the Mac, and only after the owner compares the device's key
+  fingerprint (shown on both screens) and approves with **Touch ID / device-owner
+  authentication**. Device names offered by a client are sanitized and never used as
+  identity.
+- **Revocation kills live sessions.** Revoking a device (Touch ID-gated) terminates its
+  active sessions immediately — screen, input, clipboard, and file transfer all stop — and
+  its key can only return through the enrollment ceremony. Revoking the last device leaves
+  the host serving no one until an in-person re-pair; it never falls back to open
+  admission.
+- **Recovery is attended, never remote.** If the pairing store becomes unreadable, the
+  host fails **closed** (nobody connects). The menu bar carries a break-glass **"Reset
+  pairing…"** — Touch ID-gated; it forgets every device, discards pending revocations, and
+  quits — after which each device must pair again in person. There is no remote or
+  unauthenticated recovery path.
 - **Host-side input gating.** The host — not just the client UI — refuses to inject input
   while the Mac's screen is locked, regardless of what a connected client sends.
-- **Known gap: no mutual (client) authentication.** The host currently authenticates
-  itself to the client (via the pinned TLS certificate), but **does not yet authenticate
-  the client** — any peer that completes the handshake and knows/guesses how to reach
-  `host:port` is served. On a shared or untrusted LAN this is a real exposure, not just a
-  theoretical one. Revocable per-device client keypairs + a host-side pairing store are
-  designed (see `docs/superpowers/specs/2026-07-01-revocable-pairing-mutual-auth.md`) but
-  **not yet implemented**; this work is intentionally tracked as its own dedicated security
-  pass rather than folded into routine feature work. Until it lands, treat Portview as
-  suitable for networks you already trust (your own LAN, your own Tailscale/WireGuard
-  tailnet) — not for shared or adversarial networks.
+- **Optional re-wake uses your iCloud.** The reconnect-nudge feature routes a small host
+  beacon (host name and endpoint hints — never screen contents) through **your own iCloud
+  account's** CloudKit database and Apple push notifications. No Portview-operated server
+  is involved, but Apple's cloud is on the path for that one feature. It fails soft and is
+  never required for pairing or streaming.
+
+## Known limitations
+
+Stated here so you don't have to discover them:
+
+- **A paired device currently gets every capability** — screen, input, two-way clipboard
+  sync, system audio, and file transfer. Per-capability opt-in (clipboard/files off by
+  default) is planned but not yet shipped. Pair only devices you fully trust.
+- **Revoke can strand one key or mouse button** if it lands exactly between a press and its
+  release; the stuck input clears on the next local key press or click. A release pass on
+  revoke is planned.
+- **Two host processes don't share revocations live.** If you run the GUI app and the
+  `portview-host` CLI at once, a device revoked in one keeps its access in the other until
+  that process restarts. Run one host at a time.
 
 If you're evaluating Portview for your own use: run it on a network you control, and don't
 expose the host's port to the open internet (no port forwarding).

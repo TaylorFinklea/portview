@@ -5,7 +5,7 @@ Portview is two apps over a shared, tested core (`PortviewProtocol`, `PortviewTr
 - **Mac host** (`apps/PortviewHost`) — a signed macOS app that captures the screen, hardware-HEVC-encodes it, and serves it under Portview's own Screen Recording identity.
 - **iOS client** (`apps/PortviewClient`) — a SwiftUI app that connects, decodes, and displays the Mac's screen.
 
-> **POC status.** The core pipeline (capture → HEVC encode → certificate-pinned QUIC → HEVC decode → display/control) is wired end to end. Bonjour discovery, QR pairing, clipboard, audio, file transfer, multi-monitor, Metal rendering, and the diagnostics HUD are implemented. The current manual test focus is device-side motion/quality tuning.
+> **Approaching v1.0.** The core pipeline (capture → HEVC encode → certificate-pinned QUIC → HEVC decode → display/control) is wired end to end, behind mutual authentication (attended enrollment + revocation). Bonjour discovery, QR/SAS pairing, clipboard, audio, file transfer, multi-monitor, Metal rendering, and the diagnostics HUD are implemented. The current focus is on-device verification of the full feature surface.
 
 ## Prerequisites
 
@@ -32,17 +32,14 @@ Developer CLI fallback:
 swift run portview-host
 ```
 
-The CLI still works for development, but Screen Recording permission attaches to your terminal app rather than Portview. Prefer `PortviewHost.app` for device testing.
+Two caveats on the CLI: Screen Recording permission attaches to your terminal app rather than
+Portview, and **the CLI cannot enroll new devices** — it has no pairing UI, so it serves only
+devices already enrolled through the app (and needs a restart to pick up enrollments made while
+it was running). Pair through `PortviewHost.app` first; prefer the app for device testing.
 
-When ready, the host shows details like:
-
-```
-🪟  Portview host ready
- Port:  54321
- Pin:   3a7f…  (64 hex chars)
-```
-
-Note the **address**, **pin**, and **pairing URL**. The phone must be on the same Wi-Fi or reach the Mac over your Tailscale.
+When ready, the host prints a banner with its **address**, Bonjour **service name**, grouped
+**pin**, and the full **pairing URL** (plus a scannable QR in the terminal). The phone must be
+on the same Wi-Fi or reach the Mac over your Tailscale.
 
 ## 2. Run the iOS client
 
@@ -125,4 +122,5 @@ git config core.hooksPath scripts
 ## What works / what's next
 
 - ✅ Live screen view, trackpad/keyboard control, clipboard, audio, file transfer, multi-monitor, QUIC transport, Metal renderer, diagnostics HUD.
-- ⏭️ Next: on-device motion/quality retest, QUIC validation over real/Tailscale link, then adaptive bitrate/fps polish. See `.docs/ai/roadmap.md`.
+- ✅ Mutual auth: per-device keypairs, attended Touch ID-gated enrollment, live-session revoke, break-glass reset — device-verified. Notarized Developer-ID host build (`make release`).
+- ⏭️ Next: full on-device feature sweep, Tailscale validation, host settings (launch at login), clipboard/files opt-in, iOS first-run walkthrough. See `.docs/ai/roadmap.md`.

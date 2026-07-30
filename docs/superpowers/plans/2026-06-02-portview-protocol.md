@@ -10,7 +10,7 @@
 
 **Scope (M0 subset):** control-lane handshake (`ClientHello`, `ServerHello`, `StartSession`), `VideoFrame` for the video lane, and `Bye`/`ProtocolError`. Audio/clipboard/files message types are deferred to their milestones (YAGNI).
 
-**Conventions:** Each task is one commit. Commit messages use Conventional Commits; the repo's commit tooling appends the standard `Co-Authored-By` trailer automatically. All paths are relative to the repo root `/Users/tfinklea/git/screenshare`.
+**Conventions:** Each task is one commit. Commit messages use Conventional Commits; the repo's commit tooling appends the standard `Co-Authored-By` trailer automatically. All paths are relative to the repo root `<repo>`.
 
 ---
 
