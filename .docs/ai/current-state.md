@@ -3,7 +3,7 @@
 > Loop state only (≤20 lines, per AGENTS.md). Rationale → `decisions.md`. Backlog → `bd ready`.
 > The pre-2026-07-27 session journal was pruned; it remains in git history.
 
-Branch: `main`, clean. 3 commits ahead of `origin/main`.
+Branch: `main`, clean. 1 commit ahead of `origin/main`.
 
 ## Plan — v1.0 (rationale: `decisions.md` 2026-07-27, 2026-07-28)
 
