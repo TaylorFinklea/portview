@@ -36,8 +36,8 @@ artifacts. Production changes and device observations remain human-confirmed gat
 
 - [x] Run `git status --short --branch`; require a known branch and no unexpected changes.
 - [x] Run `make bootstrap` so both generated Xcode projects and the pre-push hook are current.
-- [ ] Run `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make preflight`.
-- [ ] If a stored-property change has landed since the last trustworthy run, run
+- [x] Run `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make preflight`.
+- [x] If a stored-property change has landed since the last trustworthy run, run
   `swift package clean` before accepting either red or green SwiftPM results.
 - [x] Record any baseline failure before editing. A pre-existing failure does not become part of a
   later feature task unless the user explicitly expands scope.
@@ -45,6 +45,12 @@ artifacts. Production changes and device observations remain human-confirmed gat
 **2026-08-03 baseline:** SwiftPM passed 734 tests in 110 suites. The Mac Xcode build then stopped
 with error 65: no private-key-backed `Mac Development` certificate for team `K7CBQW6MPG` is
 installed (`security find-identity -v -p codesigning`: 0 valid identities). No source fix attempted.
+
+**2026-08-03 retry:** After installing an Apple Development identity, `make preflight` exited 0:
+SwiftPM 734/734; Mac build succeeded; Mac tests 24/24; iOS simulator tests 90/90. No stored-property
+source change landed between runs, so the conditional clean was not required. Non-failing output
+included the existing `PortviewTransport` dependency-scan warning and a continuation-misuse warning
+inside the passing non-cooperative-straggler test.
 
 **Verify:** `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make preflight` exits 0:
 package tests, Mac build, Mac logic tests, and iOS simulator
