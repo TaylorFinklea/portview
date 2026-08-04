@@ -1,0 +1,224 @@
+# Portview v1.0 Release-Finish Plan
+
+> **For agentic workers:** Execute one gate at a time. Each gate ends in a command or named human
+> verification. Do not continue past a failed gate, invent CloudKit confirmation, initialize a new
+> Beads database, push, publish, or tag without the user authorizing that action.
+
+**Goal:** Finish Portview v1.0 as a production-capable, hardware-proven, notarized Mac host and an
+archive-validated iOS client, with CloudKit re-wake and the July 28 settings/onboarding decisions
+implemented and verified.
+
+**Architecture:** Verification comes before construction. First promote the existing CloudKit
+schema, then prove the already-built feature surface and re-wake path on devices. Only then execute
+the separately detailed settings/onboarding plan, rerun the release gates, and prepare local release
+artifacts. Production changes and device observations remain human-confirmed gates.
+
+**Detailed implementation plan:** `docs/superpowers/plans/2026-08-03-settings-onboarding.md`
+
+## Global constraints
+
+- macOS 26+, iOS 26+, Apple Silicon, Swift 6.2, Xcode 26.
+- Install device-test host builds only at `/Applications/PortviewHost.app`; TCC grants are path-bound.
+- Never run tests against live CGEvent, pasteboard, audio, IOPM, or Keychain surfaces except the
+  deliberate `KeychainIdentityStoreTests`; preserve injectable effect seams.
+- `ProtocolVersion.current` stays `1`; QUIC lane A/B and per-frame streams remain cut from v1.0.
+- CloudKit production state requires CloudKit Console success or explicit user confirmation.
+  `cktool` export/validation does not prove that promotion occurred.
+- If `.beads/` remains absent, use the tracked handoff as the queue. Do not run `bd init`.
+- One commit per implementation task. Do not push, publish, upload, or create the final tag unless
+  the user explicitly authorizes that separate operation.
+
+---
+
+## Gate 0 — Establish the release baseline
+
+**Purpose:** Prove that the source tree is reproducible before changing external production state.
+
+- [ ] Run `git status --short --branch`; require a known branch and no unexpected changes.
+- [ ] Run `make bootstrap` so both generated Xcode projects and the pre-push hook are current.
+- [ ] Run `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make preflight`.
+- [ ] If a stored-property change has landed since the last trustworthy run, run
+  `swift package clean` before accepting either red or green SwiftPM results.
+- [ ] Record any baseline failure before editing. A pre-existing failure does not become part of a
+  later feature task unless the user explicitly expands scope.
+
+**Verify:** `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make preflight` exits 0:
+package tests, Mac build, Mac logic tests, and iOS simulator
+tests all pass.
+
+## Gate 1 — Promote the CloudKit schema to Production (`portview-lb9`)
+
+**Purpose:** Make the production entitlement useful. Release builds already target Production, but
+beacon writes fail softly if the `HostBeacon` schema was never promoted.
+
+### Preconditions
+
+- [ ] Sign into the Apple developer account that owns team `K7CBQW6MPG`.
+- [ ] Open CloudKit Console → CloudKit Database.
+- [ ] Select container `iCloud.dev.finklea.portview`.
+- [ ] In Development, confirm record type `HostBeacon` exists with the currently deployed fields:
+  `hostName`, `port`, `epoch`, and `wantsReconnect`.
+
+### Promotion
+
+- [ ] Choose **Deploy Schema Changes** for the container.
+- [ ] Review the proposed changes; the expected v1.0 promotion is the `HostBeacon` record type and
+  its indexes/fields, with no destructive removal.
+- [ ] Submit the deployment.
+- [ ] Switch the console environment to Production and confirm `HostBeacon` is visible there.
+- [ ] Capture the console success state or provide explicit user confirmation in the session.
+
+**Failure rule:** Stop on an authorization error, unexpected destructive diff, or missing
+`HostBeacon`. Do not substitute `cktool` success for production confirmation.
+
+**Verify:** Named human check — CloudKit Console shows `HostBeacon` in Production for
+`iCloud.dev.finklea.portview`.
+
+**Handoff update after success:** Mark the CloudKit item complete in `.docs/ai/current-state.md`.
+Close `portview-lb9` only if the authoritative Beads database becomes available; otherwise leave no
+replacement database behind.
+
+## Gate 2 — Sitting 2: existing feature sweep (`portview-2u9`)
+
+**Purpose:** Prove the non-auth feature surface on the build that is intended to ship. This is an
+observation session, not a live debugging session.
+
+### Stage the candidate
+
+- [ ] Build the current Mac release with
+  `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make release`.
+- [ ] Verify the exported app before installation:
+  `xcrun stapler validate build/release/export/PortviewHost.app`.
+- [ ] Verify Gatekeeper acceptance:
+  `spctl -a -vvv build/release/export/PortviewHost.app`.
+- [ ] Quit the running host, replace `/Applications/PortviewHost.app` with the exported app, and
+  relaunch from `/Applications`.
+- [ ] Generate the iOS project with `make generate`.
+- [ ] In Xcode, select the attached iPhone, build the `PortviewClient` scheme, and install the
+  current client. Re-pair if the device still pins an identity from another Mac.
+- [ ] Put Mac and iPhone on the same LAN; start from a live stream.
+
+### Verification matrix
+
+- [ ] **Clipboard Mac → iPhone:** copy a unique plain-text marker on the Mac; verify the client
+  receives the exact marker once.
+- [ ] **Clipboard iPhone → Mac:** send a different unique marker from the client; paste on the Mac
+  and verify exact equality.
+- [ ] **Audio:** play continuous host audio for at least two minutes; verify audible client audio,
+  no periodic ticks, and recovery after a Siri/call interruption.
+- [ ] **File iPhone → Mac:** send a small named file; verify one intact file appears in Downloads,
+  with no duplicate or partial file.
+- [ ] **File Mac → iPhone:** use the host device card to send a small named file; verify the client
+  completes it and presents the Share sheet.
+- [ ] **Multi-monitor:** connect with one display available, wake/connect a second display, wait up
+  to two seconds for the switcher, switch to it, then switch back without restarting the host.
+
+**Failure rule:** Record the build identity, exact action, observed result, and whether reconnect or
+relaunch changed it. Move to the next matrix row; do not debug during the sitting. Afterward, add one
+tracked roadmap item per independent defect when Beads is unavailable.
+
+**Verify:** Named human check — all six matrix rows pass on the current release candidate.
+
+## Gate 3 — Sitting 3: production CloudKit re-wake (`portview-uma`)
+
+**Purpose:** Prove the best-effort CloudKit/APNs accelerator on the real production container. A
+Debug host is invalid evidence because Debug intentionally omits the host CloudKit entitlement.
+
+### Preconditions
+
+- [ ] Gate 1 passed; Production contains `HostBeacon`.
+- [ ] Install the notarized Release host from Gate 2 at `/Applications/PortviewHost.app`.
+- [ ] Install a device-signed iOS client whose entitlements contain iCloud/CloudKit and
+  `aps-environment`; do not use the simulator for push-delivery evidence.
+- [ ] Mac and iPhone are signed into the same Apple ID, the iPhone allows Portview notifications,
+  Background App Refresh is on, and Low Power Mode is off for the primary pass.
+- [ ] Launch both apps once, pair, establish a stream, then return the client to Deck Home so its
+  CloudKit zone/subscription bootstrap can complete.
+
+### Primary suspended-app flow
+
+- [ ] Background the iOS app without force-quitting it.
+- [ ] In the host menu-bar popover choose **Ask iPhone to reconnect**.
+- [ ] Allow a realistic best-effort delivery window; record elapsed time rather than imposing a
+  false deterministic SLA.
+- [ ] Verify a local notification names the Mac and offers tap-to-resume.
+- [ ] Tap it and verify the client enters the existing saved-Mac reconnect path and reaches a live
+  stream without manual host/port entry.
+
+### Required edge checks
+
+- [ ] Repeat after the Mac's LAN address changes; Bonjour re-resolution must win over the stale
+  saved IP and reconnect.
+- [ ] With the client already foreground and idle, nudge once; verify it reconnects in-app rather
+  than posting a redundant same-host notification.
+- [ ] Deny Portview notifications, foreground once, and verify the passive one-time hint appears;
+  manual reconnect must remain usable.
+- [ ] Force-quit the client and nudge; verify the documented limitation: iOS does not deliver the
+  silent push, Portview does not claim otherwise, and manual launch/reconnect still works.
+
+**Failure rule:** A missing push is not automatically a code defect. Record CloudKit production
+confirmation, Apple-ID match, notification/BAR/Low-Power state, host beacon action, elapsed time,
+and whether a later foreground fetch sees the beacon before classifying the failure.
+
+**Verify:** Named human check — suspended-app notification → tap → live stream passes, the stale-IP
+case reconnects, denied-notification copy is truthful, and force-quit behavior matches documentation.
+
+## Gate 4 — Implement settings, privacy defaults, and first run (`portview-wyi` follow-through)
+
+Execute `docs/superpowers/plans/2026-08-03-settings-onboarding.md` task by task. Its required outcomes
+are:
+
+- [ ] Menu bar is the Mac app; no normal host window or Dock icon remains.
+- [ ] Permissions onboarding and every recovery action stay usable inline in the menu-bar popover.
+- [ ] Host settings persist launch-at-login, preferred port, and default display.
+- [ ] Clipboard and file transfer default off and are enforced at host effect boundaries.
+- [ ] iOS first-run walkthrough appears once and can be reopened from Settings.
+- [ ] Camera denial becomes an explanatory state with manual pairing and Settings recovery.
+- [ ] `portview://pair` is registered and routes through the same `PairingPayload` connection path.
+
+**Verify:** The detailed plan's focused tests pass, then
+`DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make preflight` exits 0, followed by its
+named Mac and iPhone checks.
+
+## Gate 5 — Final archive and distribution validation
+
+### Source and test gate
+
+- [ ] Run `swift package clean` if any stored properties changed during Gate 4.
+- [ ] Run `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make preflight` from a clean
+  working tree.
+- [ ] Confirm `ProtocolVersion.current == 1`.
+- [ ] Confirm `MARKETING_VERSION = 1.0` and choose the final
+  `CURRENT_PROJECT_VERSION` in `apps/Portview.xcconfig`.
+
+### iOS archive validation
+
+- [ ] Archive `PortviewClient` in Xcode using **Any iOS Device (arm64)** and Release configuration.
+- [ ] In Organizer, run **Validate App** against App Store Connect.
+- [ ] Confirm the archive contains the expected application identifier, push entitlement,
+  CloudKit container, background remote-notification mode, privacy manifest, camera usage string,
+  and `portview` URL scheme.
+- [ ] Stop at validated archive unless the user separately authorizes upload/TestFlight release.
+
+### Mac artifact and install-channel decision
+
+- [ ] Decide before tagging: keep the already-documented notarized zip as v1.0's channel
+  (recommended), or explicitly expand scope to a DMG/installer task. Do not silently add packaging.
+- [ ] Run `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make release` for the final
+  commit.
+- [ ] Validate staple and Gatekeeper acceptance as in Gate 2.
+- [ ] Extract the zip into a clean temporary folder, drag the app to `/Applications`, and verify
+  first launch, menu-bar presence, TCC onboarding, and Quit behavior.
+
+### Release handoff
+
+- [ ] Update `CHANGELOG.md`, `README.md`, and `apps/README.md` only for behavior actually verified.
+- [ ] Mark every completed gate in `.docs/ai/current-state.md`; route durable rationale to
+  `.docs/ai/decisions.md` and leave unresolved work in the roadmap.
+- [ ] Run `git diff --check` and `git status --short --branch`.
+- [ ] Prepare the local `v1.0.0` tag only after the user approves the final diff and artifacts.
+- [ ] Push commits, tag, GitHub release, and TestFlight upload remain separate explicit approvals.
+
+**Final acceptance:** CloudKit production schema confirmed; Sitting 2 and Sitting 3 pass; Gate 4
+behavior passes tests and hardware checks; iOS archive validates; Mac zip is notarized/stapled and
+clean-install tested; documentation matches the verified product; no unauthorized push/upload/tag.
