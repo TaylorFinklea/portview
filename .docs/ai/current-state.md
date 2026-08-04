@@ -1,31 +1,20 @@
 # Current State
 
-> Loop state only (≤20 lines, per AGENTS.md). Rationale → `decisions.md`. Backlog → `bd ready`.
-> The pre-2026-07-27 session journal was pruned; it remains in git history.
+> Loop state only (≤20 lines). Rationale → `decisions.md`; details → `phases/v1-release-finish-spec.md`.
 
-Branch: `main`, clean. 2 commits ahead of `origin/main`.
+Branch: `codex/v1-release-finish`, clean before handoff update.
 
-## Plan — v1.0 (`phases/v1-release-finish-spec.md`; rationale: `decisions.md` 2026-07-27/28)
+## Plan — v1.0
 
-- [x] Repo ignores · fresh-clone `make bootstrap` · break-glass reset · GUI on `.required` · QR gated
-- [x] **Sitting 1 PASSED** — `.required` enrollment, revoke + live-session kill, lockout, reset all
-      device-confirmed. 3 defects found/fixed/re-verified (`7ty`, `l27`).
-- [x] **Notarized Developer-ID host** — `make release` end-to-end; quarantined-zip test gives
-      `spctl: accepted, source=Notarized Developer ID` + stapled (passes Gatekeeper offline).
-- [ ] **Deploy CloudKit schema to PRODUCTION** (`portview-lb9`, P1) — release carries
-      `icloud-container-environment=Production`; schema does NOT auto-promote and beacon writes
-      fail SOFT, so skipping it ships a host that looks healthy and wakes nobody.
-- [ ] Sitting 2 feature sweep `portview-2u9` — clipboard/audio/files/multi-monitor still unproven
-- [ ] Sitting 3 re-wake `portview-uma` — only meaningful on a PRODUCTION-signed build, so after ↑
-- [ ] `wyi` impl: menu-bar-is-the-app · host settings · clipboard+files opt-in · iOS walkthrough
-- [x] Doc truth pass — SECURITY.md rewritten (mutual auth + enrollment + revoke + reset + iCloud
-      in the trust model, known limitations stated); README/apps-README/AGENTS.md honest;
-      CHANGELOG + CONTRIBUTING created; absolute paths stripped from public specs
-- [ ] iOS archive/upload validation · camera-denial · `CFBundleURLTypes` · tag
+- [x] Repo/bootstrap · Sitting 1 · notarized Developer-ID host · doc truth pass
+- [ ] Gate 0 preflight — SwiftPM 734/734 passed; Mac Xcode build blocked on signing identity
+- [ ] Gate 1 CloudKit Production schema (`portview-lb9`)
+- [ ] Gate 2 feature sweep (`portview-2u9`)
+- [ ] Gate 3 production re-wake (`portview-uma`)
+- [ ] Gate 4 `wyi`: menu bar/settings/privacy defaults/iOS walkthrough
+- [ ] Gate 5 archive validation/install-channel decision/tag handoff
 
 ## Blockers / open questions
 
-- No install artifact beyond the zip (no .dmg/installer); the ditto-to-/Applications path is still
-  informal. Zip is a legitimate v1.0 channel — decide before the tag.
-- Landmine: SwiftUI modals (`.confirmationDialog`/alert) do NOT work from the `.window`-style
-  MenuBarExtra popover — it closes on resign-key. Use inline rows. LAContext from it is fine.
+- Keychain has 0 valid code-signing identities; install `Mac Development` identity for team `K7CBQW6MPG`.
+- Open: zip vs DMG before tagging; MenuBarExtra modals die on resign-key, so use inline rows.
