@@ -63,20 +63,28 @@ beacon writes fail softly if the `HostBeacon` schema was never promoted.
 
 ### Preconditions
 
-- [ ] Sign into the Apple developer account that owns team `K7CBQW6MPG`.
-- [ ] Open CloudKit Console → CloudKit Database.
-- [ ] Select container `iCloud.dev.finklea.portview`.
-- [ ] In Development, confirm record type `HostBeacon` exists with the currently deployed fields:
+- [x] Sign into the Apple developer account that owns team `K7CBQW6MPG`.
+- [x] Open CloudKit Console → CloudKit Database.
+- [x] Select container `iCloud.dev.finklea.portview`.
+- [x] In Development, confirm record type `HostBeacon` exists with the currently deployed fields:
   `hostName`, `port`, `epoch`, and `wantsReconnect`.
 
 ### Promotion
 
-- [ ] Choose **Deploy Schema Changes** for the container.
-- [ ] Review the proposed changes; the expected v1.0 promotion is the `HostBeacon` record type and
+- [x] Choose **Deploy Schema Changes** for the container.
+- [x] Review the proposed changes; the expected v1.0 promotion is the `HostBeacon` record type and
   its indexes/fields, with no destructive removal.
-- [ ] Submit the deployment.
-- [ ] Switch the console environment to Production and confirm `HostBeacon` is visible there.
-- [ ] Capture the console success state or provide explicit user confirmation in the session.
+- [x] Submit the deployment.
+- [x] Switch the console environment to Production and confirm `HostBeacon` is visible there.
+- [x] Capture the console success state or provide explicit user confirmation in the session.
+
+**2026-08-08 evidence:** The container initially had only the default `Users` type in both
+environments. With explicit user approval, Development was given the exact additive `HostBeacon`
+schema: `hostName: String`, `port: Int64`, `epoch: Int64`, and `wantsReconnect: Int64`, with no
+indexes. The deployment diff added only that type and its standard `_creator`, `_icloud`, and
+`_world` grants. CloudKit Console reported “The schema is deployed to Production”; Production then
+showed `HostBeacon` with all four fields and no indexes, and Production schema history recorded the
+type creation and role updates.
 
 **Failure rule:** Stop on an authorization error, unexpected destructive diff, or missing
 `HostBeacon`. Do not substitute `cktool` success for production confirmation.
