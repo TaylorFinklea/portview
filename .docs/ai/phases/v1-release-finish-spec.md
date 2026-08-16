@@ -103,25 +103,26 @@ observation session, not a live debugging session.
 
 ### Stage the candidate
 
-- [ ] Build the current Mac release with
+- [x] Build the current Mac release with
   `DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer make release`.
-- [ ] Verify the exported app before installation:
+- [x] Verify the exported app before installation:
   `xcrun stapler validate build/release/export/PortviewHost.app`.
-- [ ] Verify Gatekeeper acceptance:
+- [x] Verify Gatekeeper acceptance:
   `spctl -a -vvv build/release/export/PortviewHost.app`.
-- [ ] Quit the running host, replace `/Applications/PortviewHost.app` with the exported app, and
+- [x] Quit the running host, replace `/Applications/PortviewHost.app` with the exported app, and
   relaunch from `/Applications`.
-- [ ] Generate the iOS project with `make generate`.
-- [ ] In Xcode, select the attached iPhone, build the `PortviewClient` scheme, and install the
+- [x] Generate the iOS project with `make generate`.
+- [x] In Xcode, select the attached iPhone, build the `PortviewClient` scheme, and install the
   current client. Re-pair if the device still pins an identity from another Mac.
-- [ ] Put Mac and iPhone on the same LAN; start from a live stream.
+- [x] Put Mac and iPhone on the same LAN; start from a live stream.
 
 ### Verification matrix
 
-- [ ] **Clipboard Mac → iPhone:** copy a unique plain-text marker on the Mac; verify the client
+- [x] **Clipboard Mac → iPhone:** copy a unique plain-text marker on the Mac; verify the client
   receives the exact marker once.
 - [ ] **Clipboard iPhone → Mac:** send a different unique marker from the client; paste on the Mac
-  and verify exact equality.
+  and verify exact equality. **FAIL 2026-08-11:** the expected marker was absent on two independent
+  reads.
 - [ ] **Audio:** play continuous host audio for at least two minutes; verify audible client audio,
   no periodic ticks, and recovery after a Siri/call interruption.
 - [ ] **File iPhone → Mac:** send a small named file; verify one intact file appears in Downloads,
@@ -130,6 +131,11 @@ observation session, not a live debugging session.
   completes it and presents the Share sheet.
 - [ ] **Multi-monitor:** connect with one display available, wake/connect a second display, wait up
   to two seconds for the switcher, switch to it, then switch back without restarting the host.
+
+**Sitting record:** notarized Release host and device-signed Release client staged; live stream
+confirmed. Current matrix is 1 pass, 1 fail, and 4 pending. Complete the durable interactive record
+in Harness Deck run `portview/20260811-gate2-product-test`; its current verdict is
+`changes-required`, so Gate 2 remains open.
 
 **Failure rule:** Record the build identity, exact action, observed result, and whether reconnect or
 relaunch changed it. Move to the next matrix row; do not debug during the sitting. Afterward, add one
