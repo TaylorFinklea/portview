@@ -217,7 +217,7 @@ struct LiveHUDView: View {
             toolButton(keyboardActive ? "keyboard.chevron.compact.down" : "keyboard", active: keyboardActive) {
                 keyboardActive.toggle()
             }
-            toolButton("doc.on.clipboard") { session.pasteToHost() }
+            pasteButton
             toolButton("arrow.up.doc") { showFileImporter = true }
             if showQualityHUD {
                 toolButton(samplerMode == .linear ? "circle.lefthalf.filled" : "circle.righthalf.filled") {
@@ -241,6 +241,27 @@ struct LiveHUDView: View {
                 }
             }
         }
+    }
+
+    private var pasteButton: some View {
+        PasteButton(payloadType: String.self) { payloads in
+            for text in payloads {
+                session.sendClipboardText(text)
+            }
+        }
+        .labelStyle(.iconOnly)
+        .buttonStyle(.plain)
+        .foregroundStyle(Glass.text1)
+        .frame(width: 36, height: 36)
+        .background {
+            RoundedRectangle(cornerRadius: Glass.button, style: .continuous)
+                .fill(.ultraThinMaterial)
+                .overlay(RoundedRectangle(cornerRadius: Glass.button, style: .continuous)
+                    .fill(Color.white.opacity(0.06)))
+                .overlay(RoundedRectangle(cornerRadius: Glass.button, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.14), lineWidth: 1))
+        }
+        .accessibilityLabel("Paste to Mac")
     }
 
     private func toolButton(_ systemImage: String, active: Bool = false, danger: Bool = false, action: @escaping () -> Void) -> some View {

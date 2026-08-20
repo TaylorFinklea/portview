@@ -64,4 +64,30 @@ final class OutboundInputPumpTests: XCTestCase {
         let finalSum = await delta.value()
         XCTAssertEqual(finalSum, total)
     }
+
+    func testClipboardRemainsDiscreteBetweenPointerMoves() async {
+        let tags = Tags()
+        let pump = OutboundInputPump(sink: { message in
+            switch message {
+            case .pointerMove:
+                await tags.append("move")
+            case .clipboardUpdate(let update):
+                await tags.append("clipboard:\(update.text)")
+            default:
+                await tags.append("other")
+            }
+        })
+
+        pump.enqueue(.pointerMove(PointerMove(dx: 1, dy: 0)))
+        pump.enqueue(.clipboardUpdate(ClipboardUpdate(text: "marker")))
+        pump.enqueue(.pointerMove(PointerMove(dx: 2, dy: 0)))
+
+        for _ in 0..<200 {
+            let n = await tags.count()
+            if n >= 3 { break }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        let received = await tags.snapshot()
+        XCTAssertEqual(received, ["move", "clipboard:marker", "move"])
+    }
 }
