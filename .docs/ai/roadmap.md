@@ -39,14 +39,19 @@ script: `.docs/ai/phases/device-verify-plan-2026-07-08.md`.
       the break-glass pairing reset (supersedes `oj5`), GUI on `.required` (closed a fresh-install
       legacy-admission hole), QR governed by the pairing window. **CUT from v1.0**: the QUIC lane
       A/B (`3ev`) and phase-2 per-frame streams (`7fu`, deferred) — lanes stay dormant.
-      CAVEAT: none of the landed items has run on hardware; Sitting 1 is the gate.
-- [?] **Gate 2 product test:** notarized Release host installed at `/Applications`; Release client
-      installed on Roshar; live stream confirmed. Matrix: clipboard Mac → iPhone PASS; reverse FAIL;
-      audio, both file directions, and multi-monitor pending. Complete the asks and record approval in
-      Harness Deck run `portview/20260811-gate2-product-test`; verdict remains `changes-required`.
-- [ ] **Gate 2 defect — clipboard iPhone → Mac:** the expected unique marker was absent on two
-      independent reads from the staged Release candidates. Diagnose after the sitting; verify with
-      a new unique marker and exact equality on the Mac.
+      CAVEAT: R2 is installed but its six-surface hardware sweep is still the Gate 2 item below.
+- [?] **Gate 2 product test:** R2 Release client 1.0 (1), source `b31a3fd`, is installed on Roshar;
+      the notarized Release host remains at `/Applications`. Rerun all six surfaces on this exact
+      candidate and record approval in Harness Deck run `portview/20260819-gate2-product-test-r2`;
+      all six rows are pending and the verdict remains `changes-required`.
+- [?] **Gate 2 defect — clipboard iPhone → Mac:** code repaired and independently reviewed in
+      `b04400b`/`8aa4d0a`/`b31a3fd`; R2 uses the system `PasteButton`, retains payload/ordering guards,
+      and leaves non-clipboard host tools usable while locked. Close only after a fresh unique marker
+      arrives exactly once on the Mac during the R2 sitting.
+- [ ] **App Store validation blockers:** choose whether v1 is iPhone-only or universal; the current
+      iPhone+iPad archive warns that required orientations/full-screen policy is missing. Gate 4 must
+      add `portview://`; then obtain App Store distribution signing, confirm build-number availability,
+      and run Organizer **Validate App**. No upload/TestFlight action is authorized yet.
 - [x] **Fleet: work `bd ready`** — queue DRAINED 2026-07-15 (djx review executed + 9 findings fixed, s86, e00, 8z9, identity-rotation fix; ADR decisions.md 2026-07-15). Suite 459→469. `jc3` scope lost with the beads DB — bead `portview-qhl` awaits the user restating intent.
 - [ ] **User-present**: (a) review + push the 3 unpushed commits on `main` (2026-07-16 debugging session: odd-height encode fix, zero-byte stream parking, host observability — the 2026-07-15 six are pushed); (b) **plug the iPhone in via USB** → install current client → re-verify the ~7-10s freeze (bead `portview-4x8` — the phone still runs the Jul 10-11 build, which is the prime suspect); (c) answer the `l4y` settings/onboarding questions; (d) `cqv.2` notarization (Apple-account-gated).
 - [x] **Dedicated security session** for the mutual-auth track — **EPIC `portview-han` CODE-COMPLETE 2026-07-25** (was `screenshare-1nt`: 7jl→5yw→9m2). Ran as four sub-beads across dedicated sessions, each brainstorm→design→dual-adversarial-design-review→plan→SDD→whole-branch review: **han.1** gate wiring + rollout policy (+ durable `migrationComplete` so revoke-all/restart never reopen bootstrap) · **han.2** client `ClientIdentity` keypair + keychain store · **han.3** enrollment ceremony (LAContext prompt + dual-fingerprint compare) · **han.4** revoke kills live sessions + generation/lease registry + menu-bar revoke UI. Lane session-token hygiene (constant-time compare + never-log) landed 2026-07-21 with the §2 foundation. ADRs: decisions.md 2026-07-21/22/23/**25**. Kept out of fleet dispatch throughout (standing rule). **Remaining**: device-verify sittings — `portview-myt` (han.4 revoke) + the han.3 9-item list; and the user's review+push of 20 commits.

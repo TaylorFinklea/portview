@@ -118,11 +118,12 @@ observation session, not a live debugging session.
 
 ### Verification matrix
 
-- [x] **Clipboard Mac → iPhone:** copy a unique plain-text marker on the Mac; verify the client
-  receives the exact marker once.
+- [ ] **Clipboard Mac → iPhone:** copy a unique plain-text marker on the Mac; verify the client
+  receives the exact marker once. The 2026-08-11 candidate passed; rerun on R2.
 - [ ] **Clipboard iPhone → Mac:** send a different unique marker from the client; paste on the Mac
   and verify exact equality. **FAIL 2026-08-11:** the expected marker was absent on two independent
-  reads.
+  reads. R2 replaces the programmatic pasteboard read with the system paste control; hardware
+  verification remains required.
 - [ ] **Audio:** play continuous host audio for at least two minutes; verify audible client audio,
   no periodic ticks, and recovery after a Siri/call interruption.
 - [ ] **File iPhone → Mac:** send a small named file; verify one intact file appears in Downloads,
@@ -132,10 +133,22 @@ observation session, not a live debugging session.
 - [ ] **Multi-monitor:** connect with one display available, wake/connect a second display, wait up
   to two seconds for the switcher, switch to it, then switch back without restarting the host.
 
-**Sitting record:** notarized Release host and device-signed Release client staged; live stream
-confirmed. Current matrix is 1 pass, 1 fail, and 4 pending. Complete the durable interactive record
-in Harness Deck run `portview/20260811-gate2-product-test`; its current verdict is
-`changes-required`, so Gate 2 remains open.
+**2026-08-11 sitting record (superseded candidate):** notarized Release host and device-signed
+Release client staged; live stream confirmed. Matrix was 1 pass, 1 fail, and 4 pending. Harness Deck
+run `portview/20260811-gate2-product-test` remains historical evidence only.
+
+**2026-08-19 R2 remediation/staging:** commits `b04400b`, `8aa4d0a`, and `b31a3fd` route reverse
+clipboard through SwiftUI's system `PasteButton`, preserve the ordered outbound pump and payload
+limits, and disable only clipboard send while the host is locked. The requested independent panel
+cleared all material findings after repair: Ollama Cloud DeepSeek V4 Flash 0731 and GLM 5.2,
+NeuralWatt Kimi K3 and GLM 5.2, plus native review; Ollama Cloud Kimi K3 could not return a verdict
+because that provider lane reported insufficient balance. A fresh full preflight passed: SwiftPM
+734, Mac 24, iOS 96. Release archive source `b31a3fd9f31b05574bed72bdc8755315979379ca`, Portview
+1.0 (1), executable SHA-256 `9a7f70f4c13b0901b70b35446af2dcd87f72c24d5e41303494df07bb6be90271`,
+was signature/privacy-manifest checked and installed on Roshar at 2026-08-19 22:05 CDT without an
+agent launch. All six R2 observations are pending in Harness Deck run
+`portview/20260819-gate2-product-test-r2`; its verdict remains `changes-required` until the human
+sitting passes every row.
 
 **Failure rule:** Record the build identity, exact action, observed result, and whether reconnect or
 relaunch changed it. Move to the next matrix row; do not debug during the sitting. Afterward, add one
@@ -223,6 +236,14 @@ named Mac and iPhone checks.
   CloudKit container, background remote-notification mode, privacy manifest, camera usage string,
   and `portview` URL scheme.
 - [ ] Stop at validated archive unless the user separately authorizes upload/TestFlight release.
+
+**2026-08-19 reconnaissance (not Gate 5 completion):** a local Release archive succeeded and was
+validly development-signed with the expected bundle ID, CloudKit/APNs entitlements, background mode,
+privacy manifest, and version 1.0 (1). Xcode warned that the current iPhone+iPad target supports
+neither every interface orientation nor required-full-screen; choose iPhone-only versus universal
+orientation behavior before App Store validation. The archive also still lacks the Gate 4
+`portview://` URL scheme. App Store distribution signing, build-number availability, and Organizer
+**Validate App** remain unperformed human/online gates.
 
 ### Mac artifact and install-channel decision
 
