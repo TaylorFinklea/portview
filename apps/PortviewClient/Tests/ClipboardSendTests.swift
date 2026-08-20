@@ -4,42 +4,39 @@ import PortviewProtocol
 
 @testable import PortviewClient
 
-@MainActor
 final class ClipboardSendTests: XCTestCase {
     private let marker = "PORTVIEW-G2-IOS-TO-MAC-PASTE-CONTROL"
 
-    func testTextTakingClipboardSendEmitsExactMarkerOnce() {
-        let viewModel = SessionViewModel()
-        var messages: [AnyMessage] = []
-        viewModel.outboundMessageSink = { messages.append($0) }
+    func testMarkerProducesOneExactClipboardUpdate() {
+        let message = ClipboardSendPolicy.outboundMessage(text: marker, hostLocked: false)
 
-        viewModel.sendClipboardText(marker)
-
-        XCTAssertEqual(messages.count, 1)
-        guard case .clipboardUpdate(let update) = messages[0] else {
+        guard case .clipboardUpdate(let update) = message else {
             return XCTFail("expected one clipboard update")
         }
         XCTAssertEqual(update.text, marker)
     }
 
-    func testEmptyClipboardTextEmitsNothing() {
-        let viewModel = SessionViewModel()
-        var messages: [AnyMessage] = []
-        viewModel.outboundMessageSink = { messages.append($0) }
-
-        viewModel.sendClipboardText("")
-
-        XCTAssertTrue(messages.isEmpty)
+    func testEmptyTextProducesNoMessage() {
+        XCTAssertNil(ClipboardSendPolicy.outboundMessage(text: "", hostLocked: false))
     }
 
-    func testClipboardTextOneUTF8ByteOverCapEmitsNothing() {
-        let viewModel = SessionViewModel()
-        var messages: [AnyMessage] = []
-        viewModel.outboundMessageSink = { messages.append($0) }
+    func testOneUTF8ByteOverCapProducesNoMessage() {
         let overCap = String(repeating: "a", count: Frame.maxClipboardBytes + 1)
 
-        viewModel.sendClipboardText(overCap)
+        XCTAssertNil(ClipboardSendPolicy.outboundMessage(text: overCap, hostLocked: false))
+    }
 
-        XCTAssertTrue(messages.isEmpty)
+    func testTextExactlyAtCapProducesExactClipboardUpdate() {
+        let atCap = String(repeating: "a", count: Frame.maxClipboardBytes)
+        let message = ClipboardSendPolicy.outboundMessage(text: atCap, hostLocked: false)
+
+        guard case .clipboardUpdate(let update) = message else {
+            return XCTFail("expected one clipboard update at the cap")
+        }
+        XCTAssertEqual(update.text, atCap)
+    }
+
+    func testLockedHostProducesNoMessage() {
+        XCTAssertNil(ClipboardSendPolicy.outboundMessage(text: marker, hostLocked: true))
     }
 }

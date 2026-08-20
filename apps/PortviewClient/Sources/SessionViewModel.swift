@@ -388,18 +388,10 @@ final class SessionViewModel: ObservableObject {
 
     /// Send text delivered by the system paste control to the Mac without touching the live pasteboard.
     func sendClipboardText(_ text: String) {
-        guard !inputPaused, !text.isEmpty else { return }
-        // Cap outbound clipboard at the sender (same limit as the host): an over-cap payload would make
-        // an oversized frame the host's decoder rejects (WireError.malformed), dropping the session.
-        // Skip it entirely rather than truncate — half a clipboard is worse than none.
-        guard Frame.shouldSendClipboard(text) else { return }
-        send(.clipboardUpdate(ClipboardUpdate(text: text)))
-    }
-
-    /// Push the iPhone's clipboard text to the Mac (user-initiated; iOS restricts auto-reads).
-    func pasteToHost() {
-        guard let text = UIPasteboard.general.string else { return }
-        sendClipboardText(text)
+        guard let message = ClipboardSendPolicy.outboundMessage(text: text, hostLocked: inputPaused) else {
+            return
+        }
+        send(message)
     }
 
     /// Ask the host for a fresh keyframe so the video delta chain recovers after a gap. Called when the
@@ -451,9 +443,6 @@ final class SessionViewModel: ObservableObject {
         outboundPump = OutboundInputPump(connection: connection)
     }
 
-    /// Test seam for text-taking input paths; production sends through the connection-bound pump.
-    var outboundMessageSink: ((AnyMessage) -> Void)?
-
     /// Tear down the current connection — the single chokepoint (mirrors the SAS coordinator's
     /// `teardown`): CLOSE the
     /// transport first (cancels the NWConnection and finishes the inbound stream — a stream end,
@@ -468,11 +457,7 @@ final class SessionViewModel: ObservableObject {
 
     private func send(_ message: AnyMessage) {
         // One ordered FIFO lane per connection → move/click/scroll/key keep their order on the wire.
-        if let outboundMessageSink {
-            outboundMessageSink(message)
-        } else {
-            outboundPump?.enqueue(message)
-        }
+        outboundPump?.enqueue(message)
     }
 
     // MARK: - Connect / stream / reconnect

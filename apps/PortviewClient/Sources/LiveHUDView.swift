@@ -195,7 +195,7 @@ struct LiveHUDView: View {
                 // Everything above acts ON the host — keyboard, paste, file send, display switch —
                 // so none of it means anything while we are re-binding. Disconnect is deliberately
                 // NOT in here: see below.
-                .disabled(isReconnecting)
+                .disabled(isReconnecting || isHostLocked)
                 .opacity(isReconnecting ? 0.5 : 1)
             // Disconnect stays live while reconnecting. It is a purely LOCAL action —
             // `unbindConnection()`, `task?.cancel()`, `status = .idle` — that never touches the
