@@ -1217,3 +1217,8 @@ user's review of the specs.
 **Context**: Video quality HUD showed zoomed iPhone sessions still soft. First device HUD: full-frame `1710x1107`, no crop, tiny actual bitrate. A CoreGraphics backing-pixel attempt made the crop move on device, but the second HUD still showed `Enc 1710x1107`, so that route did not change ScreenCaptureKit output.
 **Decision**: Size `SCStreamConfiguration.width/height` from `SCDisplay.width/height * SCContentFilter.pointPixelScale`. Keep `SCStreamConfiguration.sourceRect` in the display point coordinate system.
 **Rationale**: macOS 26 SDK headers define `SCDisplay.width/height` as points and expose `SCContentFilter.pointPixelScale` for the capture filter. `CGDisplayPixelsWide/High` is not the right source of truth for this stream sizing path.
+
+## Beads retired (2026-09-29)
+
+Beads (`bd`) is no longer used. The backlog lives in `roadmap.md` (Backlog
+section); the full Beads export is in `beads-archive.jsonl`. Earlier entries that mention Beads are historical.

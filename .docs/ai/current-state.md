@@ -1,6 +1,6 @@
 # Current State
 
-> Loop state only (≤20 lines, per AGENTS.md). Rationale → `decisions.md`. Backlog → `bd ready`.
+> Loop state only (≤20 lines, per AGENTS.md). Rationale → `decisions.md`. Backlog → `roadmap.md`.
 > The pre-2026-07-27 session journal was pruned; it remains in git history.
 
 Branch: `main`, clean. 2 commits ahead of `origin/main`.

@@ -1,5 +1,7 @@
 # Roadmap
 
+> **Beads retired 2026-09-29.** Mentions of `bd ready` and bead IDs below are historical. Open bead work restored from the remote is in the Backlog section at the end.
+
 > Durable goals and milestones. Updated when scope changes, not every session.
 
 ## Vision
@@ -166,3 +168,45 @@ Adversarially reviewed (no geometry bugs found). **Tests 72/25; host + iOS build
 - iOS session is foreground-only (background suspends + drops connection; re-wake via push).
 - No servers we host; remote is the user's own overlay VPN.
 - Permissive license → clean-room only (no GPL refs like Lumen/Moonlight).
+
+## Backlog (migrated from Beads, 2026-09-29)
+
+Open items restored from the `backlog-screenshare` Dolt remote (last pushed 2026-07-11) when Beads was retired; they may be stale, so verify before starting. Full export of all 95 issues and 4 memories is in `beads-archive.jsonl`.
+
+- [ ] P0 Device-verify zoom render pipeline: tearing, smooth pan, hysteresis re-crop (`screenshare-89q`)
+- [ ] P1 On-device video-quality diagnosis with the Quality HUD (`screenshare-11s`)
+- [ ] P1 EPIC: Host trust model - mutual client auth + revocable pairing (M6 device keypairs) (`screenshare-1nt`)
+- [ ] P1 Device-verify keep-awake + host-lock capture-paused overlay (`screenshare-1wm`)
+- [ ] P1 Host-side PairingStore: enroll + revoke client device identities (`screenshare-5yw`)
+- [ ] P1 Design spec: client device keypairs + revocable host PairingStore (mutual auth) (`screenshare-7jl`)
+- [ ] P1 Require an authorized client identity before serving a streaming session (`screenshare-9m2`)
+- [ ] P1 Device-verify motion choppiness fixes on pan/cursor-move (`screenshare-b27`)
+- [ ] P1 Device-verify host runtime display refresh (multi-monitor switcher) (`screenshare-ed4`)
+- [ ] P1 EPIC: PortviewClientCore + god-file decomposition (lower the tier_floor of all client work) (`screenshare-jfj`)
+- [ ] P1 Device-verify magnifier rapid-zoom crash-hardening + region crispness (`screenshare-pkb`)
+- [ ] P1 On-device test of QUIC transport + zoom over a Tailscale link (`screenshare-ve5`)
+- [ ] P2 PHASE 2: per-frame unidirectional video streams (measurement-gated; needs own spec) (`screenshare-10p`)
+- [ ] P2 Make magnifier renderScale invariant to frameViewport (kill re-crop pop) (`screenshare-2ee`)
+- [ ] P2 Device-verify: audio resumes after a real call/Siri interruption mid-stream (`screenshare-36p`)
+- [ ] P2 Device-verify quality controls, endpoint persistence, Mac-to-iPhone files (`screenshare-43i`)
+- [ ] P2 EPIC: Concurrency correctness (data race + serve-slot starvation + outbound ownership) (`screenshare-523`)
+- [ ] P2 Device-verify: no tearing/garbage frames under high-fps zoomed load (CVMetalTexture lifetime) (`screenshare-5ep`)
+- [ ] P2 Device-verify 6-digit SAS pairing (core + HMAC host-confirm) (`screenshare-6j7`)
+- [ ] P2 EPIC: CloudKit silent-push re-wake (tap-to-resume after backgrounding) (`screenshare-8n1`)
+- [ ] P2 Device-verify CloudKit re-wake: menu-bar nudge -> notification -> tap-to-resume (`screenshare-8n1.4`)
+- [ ] P2 EPIC: Prod / open-source release readiness (`screenshare-cqv`)
+- [ ] P2 macOS host: hardened runtime, entitlements, notarization + install/update path (`screenshare-cqv.2`)
+- [ ] P2 Adversarial review of the 8n1.3 re-wake client commit (deferred at machine handoff) (`screenshare-djx`)
+- [ ] P2 Device-verify M7 menu-bar host + live permissions onboarding (`screenshare-er1`)
+- [ ] P2 Implement tight A/V lip-sync (`screenshare-ins`)
+- [ ] P2 EPIC: Real-time media foundation (RTT/clock/feedback -> adaptive bitrate, lip-sync, latency) (`screenshare-ja1`)
+- [ ] P2 EPIC: QUIC lane-splitting phase 1 (video/audio/stats lane streams off primary) (`screenshare-w6n`)
+- [ ] P2 Device-verify QUIC lanes over Tailscale: input-latency A/B under induced loss (`screenshare-w6n.6`)
+- [ ] P3 Magnifier crispness/smoothness tuning follow-ups (`screenshare-2ws`)
+- [ ] P3 Move HostBeaconRecord codec from PortviewClientCore to PortviewProtocol (`screenshare-8z9`)
+- [ ] P3 Pin the Auto/pinned bitrate-mode mapping in pumpVideo (480 test gap) (`screenshare-jc3`)
+- [ ] P3 Define scope: client settings expansion + first-run/TCC onboarding polish (M6 remainder) (`screenshare-l4y`)
+- [ ] P3 Boost-aware controller reseed at encoder rebuild (zoom-rung crossing gap) (`screenshare-s86`)
+- [ ] P3 M6 polish: adaptive bitrate/fps, reconnect+APNs, keypairs (`screenshare-ux7`)
+- [ ] P4 HostBeaconWriter: chain writes to close the actor-reentrancy save-ordering window (`screenshare-e00`)
+- [ ] P4 ClientFeedback sequence counter for staleness detection (batch with next protocol rev) (`screenshare-q48`)
