@@ -228,6 +228,18 @@ Found on hardware; details in `phases/v1-release-finish-spec.md` (Gate 2, 2026-1
 
 - [ ] P1 Audio Mac → iPhone has periodic clicks about every 2 s (Gate 2 audio row FAIL; blocks
       Gate 2). Siri/call interruption recovery was not observed and still needs a pass.
+      **Cause confirmed 2026-10-20** (instrumented client, 192 s steady 440 Hz tone): per-buffer
+      hostTime scheduling in `AudioPlayer.play`. Host PTS step exactly 20,000 µs per 960 frames
+      (no host gaps, 1 late buffer in steady state), but Roshar renders 48,000.52 samples/s, so
+      scheduled starts slip +10.9 ppm against playback: about one 1-sample gap or overlap every
+      1.9 s, and boundary jitter (render timestamps sd 0.37 sample) turns about a third of them
+      into +1/−1/+1 bursts (the "fizzle" the owner heard). The 2 s `SCShareableContent` display
+      poll is ruled out. Fix: schedule back-to-back after the first anchored buffer and hold queue
+      depth in a band with faded trims; the producer runs about 15 ppm faster than the consumer
+      (queue grows about 54 ms/h), so expect a trim roughly every 20 min.
+- [ ] P2 Audio drops at session start: 5.9–9.4 s after a reconnect the host skipped 10 runs of audio
+      (20–300 ms, whole 20 ms buffers) and those buffers arrived 100–340 ms late. Matches a host
+      send stall overflowing `CaptureEngine`'s `bufferingNewest(8)` audio stream; not yet proven.
 - [ ] P2 No right-click on the client: `PointerButtonKind.right` exists in the protocol, but the client
       maps only a single tap to a left click. Other remote apps give right-click a tap gesture
       (owner's note: "a double tap will do it"); pick the gesture before implementing.
