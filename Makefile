@@ -69,8 +69,20 @@ build-host: $(HOST_PBXPROJ)
 test-host: $(HOST_PBXPROJ)
 	xcodebuild test -project $(HOST_PROJECT) -scheme PortviewHost -destination 'platform=macOS'
 
+# The iOS leg runs on a simulator this Makefile owns, not one of Xcode's default devices: those
+# change between Xcode releases and can be deleted, and a hard-coded "iPhone 17" broke the gate
+# after the Xcode 27 update. Created on first use against the newest installed iOS runtime, and
+# addressed by UDID: a name-only destination means OS=latest to xcodebuild, which misses a device
+# that is still on an older runtime after the next upgrade.
+IOS_SIM_NAME ?= Portview Preflight iPhone
+IOS_SIM_TYPE ?= com.apple.CoreSimulator.SimDeviceType.iPhone-17
+UDID_RE      := [0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}
+
 test-ios: $(CLIENT_PBXPROJ)
-	xcodebuild test -project $(CLIENT_PROJECT) -scheme PortviewClient -destination 'platform=iOS Simulator,name=iPhone 17'
+	@udid=$$(xcrun simctl list devices available | grep -F "$(IOS_SIM_NAME) (" | tail -n 1 | grep -oE '$(UDID_RE)'); \
+	[ -n "$$udid" ] || udid=$$(xcrun simctl create "$(IOS_SIM_NAME)" $(IOS_SIM_TYPE)) || exit 1; \
+	echo "test-ios: simulator $$udid"; \
+	xcodebuild test -project $(CLIENT_PROJECT) -scheme PortviewClient -destination "id=$$udid"
 
 # Archive → export (Developer ID) → notarize → staple → verify. Produces a stapled .app and a
 # distributable zip under $(RELEASE_DIR).
