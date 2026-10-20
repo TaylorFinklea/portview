@@ -1,6 +1,7 @@
 # Current State
 
-> Loop state only (≤20 lines). Rationale → `decisions.md`; details → `phases/v1-release-finish-spec.md`.
+> Loop state only (≤20 lines). Rationale → `decisions.md`; details → `phases/v1-release-finish-spec.md`;
+> backlog → `roadmap.md`.
 
 Branch: `codex/v1-release-finish` · Gate 2 R2 staged on Roshar.
 
