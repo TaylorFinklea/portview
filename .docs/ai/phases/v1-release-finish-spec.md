@@ -118,20 +118,23 @@ observation session, not a live debugging session.
 
 ### Verification matrix
 
-- [ ] **Clipboard Mac → iPhone:** copy a unique plain-text marker on the Mac; verify the client
-  receives the exact marker once. The 2026-08-11 candidate passed; rerun on R2.
-- [ ] **Clipboard iPhone → Mac:** send a different unique marker from the client; paste on the Mac
+- [x] **Clipboard Mac → iPhone:** copy a unique plain-text marker on the Mac; verify the client
+  receives the exact marker once. The 2026-08-11 candidate passed; **PASS R3 2026-10-20.**
+- [x] **Clipboard iPhone → Mac:** send a different unique marker from the client; paste on the Mac
   and verify exact equality. **FAIL 2026-08-11:** the expected marker was absent on two independent
-  reads. R2 replaces the programmatic pasteboard read with the system paste control; hardware
-  verification remains required.
+  reads. R2 replaces the programmatic pasteboard read with the system paste control. **PASS R3
+  2026-10-20** — see the sitting record for the Universal Clipboard control.
 - [ ] **Audio:** play continuous host audio for at least two minutes; verify audible client audio,
-  no periodic ticks, and recovery after a Siri/call interruption.
-- [ ] **File iPhone → Mac:** send a small named file; verify one intact file appears in Downloads,
-  with no duplicate or partial file.
-- [ ] **File Mac → iPhone:** use the host device card to send a small named file; verify the client
-  completes it and presents the Share sheet.
-- [ ] **Multi-monitor:** connect with one display available, wake/connect a second display, wait up
+  no periodic ticks, and recovery after a Siri/call interruption. **FAIL R3 2026-10-20:** periodic
+  clicks roughly every 2 s.
+- [x] **File iPhone → Mac:** send a small named file; verify one intact file appears in Downloads,
+  with no duplicate or partial file. **PASS R3 2026-10-20.**
+- [x] **File Mac → iPhone:** use the host device card to send a small named file; verify the client
+  completes it and presents the Share sheet. **PASS R3 2026-10-20** (from the main window; the
+  menu-bar popover has no Send a file control).
+- [x] **Multi-monitor:** connect with one display available, wake/connect a second display, wait up
   to two seconds for the switcher, switch to it, then switch back without restarting the host.
+  **PASS R3 2026-10-20.**
 
 **2026-08-11 sitting record (superseded candidate):** notarized Release host and device-signed
 Release client staged; live stream confirmed. Matrix was 1 pass, 1 fail, and 4 pending. Harness Deck
@@ -149,6 +152,32 @@ was signature/privacy-manifest checked and installed on Roshar at 2026-08-19 22:
 agent launch. All six R2 observations are pending in Harness Deck run
 `portview/20260819-gate2-product-test-r2`; its verdict remains `changes-required` until the human
 sitting passes every row.
+
+**2026-10-20 R3 sitting — 5 pass, 1 fail; Gate 2 stays open.** R3 is the R2 app source (no app
+changes since `b31a3fd`) rebuilt at `5fed6bd` with Xcode 27.1 after the OS 27 update. Host: `make
+release`, notarization `66c9ff74-249d-473c-9cc1-377ffbc2b385` Accepted, stapled, Gatekeeper
+accepted, executable SHA-256 `163d20ae3ab1b2d1c3757afc1436cd2d37fcca5b9c66e163d928d059e3cebc71`,
+installed at `/Applications`. Client: Release, device-signed, executable SHA-256
+`47306586dd788682c5f92880ddc0f3882de20c6a77567b03acca316efc1e3b2e`, fresh install on Roshar (iOS
+27.0.1; Portview was no longer installed) and re-paired. Mac on macOS 27.0.1; one host process
+(PID 87730) for the whole sitting.
+
+- Clipboard Mac → iPhone: `PV-G2-R1-3375F14F` pasted on Roshar exactly once.
+- Clipboard iPhone → Mac: Universal Clipboard delivered the Notes copy first (17:24:15Z; item
+  carried `com.apple.is-remote-clipboard` and rich-text types), so it was excluded. Paste to Mac then
+  produced a host-signature write at 17:25:58.766Z — one item, `public.utf8-plain-text` only, no
+  remote flag — equal to `PV-G2-R2-1430`.
+- Audio: owner heard periodic clicks about every 2 s. Siri/call recovery was not observed.
+- File iPhone → Mac: `portview-g2-r4-ac66.txt` (203,125 B) arrived once in ~/Downloads at
+  17:32:53Z, no partial, SHA-256 equal to the source.
+- File Mac → iPhone: `portview-g2-r5-7718.txt` (148,960 B) showed "Received from your Mac" with
+  Save or share; the copy saved to iCloud Drive had an equal SHA-256.
+- Multi-monitor: second display attached 17:46:19Z and detached 17:47:41Z; switcher appeared within
+  about 2 s; switched to it and back.
+
+Side findings (not matrix rows): the client has no right-click gesture, and Send a file is only in
+the main window. All three are tracked in `roadmap.md`. Harness Deck run
+`portview/20260819-gate2-product-test-r2` was not updated from this session.
 
 **Failure rule:** Record the build identity, exact action, observed result, and whether reconnect or
 relaunch changed it. Move to the next matrix row; do not debug during the sitting. Afterward, add one

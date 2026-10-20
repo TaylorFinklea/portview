@@ -221,3 +221,15 @@ Open items restored from the `backlog-screenshare` Dolt remote (last pushed 2026
 - [ ] P3 M6 polish: adaptive bitrate/fps, reconnect+APNs, keypairs (`screenshare-ux7`)
 - [ ] P4 HostBeaconWriter: chain writes to close the actor-reentrancy save-ordering window (`screenshare-e00`)
 - [ ] P4 ClientFeedback sequence counter for staleness detection (batch with next protocol rev) (`screenshare-q48`)
+
+## Defects from the Gate 2 R3 sitting (2026-10-20)
+
+Found on hardware; details in `phases/v1-release-finish-spec.md` (Gate 2, 2026-10-20 record).
+
+- [ ] P1 Audio Mac → iPhone has periodic clicks about every 2 s (Gate 2 audio row FAIL; blocks
+      Gate 2). Siri/call interruption recovery was not observed and still needs a pass.
+- [ ] P2 No right-click on the client: `PointerButtonKind.right` exists in the protocol, but the client
+      maps only a single tap to a left click. Other remote apps give right-click a tap gesture
+      (owner's note: "a double tap will do it"); pick the gesture before implementing.
+- [ ] P3 Send a file to the iPhone exists only in the host's main window, not the menu-bar popover;
+      fold into Gate 4 (menu bar is the app).
