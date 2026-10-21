@@ -57,6 +57,11 @@ final class SessionViewModel: ObservableObject {
     /// Updated when the host confirms a viewport; the client renders the residual zoom against it.
     @Published var frameViewport = CGRect(x: 0, y: 0, width: 1, height: 1)
     @Published var qualityDiagnostics = QualityDiagnostics()
+    /// Audio playout counters for the quality HUD, republished at most every
+    /// `audioStatsPublishInterval` (audio frames arrive ~50/s; the HUD needn't re-render that often).
+    @Published var audioPlayoutStats = AudioPlayoutStats()
+    private var lastAudioStatsPublish: TimeInterval = 0
+    private static let audioStatsPublishInterval: TimeInterval = 0.5
     /// True when the host reports its screen is locked — the captured content is the secure desktop /
     /// blank, so the client pauses the live view and shows a "capture paused" overlay.
     @Published var hostLocked = false
@@ -256,6 +261,7 @@ final class SessionViewModel: ObservableObject {
     private func stopSessionMedia() {
         audioPlayer.stop()
         renderer.presentationClock = nil
+        audioPlayoutStats = AudioPlayoutStats()
     }
 
     /// Re-target the live stream to another of the host's displays (no reconnect).
@@ -768,6 +774,12 @@ final class SessionViewModel: ObservableObject {
                 // frame anchors it) so both streams present against one timeline.
                 if renderer.presentationClock != audioPlayer.presentationClock {
                     renderer.presentationClock = audioPlayer.presentationClock
+                }
+                let now = ProcessInfo.processInfo.systemUptime
+                if now - lastAudioStatsPublish >= Self.audioStatsPublishInterval,
+                   audioPlayoutStats != audioPlayer.playoutStats {
+                    audioPlayoutStats = audioPlayer.playoutStats
+                    lastAudioStatsPublish = now
                 }
             case .viewport:
                 // Defensive fallback: the host now embeds the region in every VideoFrame (see above),

@@ -306,6 +306,7 @@ struct LiveHUDView: View {
             if showQualityHUD && !isReconnecting {
                 QualityPanel(
                     diagnostics: session.qualityDiagnostics,
+                    audio: session.audioPlayoutStats,
                     displayLabel: "\(hostName.uppercased()) · DISPLAY \(session.activeDisplayID)")
             }
             if keyboardActive { modifierDock }

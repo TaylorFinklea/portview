@@ -4,9 +4,11 @@ import AVFoundation
 import PortviewClientCore
 
 /// Plays the Mac's system audio: schedules incoming non-interleaved Float32 PCM frames into an
-/// `AVAudioPlayerNode` at each frame's target present time on the local timeline (PTS against the
-/// audio-anchored `PresentationClock`), instead of immediate back-to-back play. The engine is
-/// (re)configured when the stream's format first appears or changes.
+/// `AVAudioPlayerNode` back-to-back on the player's own sample timeline, held within a band of each
+/// frame's target present time (PTS against the audio-anchored `PresentationClock`) by
+/// `AudioPlayoutScheduler`. Scheduling every frame at its own mapped host time instead slipped one
+/// sample every ~2 s against the iPhone's render clock (+10.9 ppm on Roshar) — the Gate 2 audio
+/// clicks. The engine is (re)configured when the stream's format first appears or changes.
 @MainActor
 final class AudioPlayer {
     private let engine = AVAudioEngine()
@@ -25,6 +27,15 @@ final class AudioPlayer {
     /// future) and shared with the video path — `SessionViewModel` mirrors it into the renderer.
     /// Nil until audio arrives; reset by `stop()` so each session re-anchors.
     private(set) var presentationClock: PresentationClock?
+    /// Places each frame on the player's sample timeline. Reset whenever the player stops (its
+    /// timeline restarts); replaced when the stream's sample rate changes; dropped by `stop()`.
+    private var scheduler: AudioPlayoutScheduler?
+    /// Splice/resync/underrun counters for the quality HUD (device soak evidence).
+    private(set) var playoutStats = AudioPlayoutStats()
+    /// Last sample of each channel of the most recently scheduled buffer: a resync that lands right
+    /// after it (`followsQueuedAudio`) blends from these values instead of fading in from zero. Nil
+    /// whenever the player's queue was flushed.
+    private var lastScheduledTail: [Float]?
 
     init() {
         engine.attach(player)
@@ -74,9 +85,10 @@ final class AudioPlayer {
         }
     }
 
-    /// Schedule one frame of non-interleaved Float32 PCM (plane 0 then plane 1 …) at its PTS-mapped
-    /// target present time. The first scheduled frame anchors `presentationClock` to "now", so it
-    /// plays a presentation delay in the future and later frames keep the host's PTS spacing.
+    /// Schedule one frame of non-interleaved Float32 PCM (plane 0 then plane 1 …). The first
+    /// scheduled frame anchors `presentationClock` to "now", so it plays a presentation delay in the
+    /// future; later frames follow back-to-back on the player's timeline, with the scheduler
+    /// splicing a few crossfaded milliseconds when they drift out of band from their target times.
     func play(sampleRate: Double, channels: UInt32, ptsMicros: UInt64, planarData bytes: [UInt8]) {
         guard !isInterrupted else { return }  // session is the interrupter's until `.ended`
         guard channels >= 1, sampleRate > 0,
@@ -87,33 +99,71 @@ final class AudioPlayer {
         if !running || format?.sampleRate != sampleRate || format?.channelCount != AVAudioChannelCount(channels) {
             reconfigure(desiredFormat)
         }
-        guard running, let buffer = Self.buffer(from: bytes, format: desiredFormat) else { return }
+        guard running, let input = Self.planes(from: bytes, channels: Int(channels)) else { return }
         let nowMicros = Int64(ProcessInfo.processInfo.systemUptime * 1_000_000)
         let clock = presentationClock
             ?? PresentationClock(hostClockOffsetMicros: Int64(clamping: ptsMicros) - nowMicros)
         presentationClock = clock
         // Clamp to the schedule horizon (~10s past now): scheduling PCM further ahead is
-        // meaningless, and a corrupt/hostile PTS after a normal anchor would otherwise push the
-        // hostTime conversion below into an overflow trap.
+        // meaningless, and a corrupt/hostile PTS after a normal anchor must not move the schedule
+        // arbitrarily far out (the scheduler also clamps before any sample arithmetic).
+        // On a slow route (Bluetooth) a sample is heard far later than the clock's speaker-sized budget
+        // allows; schedule that much later or every buffer lands behind the committed floor and drops.
+        // Bounded (≤ 10 s) and added after the clamp, so it cannot overflow.
+        let session = AVAudioSession.sharedInstance()
+        let routeCompensation = AudioRouteLatency.compensationMicros(
+            outputLatency: session.outputLatency, ioBufferDuration: session.ioBufferDuration)
         let targetMicros = PresentationClock.clampedScheduleTargetMicros(
-            clock.targetPresentTimeMicros(forPTSMicros: ptsMicros), now: nowMicros)
+            clock.targetPresentTimeMicros(forPTSMicros: ptsMicros), now: nowMicros) + routeCompensation
+        var scheduler = self.scheduler
+            ?? AudioPlayoutScheduler(configuration: .init(sampleRate: sampleRate))
+        let plan = scheduler.plan(ptsMicros: ptsMicros, frames: input.first?.count ?? 0,
+                                  targetMicros: targetMicros, render: renderPosition())
+        if scheduler.takeClockReanchorRequest() {
+            // Arrivals are now later than the clock's budget even at the maximum audio lead
+            // (sustained latency increase or accumulated clock drift): re-anchor the shared A/V
+            // clock from the next frame, exactly as at session start. Video follows via the mirror.
+            // No scheduler reset: the player keeps its queue, and taking the request already
+            // unanchored the schedule so the next frame lands after the queued audio.
+            presentationClock = nil
+        }
+        self.scheduler = scheduler
+        playoutStats = scheduler.stats
+        guard let plan else { return }
+        let output = AudioSplice.apply(plan.edit, to: input,
+                                       crossfadeFrames: scheduler.configuration.crossfadeFrames,
+                                       joining: plan.followsQueuedAudio ? lastScheduledTail : nil)
+        guard let buffer = Self.buffer(from: output, format: desiredFormat) else { return }
+        lastScheduledTail = output.map { $0.last ?? 0 }
+        // A sample-time-only AVAudioTime is on the player's timeline — the same timeline
+        // `renderPosition()` reads — so consecutive plans abut exactly, with no host-time conversion.
         player.scheduleBuffer(buffer,
-                              at: Self.audioTime(forUptimeMicros: targetMicros),
+                              at: AVAudioTime(sampleTime: plan.startSample, atRate: sampleRate),
                               options: [],
                               completionHandler: nil)
         if !player.isPlaying { player.play() }
     }
 
-    /// Map a local-uptime instant (µs on the `ProcessInfo.systemUptime` timeline — the same mach
-    /// clock `AVAudioTime` host time counts, in timebase ticks) to an `AVAudioTime`. A past instant
-    /// simply schedules the buffer to play as soon as the node can; callers bound the future side
-    /// (`PresentationClock.clampedScheduleTargetMicros`) so the µs → ns → ticks multiplications
-    /// cannot overflow on a remote-controlled value.
-    private static func audioTime(forUptimeMicros micros: Int64) -> AVAudioTime {
-        var timebase = mach_timebase_info_data_t()
-        mach_timebase_info(&timebase)
-        let nanos = UInt64(max(0, micros)) * 1_000
-        return AVAudioTime(hostTime: nanos * UInt64(timebase.denom) / UInt64(timebase.numer))
+    /// Where the player is now: its last render's host time (as local-uptime µs, the timeline
+    /// `PresentationClock` targets use), the player-timeline sample rendered then, and the route's
+    /// render cycle. Nil until the player has rendered once since it was (re)started.
+    private func renderPosition() -> AudioRenderPosition? {
+        guard let nodeTime = player.lastRenderTime, nodeTime.isHostTimeValid,
+              let playerTime = player.playerTime(forNodeTime: nodeTime),
+              playerTime.isSampleTimeValid else { return nil }
+        let micros = AVAudioTime.seconds(forHostTime: nodeTime.hostTime) * 1_000_000
+        return AudioRenderPosition(hostMicros: Int64(micros), sampleTime: playerTime.sampleTime,
+                                   cycleFrames: renderCycleFrames(sampleRate: playerTime.sampleRate))
+    }
+
+    /// Frames the route commits per render cycle, on the player's timeline: the session's live IO
+    /// buffer duration (it changes with the output route, e.g. Bluetooth) at the player's rate. Never
+    /// below the 1,024 frames measured on Roshar's speaker, so an unreported or optimistic value can
+    /// only make the committed floor safer, not let a buffer land in audio already rendered.
+    private func renderCycleFrames(sampleRate: Double) -> Int64 {
+        let ioFrames = AVAudioSession.sharedInstance().ioBufferDuration * sampleRate
+        guard ioFrames.isFinite, ioFrames > 0 else { return 1_024 }
+        return max(1_024, Int64(min(ioFrames.rounded(.up), 65_536)))
     }
 
     func stop() {
@@ -123,12 +173,23 @@ final class AudioPlayer {
         format = nil
         isInterrupted = false  // deliberate teardown supersedes a pending interruption
         presentationClock = nil  // the next session's audio re-anchors the A/V timeline
+        scheduler = nil
+        playoutStats = AudioPlayoutStats()
+        lastScheduledTail = nil
         try? AVAudioSession.sharedInstance().setActive(false)
     }
 
     private func reconfigure(_ newFormat: AVAudioFormat) {
         engine.stop()
-        player.stop()
+        player.stop()  // flushes the queue: nothing scheduled remains to join
+        lastScheduledTail = nil
+        // The player's sample timeline restarts at its next `play()`: re-anchor the schedule
+        // (keeping the session's counters), or start fresh if the sample rate changed.
+        if scheduler?.configuration.sampleRate == newFormat.sampleRate {
+            scheduler?.reset()
+        } else {
+            scheduler = nil
+        }
         engine.connect(player, to: engine.mainMixerNode, format: newFormat)
         do {
             let session = AVAudioSession.sharedInstance()
@@ -143,20 +204,32 @@ final class AudioPlayer {
         }
     }
 
-    /// Rebuild an `AVAudioPCMBuffer` from contiguous per-channel Float32 planes.
-    private static func buffer(from bytes: [UInt8], format: AVAudioFormat) -> AVAudioPCMBuffer? {
-        let channelCount = Int(format.channelCount)
-        guard channelCount > 0 else { return nil }
-        let frames = AVAudioFrameCount(bytes.count / channelCount / MemoryLayout<Float>.size)
-        guard frames > 0,
-              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames),
+    /// Split contiguous per-channel Float32 planes (plane 0 then plane 1 …) into one array per channel.
+    private static func planes(from bytes: [UInt8], channels: Int) -> [[Float]]? {
+        guard channels > 0 else { return nil }
+        let frames = bytes.count / channels / MemoryLayout<Float>.size
+        guard frames > 0 else { return nil }
+        return bytes.withUnsafeBytes { raw in
+            (0..<channels).map { channel in
+                let start = channel * frames * MemoryLayout<Float>.size
+                return (0..<frames).map { frame in
+                    raw.loadUnaligned(fromByteOffset: start + frame * MemoryLayout<Float>.size, as: Float.self)
+                }
+            }
+        }
+    }
+
+    /// Build an `AVAudioPCMBuffer` from one Float32 array per channel (equal lengths).
+    private static func buffer(from planes: [[Float]], format: AVAudioFormat) -> AVAudioPCMBuffer? {
+        let frames = planes.first?.count ?? 0
+        guard frames > 0, planes.count == Int(format.channelCount),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
               let channelData = buffer.floatChannelData else { return nil }
-        buffer.frameLength = frames
-        bytes.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return }
-            for channel in 0..<channelCount {
-                let plane = base.advanced(by: channel * Int(frames) * MemoryLayout<Float>.size)
-                channelData[channel].update(from: plane.assumingMemoryBound(to: Float.self), count: Int(frames))
+        buffer.frameLength = AVAudioFrameCount(frames)
+        for (channel, plane) in planes.enumerated() where plane.count == frames {
+            plane.withUnsafeBufferPointer { source in
+                guard let base = source.baseAddress else { return }
+                channelData[channel].update(from: base, count: frames)
             }
         }
         return buffer

@@ -2,6 +2,41 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-10-20] Continuous audio playout replaces per-buffer host-time scheduling
+
+**Context**: Gate 2 R3 audio failed with clicks about every 2 s. An instrumented client on Roshar (192 s,
+440 Hz tone) proved the cause. `AudioPlayer` scheduled each 960-frame buffer at its own PTS-mapped host
+time, PTS advance exactly 20,000 µs per buffer, and Roshar renders 48,000.52 samples/s. The +10.9 ppm
+slip produced a one-sample gap or overlap every ~1.9 s, and render-timestamp jitter turned a third of
+them into bursts. The 2 s `SCShareableContent` display poll was ruled out (no host gaps in steady state).
+The same log showed render cycles of 1,024 frames and a render host time 24–45 ms in the future (when
+the sample is heard). So the clock's 50 ms delay is the hardware floor, with no jitter headroom.
+
+**Decision**: Pure `AudioPlayoutScheduler` (PortviewClientCore) plus `AudioSplice` DSP. `AudioPlayer`
+schedules at player-timeline sample times.
+- After one anchor, buffers go back-to-back. Drift against the clock is held in an 8 ms band
+  (settle 3 ms) by crossfaded skip/repeat splices of ≤ 5 ms.
+- Re-anchors (first buffer, underrun, PTS discontinuity, |error| > 100 ms) never start inside
+  committed audio (render cycle + 1, from the route's live IO buffer) or inside audio already queued.
+  A recovery shorter than one crossfade is dropped. A recovery that directly follows queued audio
+  crossfades from its last sample.
+- An adaptive audio lead (40 ms, +20 ms per underrun, cap 120 ms) absorbs network jitter. Audio
+  deliberately lags video by it; audio-late is within lip-sync tolerance, audio-early is not.
+- Sustained lateness never silences audio. A non-shrinking run of wholly-late drops escalates the
+  lead (+ one render cycle); beyond the cap, or after 10 ceiling underruns within 60 s of audio, the
+  scheduler asks `AudioPlayer` to re-anchor the shared clock (no player reset; the queue is kept).
+- Routes slower than the speaker (Bluetooth) delay audio by their excess latency
+  (`AudioRouteLatency`, from `AVAudioSession.outputLatency + ioBufferDuration` − 45 ms). Without it,
+  every buffer would drop on such routes.
+
+**Consequences**: Clicks are impossible by construction. Remaining audible events are gaps from
+jitter-tail underruns. The field model predicts ~2/min at the 120 ms cap; the device soak decides. A
+higher cap trades lip-sync for fewer gaps; moving audio receive off the main actor is the better lever.
+The clock offset is still never refined (separate roadmap item). Quality HUD shows Δ, queue, lead,
+splices, resyncs (underrun/gap), drops, escalations and re-anchors for the soak. Reviewed by
+gpt-6.1-sol across several rounds: one P1 (permanent silence under sustained lateness) and four P2s,
+all fixed with regression tests.
+
 ## [2026-07-28] Settings, first-run and lane defaults (closes `portview-wyi`)
 
 **Context**: `portview-wyi` had sat open as a definition bead whose questions were never written

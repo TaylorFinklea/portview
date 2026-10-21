@@ -228,6 +228,14 @@ Found on hardware; details in `phases/v1-release-finish-spec.md` (Gate 2, 2026-1
 
 - [ ] P1 Audio Mac → iPhone has periodic clicks about every 2 s (Gate 2 audio row FAIL; blocks
       Gate 2). Siri/call interruption recovery was not observed and still needs a pass.
+      **Fix landed 2026-10-20, not yet device-verified**: `AudioPlayoutScheduler` (continuous playout;
+      decisions.md 2026-10-20). Verify with a device soak via the Quality HUD audio line, on the speaker
+      and on a Bluetooth route, then re-run Gate 2. Field-model expectation at the 120 ms lead cap is about
+      2 underrun gaps/min from the jitter tail. If the soak shows that, the lever is moving audio receive
+      off the main actor, not a higher cap.
+- [ ] P2 Presentation-clock offset is anchored once and never refined. Measured Mac-audio vs iPhone clock
+      drift of about 26 ppm grows A/V latency about 94 ms/hour in the direction seen on Roshar. The audio
+      scheduler re-anchors only in the late direction, so the early direction still grows unbounded for video and audio.
       **Cause confirmed 2026-10-20** (instrumented client, 192 s steady 440 Hz tone): per-buffer
       hostTime scheduling in `AudioPlayer.play`. Host PTS step exactly 20,000 µs per 960 frames
       (no host gaps, 1 late buffer in steady state), but Roshar renders 48,000.52 samples/s, so

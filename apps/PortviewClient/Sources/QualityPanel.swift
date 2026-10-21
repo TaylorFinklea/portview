@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 import SwiftUI
+import PortviewClientCore
 
 /// The Glass HUD quality panel — four live telemetry stats over dark glass. All values are real
 /// (`TelemetryReadout`); network latency isn't measured, so the slots are link / frame / decode /
-/// encode rather than a fabricated "ms" latency.
+/// encode rather than a fabricated "ms" latency. An audio line underneath carries the playout
+/// scheduler's counters (offset from the A/V clock, queue depth, splices, resyncs) for soak tests.
 struct QualityPanel: View {
     let diagnostics: QualityDiagnostics
+    let audio: AudioPlayoutStats
     let displayLabel: String
 
     var body: some View {
@@ -24,10 +27,25 @@ struct QualityPanel: View {
                 stat("DECODE", readout.decode, "ms")
                 stat("ENCODE", readout.encode, "ms")
             }
+            if audio.scheduledBuffers > 0 {
+                Text(audioLine)
+                    .font(.mono(9))
+                    .foregroundStyle(Glass.text2)
+                    .lineLimit(2)
+            }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 13)
         .glassPanel(accent: true)
+    }
+
+    private var audioLine: String {
+        let offset = String(format: "%+.1f", Double(audio.lastErrorMicros) / 1_000)
+        let queued = String(format: "%.0f", Double(audio.queuedMicros) / 1_000)
+        let lead = String(format: "%.0f", Double(audio.extraLeadMicros) / 1_000)
+        return "AUDIO Δ\(offset)ms Q\(queued)ms lead \(lead)ms · splice \(audio.splices) · resync \(audio.resyncs) "
+            + "(under \(audio.underruns), gap \(audio.discontinuities)) · drop \(audio.droppedBuffers) "
+            + "· esc \(audio.leadEscalations) · reanchor \(audio.clockReanchors)"
     }
 
     private func stat(_ label: String, _ value: String, _ unit: String, hero: Bool = false) -> some View {
