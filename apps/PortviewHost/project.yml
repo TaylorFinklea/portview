@@ -69,6 +69,9 @@ targets:
     sources:
       - Tests
       - Sources/DeviceRowStatus.swift
+      - Sources/HostPreferences.swift
+      - Sources/LaunchAtLoginController.swift
+      - Sources/HostSettingsCoordinator.swift
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PORTVIEW_BUNDLE_ID_PREFIX).portview.host.tests
