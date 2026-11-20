@@ -46,6 +46,7 @@ struct MenuBarHostView: View {
         VStack(alignment: .leading, spacing: 14) {
             header
             MenuBarPermissionsView(model: model)
+            MenuBarNoticesView(model: model)
             content
             Divider().overlay(Color.white.opacity(0.08))
             MenuBarSettingsView(model: model)

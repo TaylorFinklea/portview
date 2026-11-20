@@ -550,6 +550,12 @@ final class HostAppModel {
         }
     }
 
+    /// Dismiss the popover's notices (runtime messages and the accessibility warning).
+    func clearNotices() {
+        messages = []
+        accessibilityWarning = nil
+    }
+
     func stop() {
         task?.cancel()
         task = nil
