@@ -48,7 +48,7 @@ final class ClipboardSync: @unchecked Sendable {
     }
 
     private enum Tick {
-        case baseline(Int)
+        case baseline(Int, UInt64)
         case unchanged
         case changed(Int, String?)
     }
@@ -60,10 +60,19 @@ final class ClipboardSync: @unchecked Sendable {
             // `enabledLastTick` is false until a read has actually been permitted. The first
             // permitted read after any disabled stretch only RE-BASELINES the change count: a copy
             // made while the channel was off must never be sent once it is switched on.
+            // `baselineGeneration` is the clipboard disable generation the baseline was taken under.
+            // A disable+re-enable that falls BETWEEN two ticks is invisible to `enabledLastTick`, but
+            // it bumps the generation, so the next tick still re-baselines instead of sending a copy
+            // made while the channel was off.
             var enabledLastTick = false
+            var baselineGeneration: UInt64 = 0
             if let self {
-                if let count = policy.perform(.clipboard, { self.pasteboard.changeCount }) {
+                let first: (Int, UInt64)? = policy.performWithGeneration(.clipboard) { gen in
+                    (self.pasteboard.changeCount, gen)
+                }
+                if let (count, gen) = first {
                     self.lastChangeCount = count
+                    baselineGeneration = gen
                     enabledLastTick = true
                 }
             }
@@ -71,18 +80,21 @@ final class ClipboardSync: @unchecked Sendable {
                 try? await Task.sleep(for: self?.pollInterval ?? .milliseconds(500))
                 guard let self else { return }
                 let wasEnabled = enabledLastTick
-                // Count AND text are read inside ONE policy hold; disabled => no pasteboard access.
-                let tick: Tick? = policy.perform(.clipboard) {
+                let knownGeneration = baselineGeneration
+                // Count AND text are read inside ONE policy hold (generation read in the same hold);
+                // disabled => no pasteboard access.
+                let tick: Tick? = policy.performWithGeneration(.clipboard) { gen in
                     let count = self.pasteboard.changeCount
-                    guard wasEnabled else { return .baseline(count) }
+                    guard wasEnabled, gen == knownGeneration else { return .baseline(count, gen) }
                     guard count != self.lastChangeCount else { return .unchanged }
                     return .changed(count, self.pasteboard.string(forType: .string))
                 }
                 guard let tick else { enabledLastTick = false; continue }
                 enabledLastTick = true
                 switch tick {
-                case .baseline(let count):
+                case .baseline(let count, let gen):
                     self.lastChangeCount = count
+                    baselineGeneration = gen
                 case .unchanged:
                     break
                 case .changed(let count, let text):

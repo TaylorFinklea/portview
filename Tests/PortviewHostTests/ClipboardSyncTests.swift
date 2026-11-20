@@ -134,6 +134,26 @@ import Foundation
         sync.stop()
     }
 
+    /// Disable + re-enable with NO poll tick in between (long interval): the copy made during the
+    /// gap must still not be sent. The test waits for the baseline read, then flips synchronously.
+    @Test func copyMadeInASubTickDisableGapIsNotSent() async {
+        let pasteboard = FakePasteboard()
+        let policy = enabledPolicy()
+        let sent = Sent()
+        let sync = ClipboardSync(pasteboard: pasteboard, capability: SessionCapability(),
+                                 policy: policy, pollInterval: .milliseconds(400))
+        sync.start { sent.add($0) }
+        #expect(await eventually { pasteboard.reads >= 1 })   // baseline taken; first tick ~400ms away
+        policy.update(clipboardEnabled: false, fileTransferEnabled: true)
+        pasteboard.copyLocally("old secret")
+        policy.update(clipboardEnabled: true, fileTransferEnabled: true)
+        try? await Task.sleep(for: .milliseconds(700))        // spans at least one tick
+        #expect(sent.all.isEmpty)
+        pasteboard.copyLocally("fresh")
+        #expect(await eventually { sent.all == ["fresh"] })
+        sync.stop()
+    }
+
     @Test func validCapabilityAppliesTheDeferredWrite() async {
         let pasteboard = FakePasteboard()
         let sync = ClipboardSync(pasteboard: pasteboard, capability: SessionCapability(), policy: enabledPolicy())
