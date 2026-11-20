@@ -44,7 +44,9 @@ a direct, encrypted connection — there is no Portview server in between.
 - **Clipboard and file transfer are opt-in (implemented; hardware verification pending).**
   Both default **off** on the Mac host. The owner enables each from the menu-bar popover,
   which requires Touch ID or the Mac password, so a remote click cannot turn them on.
-  Disabling takes effect for already-connected sessions immediately. Enforcement is at the
+  Disabling takes effect for already-connected sessions immediately: no new pasteboard read or
+  write, file write, or send starts afterwards, though one outbound message per connection that
+  was already handed to the network can still arrive. Enforcement is at the
   host's effect boundaries, not in client UI. The `portview-host` CLI keeps both off, with
   no toggle.
 - **Host-side input gating.** The host — not just the client UI — refuses to inject input
@@ -61,7 +63,7 @@ Stated here so you don't have to discover them:
 
 - **A paired device gets screen, input, and system audio.** Those stay on for every paired
   device, so pair only devices you fully trust. Clipboard sync and file transfer are
-  opt-in (see below).
+  opt-in (see above).
 - **Revoke can strand one key or mouse button** if it lands exactly between a press and its
   release; the stuck input clears on the next local key press or click. A release pass on
   revoke is planned.

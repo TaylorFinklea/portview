@@ -2,6 +2,43 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-11-19] Gate 4 implementation rulings: opt-in enforcement, enable gate, URL confirm
+
+**Context**: Gate 4 (`docs/superpowers/plans/2026-08-03-settings-onboarding.md`) implemented the
+2026-07-28 decisions. A gpt-6.2-sol plan review and the per-task and final reviews (Sonnet,
+gpt-6.1-terra) found gaps the plan text did not cover. The lead ruled on them as follows.
+
+**Decisions**:
+- **One policy by construction.** `HostAccessPolicy` is owned by `HostControl`. Every session's
+  clipboard, file receiver and outbound lane takes `control.accessPolicy`. The CLI gets the
+  secure default (both off) and has no toggle.
+- **Disable is serialized with effects.** The policy lock is held across each synchronous
+  effect, so `update` returns only after any in-flight effect finishes. Lock order is
+  `SessionCapability` → policy, and no lock is held across `await`.
+  - Disable generations invalidate inbound transfers and clipboard baselines that span an
+    off→on cycle.
+  - An inbound clipboard update received while disabled is dropped.
+  - Outbound sends are checked at submission. At most one already-authorized message per
+    connection can reach the transport after a disable, because a lock cannot be held across
+    the async send.
+- **Enabling needs local presence.** Enabling clipboard or files requires
+  `LAContext(.deviceOwnerAuthentication)`, the same pattern as enrollment Deny, because a paired
+  peer can inject clicks on the popover. Disabling is immediate. There is no per-send file
+  gate: once files are opted in, a peer with input can already view any file on screen.
+- **`portview://pair` is untrusted input.** A valid URL opens an inline tap-to-confirm that
+  shows host:port. It is ignored while a session is active and queued behind other
+  presentations. Pins are validated (32 bytes) before any state change. There is one parser,
+  `PairingPayload`.
+- **Retired with the window**: throughput/fps/encode stats, the activity log (replaced by
+  popover notices that never drop a message), and the remote-input and sharing-display cards.
+- Execution order was 1, 2, 4, 3, 5, 6, 7 so that enforcement landed before the toggles shipped.
+
+**Consequences**: The Gate 4 code is implemented and `make preflight` is green. The named human
+checks are still open: plan Task 3 Step 7 and Task 8 Steps 3–5, plus three added by the final
+review (toggle snaps back after a cancelled auth, the file picker comes to the front from the
+popover, and a fresh-Mac TCC walkthrough entirely from the popover). Gate 4 stays open in the
+master plan until those checks pass.
+
 ## [2026-10-20] Continuous audio playout replaces per-buffer host-time scheduling
 
 **Context**: Gate 2 R3 audio failed with clicks about every 2 s. An instrumented client on Roshar (192 s,

@@ -14,7 +14,8 @@ First release. Everything below is new.
   stats, the activity log (replaced by popover notices), and the remote-input and
   sharing-display cards.
 - Clipboard sync and file transfer are opt-in, default off; enabling either from the popover
-  requires Touch ID or the Mac password, and disabling applies to connected sessions at once.
+  requires Touch ID or the Mac password, and disabling applies to connected sessions at once
+  (at most one outbound message per connection already in flight can still arrive).
 - Menu-bar host: ScreenCaptureKit capture (video + system audio), VideoToolbox low-latency
   HEVC encode, streaming over certificate-pinned QUIC.
 - Multi-monitor: pick/switch displays live, hot-plug detection.
