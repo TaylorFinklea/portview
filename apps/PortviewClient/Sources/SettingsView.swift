@@ -6,6 +6,7 @@ import SwiftUI
 struct SettingsView: View {
     @ObservedObject var settings: ClientSettingsStore
     @ObservedObject var savedHosts: SavedHostsStore
+    let onShowWalkthrough: () -> Void
     let onClose: () -> Void
 
     @State private var confirmForget = false
@@ -23,6 +24,7 @@ struct SettingsView: View {
                     header
                     qualityCard
                     savedCard
+                    walkthroughCard
                     aboutCard
                     Spacer(minLength: 0)
                 }
@@ -120,6 +122,24 @@ struct SettingsView: View {
             .buttonStyle(.plain)
             .disabled(savedHosts.hosts.isEmpty)
             .opacity(savedHosts.hosts.isEmpty ? 0.5 : 1)
+        }
+        .padding(18)
+        .glassCard()
+    }
+
+    private var walkthroughCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Walkthrough").eyebrow(10).foregroundStyle(Glass.text2)
+            Button(action: onShowWalkthrough) {
+                Label("Show walkthrough", systemImage: "questionmark.circle")
+                    .font(.grotesk(13, .semibold)).foregroundStyle(Glass.text1)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
         }
         .padding(18)
         .glassCard()

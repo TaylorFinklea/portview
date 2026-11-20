@@ -22,6 +22,13 @@ struct ContentView: View {
     @State private var showSettings = false
     @State private var showFileImporter = false
 
+    /// First-run walkthrough. `walkthrough.isPresented` is the single source of truth for whether
+    /// it is on screen, so the `portview://pair` confirm prompt can wait until it is dismissed.
+    @State private var walkthrough = WalkthroughPresentation(store: FirstRunStateStore())
+    /// Set by Settings' "Show walkthrough"; presented once the Settings sheet has finished dismissing
+    /// (two modals cannot be presented at the same time).
+    @State private var reopenWalkthroughAfterSettings = false
+
     // Live HUD state (kept here so it survives view switches; passed to LiveHUDView).
     @State private var zoom: CGFloat = 1
     @State private var showQualityHUD = false
@@ -42,8 +49,22 @@ struct ContentView: View {
                     onClose: { showScanner = false })
             }
             .sheet(isPresented: $showManual) { manualConnectSheet }
-            .sheet(isPresented: $showSettings) {
-                SettingsView(settings: settings, savedHosts: savedHosts, onClose: { showSettings = false })
+            .sheet(isPresented: $showSettings, onDismiss: {
+                if reopenWalkthroughAfterSettings {
+                    reopenWalkthroughAfterSettings = false
+                    walkthrough.showAgain()
+                }
+            }) {
+                SettingsView(
+                    settings: settings, savedHosts: savedHosts,
+                    onShowWalkthrough: { reopenWalkthroughAfterSettings = true; showSettings = false },
+                    onClose: { showSettings = false })
+            }
+            .fullScreenCover(isPresented: Binding(
+                get: { walkthrough.isPresented },
+                set: { if !$0 { walkthrough.finish() } })
+            ) {
+                FirstRunWalkthroughView(onFinish: { walkthrough.finish() })
             }
             .sheet(item: Binding(get: { session.receivedFile }, set: { session.receivedFile = $0 })) { file in
                 ReceivedFileSheet(file: file) { session.receivedFile = nil }
