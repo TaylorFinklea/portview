@@ -702,7 +702,11 @@ public struct HostRunner: Sendable {
         // and finished in the teardown defer: clipboard pushes, cursor confirmations, and HostControl
         // broadcast/file sends all enqueue onto it, so no fire-and-forget send can reorder under load
         // or outlive the session. Its sink gates on `capability.isValid` (Task 6).
-        let outbound = OutboundLane(connection: connection, capability: capability)
+        // The host owner's live clipboard/file opt-in: the SAME object `HostControl` owns, shared by
+        // this session's sink, `ClipboardSync` and `FileReceiver`. A nil control (tests) gets the
+        // secure all-off default.
+        let accessPolicy = control?.accessPolicy ?? HostAccessPolicy()
+        let outbound = OutboundLane(connection: connection, capability: capability, policy: accessPolicy)
         // Per-connection session id (a fresh UUID, NOT the device's stable key id): on a reconnect the
         // old session's disconnect must not evict the new one's entry.
         let sessionID = UUID().uuidString
@@ -738,8 +742,8 @@ public struct HostRunner: Sendable {
         // Inbound effect units — each SELF-GUARDS its irreducible OS effect on `capability` (Task 5),
         // so the serve loop calls them UNWRAPPED (an outer `capability.perform` would self-deadlock the
         // non-reentrant lock).
-        let clipboard = ClipboardSync(capability: capability)
-        let fileReceiver = FileReceiver(capability: capability)
+        let clipboard = ClipboardSync(capability: capability, policy: accessPolicy)
+        let fileReceiver = FileReceiver(capability: capability, policy: accessPolicy)
         // Latest client-reported receive-side quality snapshot for THIS connection, read by the video
         // pump's adaptive rate controller each stats interval.
         let clientFeedback = ClientFeedbackHolder(capability: capability)

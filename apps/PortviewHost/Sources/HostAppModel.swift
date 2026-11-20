@@ -59,10 +59,25 @@ final class HostAppModel {
 
     @ObservationIgnored private var task: Task<Void, Never>?
     /// Persisted host preferences; a snapshot is passed to the runtime at each `start()`.
-    @ObservationIgnored let preferencesStore = HostPreferencesStore()
+    @ObservationIgnored let preferencesStore: HostPreferencesStore
     /// The live displays last reported by the runner (feeds the default-display picker).
     private(set) var availableDisplays: [HostDisplayDescriptor] = []
-    @ObservationIgnored private let control = HostControl()
+    /// Owns the live clipboard/file opt-in (`control.accessPolicy`), seeded from the persisted
+    /// preferences so a relaunch honors the saved choice (default OFF). Built in `init` because it
+    /// depends on `preferencesStore`.
+    @ObservationIgnored private let control: HostControl
+    /// Bumped by every clipboard/file toggle request; an ENABLE that finished authenticating applies
+    /// only if no newer request (e.g. a disable made while the prompt was up) superseded it.
+    @ObservationIgnored private var clipboardToggleEpoch = 0
+    @ObservationIgnored private var fileToggleEpoch = 0
+
+    init() {
+        let store = HostPreferencesStore()
+        preferencesStore = store
+        control = HostControl(accessPolicy: HostAccessPolicy(
+            clipboardEnabled: store.preferences.clipboardEnabled,
+            fileTransferEnabled: store.preferences.fileTransferEnabled))
+    }
     /// The ONE shared durable pairing store (design §2/§6c). Built once here — NOT per-`start()` — so
     /// the serve loop authorizes against, and the revoke UI mutates, the SAME actor instance: the
     /// in-process live invalidation on revoke (`control.beginRevoke`) is then synchronous with the
@@ -649,6 +664,49 @@ final class HostAppModel {
         }
     }
 
+    /// Clipboard sync opt-in. DISABLE is synchronous: the shared policy is updated (which waits out
+    /// any in-flight clipboard effect on every live session) BEFORE this returns, then persisted.
+    /// ENABLE requires a fresh positive `LAContext` result first — the same local-presence gate as
+    /// `denyEnrollment` — so a remote CGEvent click on the toggle cannot opt the host in; on
+    /// failure or cancel nothing changes.
+    func setClipboardEnabled(_ enabled: Bool) {
+        clipboardToggleEpoch += 1
+        let epoch = clipboardToggleEpoch
+        let apply = { [self] in
+            let policy = control.accessPolicy
+            policy.update(clipboardEnabled: enabled, fileTransferEnabled: policy.fileTransferEnabled)
+            preferencesStore.preferences.clipboardEnabled = enabled
+        }
+        guard enabled else { apply(); return }
+        Task {
+            guard await self.confirmLocalPresence(reason: "Allow clipboard sharing with connected devices"),
+                  epoch == self.clipboardToggleEpoch else { return }
+            apply()
+        }
+    }
+
+    /// File-transfer opt-in; same semantics as `setClipboardEnabled(_:)`.
+    func setFileTransferEnabled(_ enabled: Bool) {
+        fileToggleEpoch += 1
+        let epoch = fileToggleEpoch
+        let apply = { [self] in
+            let policy = control.accessPolicy
+            policy.update(clipboardEnabled: policy.clipboardEnabled, fileTransferEnabled: enabled)
+            preferencesStore.preferences.fileTransferEnabled = enabled
+        }
+        guard enabled else { apply(); return }
+        Task {
+            guard await self.confirmLocalPresence(reason: "Allow file transfer with connected devices"),
+                  epoch == self.fileToggleEpoch else { return }
+            apply()
+        }
+    }
+
+    private func confirmLocalPresence(reason: String) async -> Bool {
+        let context = LAContext()
+        return (try? await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason)) ?? false
+    }
+
     /// Close the connected client session(s) without stopping hosting (keeps advertising).
     func disconnectClients() {
         control.disconnectAll()
@@ -675,12 +733,16 @@ final class HostAppModel {
 
     /// Pick a file and send it to the connected iPhone (Mac→iPhone transfer).
     func sendFileToClient() {
+        // The UI may hide this action, but the policy is the gate: checked before the picker opens,
+        // again before the chosen file is read, and finally inside `HostControl.sendFile`.
+        guard control.accessPolicy.fileTransferEnabled else { return }
         guard let target = sessions.devices.first?.id else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard control.accessPolicy.fileTransferEnabled else { return }
         guard let data = try? Data(contentsOf: url) else {
             messages.append("couldn't read \(url.lastPathComponent)")
             return

@@ -26,6 +26,10 @@ private final class RecordingLaneSender: LaneStreamSender, @unchecked Sendable {
     var closed: Bool { lock.lock(); defer { lock.unlock() }; return closeCount > 0 }
 }
 
+private func allEnabled() -> HostAccessPolicy {
+    HostAccessPolicy(clipboardEnabled: true, fileTransferEnabled: true)
+}
+
 private func videoMarker(_ n: UInt64) -> AnyMessage {
     .videoFrame(VideoFrame(sequence: n, ptsMicros: 0, isKeyframe: true,
                            displayID: 1, width: 8, height: 8, data: [0xAA]))
@@ -83,7 +87,7 @@ private func statsMarker(_ n: UInt64) -> AnyMessage {
     @Test func productionSinkDropsATakenButUnsentMessageAfterInvalidate() async {
         let capability = SessionCapability()
         let sender = RecordingLaneSender()
-        let lane = OutboundLane<AnyMessage>(connection: sender, capability: capability)
+        let lane = OutboundLane<AnyMessage>(connection: sender, capability: capability, policy: allEnabled())
 
         lane.enqueue(.clipboardUpdate(ClipboardUpdate(text: "should-not-reach-the-sender")))
         capability.invalidate()
@@ -101,7 +105,7 @@ private func statsMarker(_ n: UInt64) -> AnyMessage {
     @Test func productionSinkSendsNormallyWhileCapabilityIsValid() async {
         let capability = SessionCapability()
         let sender = RecordingLaneSender()
-        let lane = OutboundLane<AnyMessage>(connection: sender, capability: capability)
+        let lane = OutboundLane<AnyMessage>(connection: sender, capability: capability, policy: allEnabled())
 
         lane.enqueue(.clipboardUpdate(ClipboardUpdate(text: "delivered")))
         for _ in 0..<500 {
@@ -109,6 +113,55 @@ private func statsMarker(_ n: UInt64) -> AnyMessage {
             try? await Task.sleep(for: .milliseconds(10))
         }
         #expect(sender.sent == [.clipboardUpdate(ClipboardUpdate(text: "delivered"))])
+        lane.finish()
+    }
+
+    // MARK: OutboundLane production sink: live clipboard/file opt-in (HostAccessPolicy)
+
+    private func settle() async { try? await Task.sleep(for: .milliseconds(200)) }
+
+    @Test func productionSinkDropsClipboardWhenClipboardDisabledButSendsOthers() async {
+        let sender = RecordingLaneSender()
+        let policy = HostAccessPolicy(clipboardEnabled: false, fileTransferEnabled: true)
+        let lane = OutboundLane<AnyMessage>(connection: sender, capability: SessionCapability(), policy: policy)
+
+        lane.enqueue(.clipboardUpdate(ClipboardUpdate(text: "secret")))
+        lane.enqueue(statsMarker(1))
+        for _ in 0..<500 where sender.sent.isEmpty { try? await Task.sleep(for: .milliseconds(10)) }
+        await settle()
+        #expect(sender.sent == [statsMarker(1)])   // clipboard dropped, ordering/other traffic intact
+        lane.finish()
+    }
+
+    @Test func productionSinkDropsFileMessagesWhenFilesDisabledAndWaitersStillResume() async {
+        let sender = RecordingLaneSender()
+        let policy = HostAccessPolicy(clipboardEnabled: true, fileTransferEnabled: false)
+        let lane = OutboundLane<AnyMessage>(connection: sender, capability: SessionCapability(), policy: policy)
+
+        // `send` suspends until the sink ran — a dropped item must still resume its waiter.
+        await lane.send(.fileOffer(FileOffer(transferID: 1, name: "x", size: 1)))
+        await lane.send(.fileChunk(FileChunk(transferID: 1, isLast: true, data: [1])))
+        #expect(sender.sent.isEmpty)
+        lane.finish()
+    }
+
+    @Test func enablingRestoresFileAndClipboardDelivery() async {
+        let sender = RecordingLaneSender()
+        let policy = HostAccessPolicy()
+        let lane = OutboundLane<AnyMessage>(connection: sender, capability: SessionCapability(), policy: policy)
+        policy.update(clipboardEnabled: true, fileTransferEnabled: true)
+
+        await lane.send(.fileOffer(FileOffer(transferID: 1, name: "x", size: 1)))
+        await lane.send(.clipboardUpdate(ClipboardUpdate(text: "ok")))
+        #expect(sender.sent.count == 2)
+        lane.finish()
+    }
+
+    @Test func defaultPolicyOnTheSinkIsSecure() async {
+        let sender = RecordingLaneSender()
+        let lane = OutboundLane<AnyMessage>(connection: sender, capability: SessionCapability())
+        await lane.send(.clipboardUpdate(ClipboardUpdate(text: "x")))
+        #expect(sender.sent.isEmpty)
         lane.finish()
     }
 

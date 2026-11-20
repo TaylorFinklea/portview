@@ -31,24 +31,67 @@ final class ClipboardSync: @unchecked Sendable {
     /// pasteboard mutation would run — not just when `applyRemote` was called — so a write queued
     /// before a normal teardown OR a revoke still drops if invalidation lands first (H-d).
     private let capability: SessionCapability
+    /// The host owner's live clipboard opt-in (default OFF). Checked at the TWO irreducible
+    /// boundaries this type owns: every pasteboard READ in the poll (so a disabled host never even
+    /// looks at the pasteboard) and the pasteboard WRITE in `applyRemote`. Lock order is
+    /// capability -> policy; `policy.perform` holds the policy lock across the synchronous effect,
+    /// so a disable returns only after any in-flight read/write has finished.
+    private let policy: HostAccessPolicy
+    private let pollInterval: Duration
 
-    init(pasteboard: ClipboardPasteboard = NSPasteboard.general, capability: SessionCapability) {
+    init(pasteboard: ClipboardPasteboard = NSPasteboard.general, capability: SessionCapability,
+         policy: HostAccessPolicy, pollInterval: Duration = .milliseconds(500)) {
         self.pasteboard = pasteboard
         self.capability = capability
+        self.policy = policy
+        self.pollInterval = pollInterval
+    }
+
+    private enum Tick {
+        case baseline(Int)
+        case unchanged
+        case changed(Int, String?)
     }
 
     /// Begin polling; `onLocalCopy` fires when the Mac's pasteboard text changes locally.
     func start(onLocalCopy: @escaping @Sendable (String) -> Void) {
+        let policy = self.policy
         pollTask = Task { @MainActor [weak self] in
-            self?.lastChangeCount = self?.pasteboard.changeCount ?? 0
+            // `enabledLastTick` is false until a read has actually been permitted. The first
+            // permitted read after any disabled stretch only RE-BASELINES the change count: a copy
+            // made while the channel was off must never be sent once it is switched on.
+            var enabledLastTick = false
+            if let self {
+                if let count = policy.perform(.clipboard, { self.pasteboard.changeCount }) {
+                    self.lastChangeCount = count
+                    enabledLastTick = true
+                }
+            }
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(500))
+                try? await Task.sleep(for: self?.pollInterval ?? .milliseconds(500))
                 guard let self else { return }
-                let count = self.pasteboard.changeCount
-                guard count != self.lastChangeCount else { continue }
-                self.lastChangeCount = count
-                if let text = self.pasteboard.string(forType: .string), !text.isEmpty {
-                    onLocalCopy(text)
+                let wasEnabled = enabledLastTick
+                // Count AND text are read inside ONE policy hold; disabled => no pasteboard access.
+                let tick: Tick? = policy.perform(.clipboard) {
+                    let count = self.pasteboard.changeCount
+                    guard wasEnabled else { return .baseline(count) }
+                    guard count != self.lastChangeCount else { return .unchanged }
+                    return .changed(count, self.pasteboard.string(forType: .string))
+                }
+                guard let tick else { enabledLastTick = false; continue }
+                enabledLastTick = true
+                switch tick {
+                case .baseline(let count):
+                    self.lastChangeCount = count
+                case .unchanged:
+                    break
+                case .changed(let count, let text):
+                    self.lastChangeCount = count
+                    if let text, !text.isEmpty {
+                        // Re-checked at the send boundary: a disable that landed after the read
+                        // drops the copy here (the outbound sink checks again at submission).
+                        _ = policy.perform(.clipboard) { onLocalCopy(text) }
+                    }
                 }
             }
         }
@@ -61,10 +104,14 @@ final class ClipboardSync: @unchecked Sendable {
             // The recheck runs HERE, inside the deferred task, not at `applyRemote`'s call site —
             // the whole point of the seam (finding 3 / H-d): a capability valid when `applyRemote`
             // was called but invalidated before this task got to run must still drop the write.
+            // The policy check is nested INSIDE the capability's closure (capability -> policy) for
+            // the same reason: a disable that lands while the task is queued must still drop it.
             self.capability.perform {
-                self.pasteboard.clearContents()
-                self.pasteboard.setString(text, forType: .string)
-                self.lastChangeCount = self.pasteboard.changeCount
+                _ = self.policy.perform(.clipboard) {
+                    self.pasteboard.clearContents()
+                    self.pasteboard.setString(text, forType: .string)
+                    self.lastChangeCount = self.pasteboard.changeCount
+                }
             }
         }
     }

@@ -51,13 +51,21 @@ public final class HostControl: @unchecked Sendable {
     /// or idle-lock mid-session. Keyed by session id (see KeepAwake) so it survives `disconnectAll`.
     private let keepAwake: KeepAwake
 
-    public init() {
+    /// The host owner's live clipboard / file-transfer opt-in. Owned HERE so there is exactly one
+    /// instance per host by construction: `HostRunner` hands this same object to every session's
+    /// `ClipboardSync`/`FileReceiver`/outbound sink, and `sendFile` below consults it. Secure
+    /// default: both channels off until the app (or a test) updates it.
+    public let accessPolicy: HostAccessPolicy
+
+    public init(accessPolicy: HostAccessPolicy = HostAccessPolicy()) {
         self.keepAwake = KeepAwake(backend: IOKitKeepAwakeBackend())
+        self.accessPolicy = accessPolicy
     }
 
     /// Test seam: inject a fake keep-awake backend.
-    init(keepAwake: KeepAwake) {
+    init(keepAwake: KeepAwake, accessPolicy: HostAccessPolicy = HostAccessPolicy()) {
         self.keepAwake = keepAwake
+        self.accessPolicy = accessPolicy
     }
 
     /// Snapshot the admission ticket for a key at the authorization instant (design §3, Order-A):
@@ -216,6 +224,12 @@ public final class HostControl: @unchecked Sendable {
         let session = sessions[sessionID]
         lock.unlock()
         guard let session else { return }
+        // Owner opt-in: refuse before the offer. (The lane sink drops file messages too, at
+        // submission; this check is what stops a transfer from being STARTED, and the per-chunk
+        // check below is what ABORTS one in progress.)
+        let policy = accessPolicy
+        let generation = policy.disableGeneration(.fileTransfer)
+        guard policy.permits(.fileTransfer, sinceGeneration: generation) else { return }
         let transferID = UInt32.random(in: 1...UInt32.max)
         // Back-pressured feeding via the lane's awaitable send: at most ONE chunk sits in the
         // queue at a time, so a large transfer can't head-of-line block control messages (lock
@@ -225,12 +239,17 @@ public final class HostControl: @unchecked Sendable {
         // immediately and subsequent sends no-op.
         Task {
             let bytes = [UInt8](data)
+            guard policy.permits(.fileTransfer, sinceGeneration: generation) else { return }
             await session.outbound.send(.fileOffer(FileOffer(transferID: transferID, name: name, size: UInt64(bytes.count))))
             let chunkSize = 64 * 1024
             var offset = 0
             repeat {
                 let end = min(offset + chunkSize, bytes.count)
                 let isLast = end >= bytes.count
+                // Checked before EVERY chunk; the first refusal ABORTS the whole transfer (never
+                // skip a chunk and continue — the peer would assemble a corrupt file). A disable
+                // then re-enable also aborts (generation changed): resume is the owner's re-send.
+                guard policy.permits(.fileTransfer, sinceGeneration: generation) else { return }
                 await session.outbound.send(.fileChunk(FileChunk(transferID: transferID, isLast: isLast, data: Array(bytes[offset..<end]))))
                 offset = end
             } while offset < bytes.count

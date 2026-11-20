@@ -7,6 +7,10 @@ import PortviewProtocol
 /// `FileReceiver` writes inbound `FileOffer`/`FileChunk` pushes into a directory, treating
 /// `offer.size` as untrusted and enforcing an actual per-file cap and per-session total cap.
 @Suite struct FileReceiverTests {
+    private func enabledPolicy() -> HostAccessPolicy {
+        HostAccessPolicy(clipboardEnabled: true, fileTransferEnabled: true)
+    }
+
     private func makeTempDir() -> URL {
         let dir = FileManager.default.temporaryDirectory
             .appendingPathComponent("FileReceiverTests-\(UUID().uuidString)")
@@ -17,7 +21,7 @@ import PortviewProtocol
     @Test func overCapTransferIsDroppedAndFileDeleted() {
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let receiver = FileReceiver(directory: dir, maxFileSize: 10, maxSessionSize: 1000, capability: SessionCapability())
+        let receiver = FileReceiver(directory: dir, maxFileSize: 10, maxSessionSize: 1000, capability: SessionCapability(), policy: enabledPolicy())
 
         // offer.size lies about the true size — must not be trusted.
         receiver.offer(FileOffer(transferID: 1, name: "big.bin", size: 1))
@@ -31,7 +35,7 @@ import PortviewProtocol
     @Test func underCapTransferWritesFully() {
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000, capability: SessionCapability())
+        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000, capability: SessionCapability(), policy: enabledPolicy())
 
         receiver.offer(FileOffer(transferID: 2, name: "small.bin", size: 12))
         receiver.chunk(FileChunk(transferID: 2, isLast: false, data: Array(repeating: 1, count: 6)))
@@ -45,7 +49,7 @@ import PortviewProtocol
     @Test func sessionQuotaDropsSecondTransferOnceExceeded() {
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 10, capability: SessionCapability())
+        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 10, capability: SessionCapability(), policy: enabledPolicy())
 
         receiver.offer(FileOffer(transferID: 3, name: "a.bin", size: 8))
         receiver.chunk(FileChunk(transferID: 3, isLast: true, data: Array(repeating: 1, count: 8)))
@@ -65,7 +69,7 @@ import PortviewProtocol
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let capability = SessionCapability()
-        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000, capability: capability)
+        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000, capability: capability, policy: enabledPolicy())
 
         receiver.offer(FileOffer(transferID: 5, name: "gated.bin", size: 6))
         capability.invalidate()
@@ -85,7 +89,7 @@ import PortviewProtocol
         defer { try? FileManager.default.removeItem(at: dir) }
         let capability = SessionCapability()
         capability.invalidate()
-        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000, capability: capability)
+        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000, capability: capability, policy: enabledPolicy())
 
         receiver.offer(FileOffer(transferID: 6, name: "ghost.bin", size: 6))
 
@@ -104,7 +108,7 @@ import PortviewProtocol
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let capability = SessionCapability()
-        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000, capability: capability)
+        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000, capability: capability, policy: enabledPolicy())
 
         receiver.offer(FileOffer(transferID: 8, name: "half.bin", size: 12))
         receiver.chunk(FileChunk(transferID: 8, isLast: false, data: Array(repeating: 1, count: 6)))
@@ -125,7 +129,7 @@ import PortviewProtocol
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000,
-                                    capability: SessionCapability())
+                                    capability: SessionCapability(), policy: enabledPolicy())
 
         receiver.offer(FileOffer(transferID: 9, name: "whole.bin", size: 6))
         receiver.chunk(FileChunk(transferID: 9, isLast: false, data: Array(repeating: 1, count: 6)))
@@ -144,7 +148,7 @@ import PortviewProtocol
         let dir = makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let capability = SessionCapability()
-        let receiver = FileReceiver(directory: dir, maxFileSize: 10, maxSessionSize: 1000, capability: capability)
+        let receiver = FileReceiver(directory: dir, maxFileSize: 10, maxSessionSize: 1000, capability: capability, policy: enabledPolicy())
 
         receiver.offer(FileOffer(transferID: 10, name: "partial.bin", size: 6))
         receiver.chunk(FileChunk(transferID: 10, isLast: false, data: Array(repeating: 1, count: 6)))
@@ -168,11 +172,102 @@ import PortviewProtocol
         defer { try? FileManager.default.removeItem(at: dir) }
         let capability = SessionCapability()
         capability.invalidate()
-        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000, capability: capability)
+        let receiver = FileReceiver(directory: dir, maxFileSize: 1000, maxSessionSize: 1000, capability: capability, policy: enabledPolicy())
 
         receiver.offer(FileOffer(transferID: 7, name: "ghost2.bin", size: 6))
         receiver.chunk(FileChunk(transferID: 7, isLast: true, data: Array(repeating: 1, count: 6)))
 
         #expect((try? FileManager.default.contentsOfDirectory(atPath: dir.path))?.isEmpty == true)
+    }
+
+    // MARK: - Live file opt-in (HostAccessPolicy)
+
+    @Test func disabledFileOfferCreatesNoFile() {
+        let dir = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let receiver = FileReceiver(directory: dir, capability: SessionCapability(), policy: HostAccessPolicy())
+
+        receiver.offer(FileOffer(transferID: 20, name: "nope.bin", size: 6))
+        receiver.chunk(FileChunk(transferID: 20, isLast: true, data: Array(repeating: 1, count: 6)))
+
+        #expect((try? FileManager.default.contentsOfDirectory(atPath: dir.path))?.isEmpty == true)
+        #expect(receiver.inFlightTransferIDs.isEmpty)
+    }
+
+    @Test func enablingRestoresNormalReceive() {
+        let dir = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let policy = HostAccessPolicy()
+        let receiver = FileReceiver(directory: dir, capability: SessionCapability(), policy: policy)
+        policy.update(clipboardEnabled: false, fileTransferEnabled: true)
+
+        receiver.offer(FileOffer(transferID: 21, name: "ok.bin", size: 6))
+        receiver.chunk(FileChunk(transferID: 21, isLast: true, data: Array(repeating: 1, count: 6)))
+
+        #expect((try? Data(contentsOf: dir.appendingPathComponent("ok.bin")))?.count == 6)
+        #expect(receiver.inFlightTransferIDs.isEmpty)
+    }
+
+    /// offer, disable, chunk, enable, final chunk: the disable invalidates the transfer. The first
+    /// post-disable chunk discards the host's own partial file and forgets the id; nothing resumes
+    /// after re-enable (the peer must re-offer).
+    @Test func disableMidTransferInvalidatesItEvenAfterReEnable() {
+        let dir = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let policy = enabledPolicy()
+        let receiver = FileReceiver(directory: dir, capability: SessionCapability(), policy: policy)
+        let url = dir.appendingPathComponent("mid.bin")
+
+        receiver.offer(FileOffer(transferID: 22, name: "mid.bin", size: 12))
+        receiver.chunk(FileChunk(transferID: 22, isLast: false, data: Array(repeating: 1, count: 6)))
+        #expect((try? Data(contentsOf: url))?.count == 6)
+
+        policy.update(clipboardEnabled: true, fileTransferEnabled: false)
+        receiver.chunk(FileChunk(transferID: 22, isLast: false, data: Array(repeating: 2, count: 6)))
+        #expect(receiver.inFlightTransferIDs.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+
+        policy.update(clipboardEnabled: true, fileTransferEnabled: true)
+        receiver.chunk(FileChunk(transferID: 22, isLast: true, data: Array(repeating: 3, count: 6)))
+        #expect(receiver.inFlightTransferIDs.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    /// A disable then re-enable BEFORE any further chunk still invalidates the older transfer.
+    @Test func disableThenReEnableBeforeNextChunkStillInvalidatesTheTransfer() {
+        let dir = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let policy = enabledPolicy()
+        let receiver = FileReceiver(directory: dir, capability: SessionCapability(), policy: policy)
+        let url = dir.appendingPathComponent("flip.bin")
+
+        receiver.offer(FileOffer(transferID: 23, name: "flip.bin", size: 12))
+        receiver.chunk(FileChunk(transferID: 23, isLast: false, data: Array(repeating: 1, count: 6)))
+        policy.update(clipboardEnabled: false, fileTransferEnabled: false)
+        policy.update(clipboardEnabled: false, fileTransferEnabled: true)
+        receiver.chunk(FileChunk(transferID: 23, isLast: true, data: Array(repeating: 1, count: 6)))
+
+        #expect(receiver.inFlightTransferIDs.isEmpty)
+        #expect(!FileManager.default.fileExists(atPath: url.path))
+    }
+
+    /// An invalidated capability still wins: a stale transfer's cleanup is itself capability-gated.
+    @Test func staleCleanupIsStillCapabilityGated() {
+        let dir = makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let policy = enabledPolicy()
+        let capability = SessionCapability()
+        let receiver = FileReceiver(directory: dir, capability: capability, policy: policy)
+        let url = dir.appendingPathComponent("gated2.bin")
+
+        receiver.offer(FileOffer(transferID: 25, name: "gated2.bin", size: 12))
+        receiver.chunk(FileChunk(transferID: 25, isLast: false, data: Array(repeating: 1, count: 6)))
+        policy.update(clipboardEnabled: false, fileTransferEnabled: false)
+        capability.invalidate()
+        receiver.chunk(FileChunk(transferID: 25, isLast: true, data: []))
+
+        #expect(FileManager.default.fileExists(atPath: url.path))   // revoked peer deletes nothing
+        #expect(receiver.inFlightTransferIDs == [25])
+        receiver.cancelAll()
     }
 }

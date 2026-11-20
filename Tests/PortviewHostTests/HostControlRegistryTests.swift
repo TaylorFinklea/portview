@@ -569,3 +569,95 @@ private final class BarrierKeepAwakeBackend: KeepAwakeBackend, @unchecked Sendab
 
     func declareUserActivity() {}
 }
+
+
+// MARK: - sendFile: live file opt-in (HostAccessPolicy)
+
+/// A scripted sender that records every message it is asked to send, and can run a hook after a
+/// chosen message — so a test can tell a POLICY drop (sender never called) from a transport failure.
+private final class SendFileRecorder: LaneStreamSender, @unchecked Sendable {
+    private let lock = NSLock()
+    private var messages: [AnyMessage] = []
+    private let afterFirstChunk: (@Sendable () -> Void)?
+    init(afterFirstChunk: (@Sendable () -> Void)? = nil) { self.afterFirstChunk = afterFirstChunk }
+    func send(_ message: AnyMessage) async throws {
+        record(message)
+        if case .fileChunk = message { afterFirstChunk?() }
+    }
+    private func record(_ message: AnyMessage) { lock.lock(); messages.append(message); lock.unlock() }
+    func close() {}
+    var sent: [AnyMessage] { lock.lock(); defer { lock.unlock() }; return messages }
+    var offers: Int { sent.filter { if case .fileOffer = $0 { return true } else { return false } }.count }
+    var chunks: Int { sent.filter { if case .fileChunk = $0 { return true } else { return false } }.count }
+}
+
+@Suite(.timeLimit(.minutes(1))) struct HostControlSendFileTests {
+    private func makeControl(files: Bool) -> HostControl {
+        HostControl(keepAwake: KeepAwake(backend: NoopKeepAwakeBackend(), ticker: NoopTicker()),
+                    accessPolicy: HostAccessPolicy(clipboardEnabled: false, fileTransferEnabled: files))
+    }
+
+    /// Registers a session whose lane shares the session's capability and the control's policy.
+    private func register(_ control: HostControl, sender: SendFileRecorder) -> OutboundLane<AnyMessage> {
+        let capability = SessionCapability()
+        let nw = NWConnection(host: "127.0.0.1", port: 9, using: .tcp)
+        let connection = PortviewConnection(connection: nw, queue: DispatchQueue(label: "test.sendfile"))
+        let lane = OutboundLane<AnyMessage>(connection: sender, capability: capability, policy: control.accessPolicy)
+        _ = control.register("S", connection, outbound: lane, authClass: .authenticated,
+                             ticket: AdmissionTicket(keyID: "K", generation: 0), capability: capability)
+        return lane
+    }
+
+    private func waitFor(_ condition: () -> Bool) async {
+        for _ in 0..<500 where !condition() { try? await Task.sleep(for: .milliseconds(10)) }
+    }
+
+    @Test func controlOwnsASecureDefaultPolicy() {
+        let control = HostControl(keepAwake: KeepAwake(backend: NoopKeepAwakeBackend(), ticker: NoopTicker()))
+        #expect(!control.accessPolicy.clipboardEnabled)
+        #expect(!control.accessPolicy.fileTransferEnabled)
+    }
+
+    @Test func disabledSendFileSendsNeitherOfferNorChunk() async {
+        let control = makeControl(files: false)
+        let sender = SendFileRecorder()
+        let lane = register(control, sender: sender)
+
+        control.sendFile(name: "a.bin", data: Data(repeating: 1, count: 100), to: "S")
+        try? await Task.sleep(for: .milliseconds(250))
+        #expect(sender.sent.isEmpty)
+        lane.finish()
+    }
+
+    @Test func enabledSendFileDeliversOfferThenChunks() async {
+        let control = makeControl(files: true)
+        let sender = SendFileRecorder()
+        let lane = register(control, sender: sender)
+
+        control.sendFile(name: "a.bin", data: Data(repeating: 1, count: 70 * 1024), to: "S")
+        await waitFor { sender.chunks == 2 }
+        #expect(sender.offers == 1)
+        #expect(sender.chunks == 2)
+        lane.finish()
+    }
+
+    /// Disabling after the first chunk was delivered aborts the whole transfer: no later chunk is
+    /// skipped-over-and-continued, and nothing is sent even if files are re-enabled afterwards.
+    @Test func disablingMidTransferAbortsTheWholeTransfer() async {
+        let control = makeControl(files: true)
+        let policy = control.accessPolicy
+        let sender = SendFileRecorder(afterFirstChunk: {
+            policy.update(clipboardEnabled: false, fileTransferEnabled: false)
+        })
+        let lane = register(control, sender: sender)
+
+        control.sendFile(name: "big.bin", data: Data(repeating: 1, count: 64 * 1024 * 4), to: "S")
+        await waitFor { sender.chunks >= 1 }
+        try? await Task.sleep(for: .milliseconds(100))
+        policy.update(clipboardEnabled: false, fileTransferEnabled: true)   // re-enable: must NOT resume
+        try? await Task.sleep(for: .milliseconds(250))
+        #expect(sender.offers == 1)
+        #expect(sender.chunks == 1)
+        lane.finish()
+    }
+}

@@ -110,9 +110,24 @@ extension OutboundLane where Message == AnyMessage {
     /// capability was still valid is dropped if it flipped invalid before this sink actually ran.
     /// Takes `any LaneStreamSender` (not the concrete `PortviewConnection`) so tests can gate a
     /// scripted fake instead of opening a live socket.
-    convenience init(connection: any LaneStreamSender, capability: SessionCapability) {
+    ///
+    /// The host owner's live opt-in is checked at the same submission point: a `.clipboardUpdate`
+    /// is dropped while clipboard sync is off, `.fileOffer`/`.fileChunk` while file transfer is off
+    /// — so toggling off also stops items already queued. A dropped item's `send(_:)` waiter still
+    /// resumes (the drain resumes the completion after the sink returns). `policy` defaults to the
+    /// secure all-off policy; production passes the host's shared `HostControl.accessPolicy`.
+    convenience init(connection: any LaneStreamSender, capability: SessionCapability,
+                     policy: HostAccessPolicy = HostAccessPolicy()) {
         self.init(sink: { message in
             guard capability.isValid else { return }
+            switch message {
+            case .clipboardUpdate:
+                guard policy.isEnabled(.clipboard) else { return }
+            case .fileOffer, .fileChunk:
+                guard policy.isEnabled(.fileTransfer) else { return }
+            default:
+                break
+            }
             try? await connection.send(message)
         })
     }

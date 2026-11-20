@@ -18,8 +18,19 @@ import Foundation
         private let lock = NSLock()
         private var _changeCount = 0
         private var _string: String?
+        private var _reads = 0
 
-        var changeCount: Int { lock.lock(); defer { lock.unlock() }; return _changeCount }
+        var changeCount: Int { lock.lock(); defer { lock.unlock() }; _reads += 1; return _changeCount }
+
+        /// Number of `changeCount` + `string(forType:)` reads — what a disabled policy must keep at 0.
+        var reads: Int { lock.lock(); defer { lock.unlock() }; return _reads }
+
+        /// A local copy by the Mac user (not counted as a read).
+        func copyLocally(_ string: String) {
+            lock.lock(); defer { lock.unlock() }
+            _string = string
+            _changeCount += 1
+        }
 
         @discardableResult
         func clearContents() -> Int {
@@ -39,13 +50,93 @@ import Foundation
 
         func string(forType dataType: NSPasteboard.PasteboardType) -> String? {
             lock.lock(); defer { lock.unlock() }
+            _reads += 1
             return _string
         }
     }
 
+    private func enabledPolicy() -> HostAccessPolicy {
+        HostAccessPolicy(clipboardEnabled: true, fileTransferEnabled: true)
+    }
+
+    private final class Sent: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [String] = []
+        func add(_ s: String) { lock.lock(); items.append(s); lock.unlock() }
+        var all: [String] { lock.lock(); defer { lock.unlock() }; return items }
+    }
+
+    private func eventually(_ condition: () -> Bool) async -> Bool {
+        for _ in 0..<500 {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
+    }
+
+    @Test func disabledPollingNeverReadsThePasteboardNorSends() async {
+        let pasteboard = FakePasteboard()
+        pasteboard.copyLocally("secret")
+        let sent = Sent()
+        let sync = ClipboardSync(pasteboard: pasteboard, capability: SessionCapability(),
+                                 policy: HostAccessPolicy(), pollInterval: .milliseconds(5))
+        sync.start { sent.add($0) }
+        try? await Task.sleep(for: .milliseconds(200))
+        sync.stop()
+        #expect(pasteboard.reads == 0)
+        #expect(sent.all.isEmpty)
+    }
+
+    @Test func disabledRemoteClipboardNeverWritesThePasteboard() async {
+        let pasteboard = FakePasteboard()
+        let sync = ClipboardSync(pasteboard: pasteboard, capability: SessionCapability(), policy: HostAccessPolicy())
+        sync.applyRemote("must not land")
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(pasteboard.string(forType: .string) == nil)
+        #expect(pasteboard.changeCount == 0)
+    }
+
+    @Test func disablingAfterStartStopsLaterReadsAndSends() async {
+        let pasteboard = FakePasteboard()
+        let policy = enabledPolicy()
+        let sent = Sent()
+        let sync = ClipboardSync(pasteboard: pasteboard, capability: SessionCapability(),
+                                 policy: policy, pollInterval: .milliseconds(5))
+        sync.start { sent.add($0) }
+        try? await Task.sleep(for: .milliseconds(30))
+        pasteboard.copyLocally("first")
+        #expect(await eventually { sent.all == ["first"] })
+
+        policy.update(clipboardEnabled: false, fileTransferEnabled: true)
+        let readsAtDisable = pasteboard.reads
+        pasteboard.copyLocally("while disabled")
+        try? await Task.sleep(for: .milliseconds(200))
+        sync.stop()
+        #expect(pasteboard.reads == readsAtDisable)
+        #expect(sent.all == ["first"])
+    }
+
+    @Test func copyMadeWhileDisabledIsNotSentAfterReEnable() async {
+        let pasteboard = FakePasteboard()
+        let policy = enabledPolicy()
+        let sent = Sent()
+        let sync = ClipboardSync(pasteboard: pasteboard, capability: SessionCapability(),
+                                 policy: policy, pollInterval: .milliseconds(5))
+        sync.start { sent.add($0) }
+        policy.update(clipboardEnabled: false, fileTransferEnabled: true)
+        try? await Task.sleep(for: .milliseconds(50))
+        pasteboard.copyLocally("old secret")
+        policy.update(clipboardEnabled: true, fileTransferEnabled: true)
+        try? await Task.sleep(for: .milliseconds(100))
+        #expect(sent.all.isEmpty)          // re-baselined on the first enabled tick
+        pasteboard.copyLocally("fresh")
+        #expect(await eventually { sent.all == ["fresh"] })
+        sync.stop()
+    }
+
     @Test func validCapabilityAppliesTheDeferredWrite() async {
         let pasteboard = FakePasteboard()
-        let sync = ClipboardSync(pasteboard: pasteboard, capability: SessionCapability())
+        let sync = ClipboardSync(pasteboard: pasteboard, capability: SessionCapability(), policy: enabledPolicy())
 
         sync.applyRemote("hello")
 
@@ -60,7 +151,7 @@ import Foundation
         let pasteboard = FakePasteboard()
         let capability = SessionCapability()
         capability.invalidate()
-        let sync = ClipboardSync(pasteboard: pasteboard, capability: capability)
+        let sync = ClipboardSync(pasteboard: pasteboard, capability: capability, policy: enabledPolicy())
 
         sync.applyRemote("must not land")
 
@@ -79,7 +170,7 @@ import Foundation
         // ALREADY invalid — deterministic, not a race against the Task's scheduling.
         let pasteboard = FakePasteboard()
         let capability = SessionCapability()
-        let sync = ClipboardSync(pasteboard: pasteboard, capability: capability)
+        let sync = ClipboardSync(pasteboard: pasteboard, capability: capability, policy: enabledPolicy())
 
         sync.applyRemote("queued before teardown")
         capability.invalidate()
