@@ -46,6 +46,12 @@ targets:
         UIBackgroundModes:
           - remote-notification
         UILaunchScreen: {}
+        # `portview://pair?…` deep links (confirmed in-app before connecting).
+        CFBundleURLTypes:
+          - CFBundleURLName: $(PRODUCT_BUNDLE_IDENTIFIER)
+            CFBundleTypeRole: Editor
+            CFBundleURLSchemes:
+              - portview
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: $(PORTVIEW_BUNDLE_ID_PREFIX).portview

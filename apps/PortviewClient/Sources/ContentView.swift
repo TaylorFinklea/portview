@@ -29,6 +29,10 @@ struct ContentView: View {
     /// (two modals cannot be presented at the same time).
     @State private var reopenWalkthroughAfterSettings = false
 
+    /// A validated `portview://pair` payload awaiting the user's tap-to-confirm. Never connects by
+    /// itself; shown as an inline overlay only when `pairingURLDecision == .prompt`.
+    @State private var pendingURLPairing: PairingPayload?
+
     // Live HUD state (kept here so it survives view switches; passed to LiveHUDView).
     @State private var zoom: CGFloat = 1
     @State private var showQualityHUD = false
@@ -72,6 +76,33 @@ struct ContentView: View {
             .sheet(isPresented: sasPairingPresented) {
                 SASPairingSheet(session: session)
             }
+            .onOpenURL { url in
+                // Untrusted external input: validate, never connect directly, never disturb a
+                // connecting/reconnecting/live session.
+                guard let payload = PairingURLRouter.payload(from: url),
+                      PairingURLRouter.decision(sessionActive: sessionActive, presentationBlocking: presentationBlocking) != .ignore
+                else { return }
+                pendingURLPairing = payload
+            }
+            .overlay(alignment: .bottom) {
+                if let payload = pendingURLPairing, pairingURLDecision == .prompt {
+                    PairingURLPrompt(
+                        payload: payload,
+                        onPair: {
+                            pendingURLPairing = nil
+                            session.connect(payload: payload, discovered: discovery.hosts)
+                        },
+                        onCancel: { pendingURLPairing = nil })
+                    .padding(.horizontal, 18)
+                    .padding(.bottom, 24)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: pairingURLDecision)
+            .onChange(of: sessionActive) { _, active in
+                // A session started some other way: the stale link must not pop up afterwards.
+                if active { pendingURLPairing = nil }
+            }
             .onChange(of: session.status) { _, status in
                 // Remember the host on first stream — for ALL paths — using the connection's resolved
                 // concrete IP (so a QR/manual/saved/discovered pairing persists, and a moved Mac's IP
@@ -108,6 +139,25 @@ struct ContentView: View {
                     session?.connectedHostToSave?.pinHex
                 }
             }
+    }
+
+    private var sessionActive: Bool {
+        switch session.status {
+        case .connecting, .streaming, .reconnecting: true
+        case .idle, .failed: false
+        }
+    }
+
+    /// Any modal that would collide with (or hide) the inline confirm prompt.
+    private var presentationBlocking: Bool {
+        walkthrough.isPresented || showScanner || showManual || showSettings
+            || session.receivedFile != nil || sasPairingPresented.wrappedValue
+    }
+
+    /// `.prompt` only when a pending link exists and nothing blocks it; `.queue` while it waits.
+    private var pairingURLDecision: PairingURLRouter.Decision? {
+        guard pendingURLPairing != nil else { return nil }
+        return PairingURLRouter.decision(sessionActive: sessionActive, presentationBlocking: presentationBlocking)
     }
 
     /// Re-wake entry (notification tap, or a push that arrived while foreground) into the normal
