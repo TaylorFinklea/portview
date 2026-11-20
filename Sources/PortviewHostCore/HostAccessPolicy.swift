@@ -21,6 +21,9 @@ import Foundation
 ///    `policy.perform` INSIDE the capability's closure; nothing here ever calls into a
 ///    capability, so the order is one-directional. The effect closure must never `await`, hop
 ///    actors, or call back into this policy (the lock is non-reentrant).
+/// 4. **Async sends are checked at submission.** No lock may be held across `await
+///    connection.send`, so the outbound sink checks the policy just before the send; at most one
+///    message already authorized at that check may still reach the transport after a disable returns.
 public final class HostAccessPolicy: @unchecked Sendable {
     public enum Feature: Sendable {
         case clipboard

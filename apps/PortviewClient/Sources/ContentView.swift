@@ -79,7 +79,9 @@ struct ContentView: View {
             .onOpenURL { url in
                 // Untrusted external input: validate, never connect directly, never disturb a
                 // connecting/reconnecting/live session.
-                guard let payload = PairingURLRouter.payload(from: url),
+                // A visible confirm prompt is never replaced under the user's finger.
+                guard !(pendingURLPairing != nil && pairingURLDecision == .prompt),
+                      let payload = PairingURLRouter.payload(from: url),
                       PairingURLRouter.decision(sessionActive: sessionActive, presentationBlocking: presentationBlocking) != .ignore
                 else { return }
                 pendingURLPairing = payload

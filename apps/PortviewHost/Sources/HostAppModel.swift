@@ -750,6 +750,7 @@ final class HostAppModel {
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
+        NSApp.activate()  // LSUIElement app: bring the panel to front
         guard panel.runModal() == .OK, let url = panel.url else { return }
         guard control.accessPolicy.fileTransferEnabled else { return }
         guard let data = try? Data(contentsOf: url) else {

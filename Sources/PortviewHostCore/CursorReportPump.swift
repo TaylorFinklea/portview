@@ -116,6 +116,10 @@ extension OutboundLane where Message == AnyMessage {
     /// — so toggling off also stops items already queued. A dropped item's `send(_:)` waiter still
     /// resumes (the drain resumes the completion after the sink returns). `policy` defaults to the
     /// secure all-off policy; production passes the host's shared `HostControl.accessPolicy`.
+    ///
+    /// The policy is checked at submission only: no lock may be held across `await connection.send`,
+    /// so at most one message already authorized at its check may still reach the transport after
+    /// a disable returns (mirrors the capability-gate note above).
     convenience init(connection: any LaneStreamSender, capability: SessionCapability,
                      policy: HostAccessPolicy = HostAccessPolicy()) {
         self.init(sink: { message in

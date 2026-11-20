@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import Combine
 import Foundation
 
 /// The host's persisted user preferences. Privacy-sensitive channels default OFF.

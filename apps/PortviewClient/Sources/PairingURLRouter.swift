@@ -53,6 +53,7 @@ struct PairingURLPrompt: View {
                     .font(.mono(9.5))
                     .foregroundStyle(Glass.text2)
                     .lineLimit(1)
+                    .truncationMode(.head)
             }
             Spacer()
             Button(action: onCancel) {

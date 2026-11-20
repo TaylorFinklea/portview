@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import Combine
 import Foundation
 
 /// Pure settings logic: port text validation and launch-at-login transitions with inline errors.

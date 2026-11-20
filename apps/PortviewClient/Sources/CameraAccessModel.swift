@@ -80,7 +80,8 @@ final class CameraAccessModel: ObservableObject {
         switch client.status() {
         case .authorized: state = client.hasCamera() ? .authorized : .unavailable
         case .denied: state = .denied
-        case .notDetermined: state = .notDetermined
+        // Still undetermined after our one-time request: treat as denied (no endless spinner).
+        case .notDetermined: state = hasRequested ? .denied : .notDetermined
         }
     }
 }

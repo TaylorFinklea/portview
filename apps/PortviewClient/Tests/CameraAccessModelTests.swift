@@ -64,7 +64,7 @@ final class CameraAccessModelTests: XCTestCase {
         await model.start()
         await model.start()
         XCTAssertEqual(fake.requestCount, 1)
-        XCTAssertNotEqual(model.state, .authorized)
+        XCTAssertEqual(model.state, .denied)
     }
 
     func testDeniedDoesNotRequestAndSettingsOnlyOnExplicitCall() async {

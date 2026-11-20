@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import SwiftUI
 
-/// Compact inline notices for the popover: the latest few runtime messages (never dropped; newlines flattened, truncated visually) (port
-/// unavailable, pairing-store repair result, revoke failures, ...) plus the accessibility warning,
-/// with a dismiss control. Replaces the retired activity log as the only surface for
+/// Compact inline notices for the popover: the latest few runtime messages (port unavailable,
+/// pairing-store repair result, revoke failures, ...) plus the accessibility warning, with a
+/// dismiss control. Messages are never dropped; newlines are flattened and long text is truncated
+/// visually. Replaces the retired activity log as the only surface for
 /// `model.messages`. Inline only — no alert/sheet/dialog.
 struct MenuBarNoticesView: View {
     let model: HostAppModel

@@ -10,6 +10,7 @@ struct MenuBarSettingsView: View {
     @ObservedObject var store: HostPreferencesStore
     @State private var expanded = false
     @State private var portText = ""
+    @FocusState private var portFocused: Bool
 
     init(model: HostAppModel) {
         self.model = model
@@ -49,8 +50,21 @@ struct MenuBarSettingsView: View {
         }
         .onAppear {
             settings.refreshLaunchAtLogin()
-            portText = store.preferences.preferredPort.map(String.init) ?? ""
+            resetPortText()
         }
+        // The popover closes on resign-key, so an edit that was typed but not submitted would be
+        // lost silently: commit on disappear too (validation stays in the coordinator).
+        .onDisappear { commitPortEdit() }
+    }
+
+    private func resetPortText() {
+        portText = store.preferences.preferredPort.map(String.init) ?? ""
+    }
+
+    /// Commit the typed port; after a rejected value the inline error stays but the field reverts
+    /// to the stored value so it never shows a port that is not in effect.
+    private func commitPortEdit() {
+        if !settings.commitPort(text: portText) { resetPortText() }
     }
 
     private var launchAtLoginRow: some View {
@@ -86,7 +100,11 @@ struct MenuBarSettingsView: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 90)
                     .multilineTextAlignment(.trailing)
+                    .focused($portFocused)
                     .onSubmit { settings.commitPort(text: portText) }
+                    .onChange(of: portFocused) { _, focused in
+                        if !focused { commitPortEdit() }
+                    }
             }
             if let error = settings.portError {
                 Text(error).font(.mono(9)).foregroundStyle(Glass.dangerText)
