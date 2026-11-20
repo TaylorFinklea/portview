@@ -11,14 +11,18 @@ struct PairView: View {
     let onClose: () -> Void
 
     @State private var detected: PairingPayload?
+    @StateObject private var camera = CameraAccessModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
-            QRScannerView { code in
-                guard detected == nil, let payload = PairingPayload(urlString: code) else { return }
-                withAnimation(Glass.panel) { detected = payload }
+            if camera.state == .authorized {
+                QRScannerView(onScan: { code in
+                    guard detected == nil, let payload = PairingPayload(urlString: code) else { return }
+                    withAnimation(Glass.panel) { detected = payload }
+                }, onFailure: { camera.scannerFailed() })
+                .ignoresSafeArea()
             }
-            .ignoresSafeArea()
 
             // Keep the UI legible over a bright scene without hiding the camera.
             RadialGradient(
@@ -30,8 +34,7 @@ struct PairView: View {
             VStack(spacing: 0) {
                 header
                 Spacer()
-                Viewfinder()
-                    .frame(width: 220, height: 220)
+                centerContent
                 Spacer()
                 if let detected {
                     DetectedToast(payload: detected) { onConnect(detected) }
@@ -47,6 +50,10 @@ struct PairView: View {
                 .padding(.bottom, 30)
             }
         }
+        .task { await camera.start() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { camera.refresh() }
+        }
         .overlay(alignment: .topLeading) {
             Button(action: onClose) {
                 Image(systemName: "xmark")
@@ -58,6 +65,54 @@ struct PairView: View {
             .padding(.leading, 18)
             .padding(.top, 8)
         }
+    }
+
+    @ViewBuilder
+    private var centerContent: some View {
+        switch camera.state {
+        case .authorized:
+            Viewfinder()
+                .frame(width: 220, height: 220)
+        case .notDetermined, .requesting:
+            VStack(spacing: 12) {
+                ProgressView().tint(Glass.text2)
+                Text("Waiting for camera access…")
+                    .font(.mono(10.5))
+                    .foregroundStyle(Glass.text2)
+            }
+        case .denied:
+            statusPanel(title: "Camera access is off",
+                        message: "Allow camera access in Settings to scan the QR code, or pair manually.") {
+                Button(action: camera.openSettings) {
+                    Text("Open Settings")
+                        .font(.mono(10, .semibold))
+                        .foregroundStyle(Glass.signalInk)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Glass.signal, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }
+            }
+        case .unavailable:
+            statusPanel(title: "No camera available",
+                        message: "This device can't scan QR codes right now. Pair manually instead.") {
+                EmptyView()
+            }
+        }
+    }
+
+    private func statusPanel<Actions: View>(title: String, message: String,
+                                            @ViewBuilder actions: () -> Actions) -> some View {
+        VStack(spacing: 10) {
+            Text(title)
+                .font(.grotesk(16, .semibold))
+                .foregroundStyle(Glass.text1)
+            Text(message)
+                .font(.mono(10.5))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(Glass.text2)
+            actions()
+        }
+        .padding(.horizontal, 32)
     }
 
     private var header: some View {

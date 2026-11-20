@@ -6,10 +6,12 @@ import UIKit
 /// A camera QR scanner. Calls `onScan` once with the first decoded string.
 struct QRScannerView: UIViewControllerRepresentable {
     let onScan: (String) -> Void
+    var onFailure: () -> Void = {}
 
     func makeUIViewController(context: Context) -> ScannerViewController {
         let controller = ScannerViewController()
         controller.onScan = onScan
+        controller.onFailure = onFailure
         return controller
     }
 
@@ -18,6 +20,8 @@ struct QRScannerView: UIViewControllerRepresentable {
 
 final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObjectsDelegate {
     var onScan: ((String) -> Void)?
+    /// Called (on the main queue) when capture can't be set up, so the UI never shows a black preview.
+    var onFailure: (() -> Void)?
     private let session = AVCaptureSession()
     private var previewLayer: AVCaptureVideoPreviewLayer?
     private var hasScanned = false
@@ -28,11 +32,11 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
 
         guard let device = AVCaptureDevice.default(for: .video),
               let input = try? AVCaptureDeviceInput(device: device),
-              session.canAddInput(input) else { return }
+              session.canAddInput(input) else { return fail() }
         session.addInput(input)
 
         let output = AVCaptureMetadataOutput()
-        guard session.canAddOutput(output) else { return }
+        guard session.canAddOutput(output) else { return fail() }
         session.addOutput(output)
         output.setMetadataObjectsDelegate(self, queue: .main)
         output.metadataObjectTypes = [.qr]
@@ -43,6 +47,10 @@ final class ScannerViewController: UIViewController, AVCaptureMetadataOutputObje
         previewLayer = preview
 
         session.startRunning()
+    }
+
+    private func fail() {
+        DispatchQueue.main.async { [weak self] in self?.onFailure?() }
     }
 
     override func viewDidLayoutSubviews() {
