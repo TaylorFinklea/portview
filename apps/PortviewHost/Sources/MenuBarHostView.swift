@@ -3,14 +3,12 @@ import SwiftUI
 import PortviewHostCore
 
 /// Compact menu-bar popover: the "just let me connect" surface — status, the real QR + copy URL when
-/// advertising, connected device + duration when live, and Start/Stop + Open window. The rich
-/// permissions/telemetry/file-send flow stays in the window. Auto-starts hosting (idempotent) so the
-/// menu bar can advertise even when the window is closed. The pairing surface stays reachable even
+/// advertising, connected device + duration when live, Start/Stop, inline permissions onboarding and
+/// settings. The menu bar IS the app (no window); hosting starts at app launch (`PortviewHostApp`). The pairing surface stays reachable even
 /// with sessions already connected (second-device enrollment, han.3); it's replaced by the Allow/Deny
 /// enrollment prompt only while one is pending.
 struct MenuBarHostView: View {
     let model: HostAppModel
-    @Environment(\.openWindow) private var openWindow
     /// Expand/collapse for the "Paired devices (N)" surface — collapsed by default so it never
     /// crowds the 300pt popover.
     @State private var showPairedDevices = false
@@ -40,14 +38,17 @@ struct MenuBarHostView: View {
         case .idle: "Idle"
         case .starting: "Starting…"
         case .ready: "Host ready"
-        case .failed: "Host failed — open the window for details"
+        case .failed(let message): "Host failed — \(message)"
         }
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
+            MenuBarPermissionsView(model: model)
             content
+            Divider().overlay(Color.white.opacity(0.08))
+            MenuBarSettingsView(model: model)
             Divider().overlay(Color.white.opacity(0.08))
             footer
         }
@@ -55,8 +56,8 @@ struct MenuBarHostView: View {
         .frame(width: 300)
         .background(Color(hex: 0x0E161A))
         .task {
-            model.start() // idempotent: advertise even on a window-less launch
-            model.startPermissionMonitoring() // refresh permission status when the popover opens
+            model.refreshPermissions() // fresh status the moment the popover opens
+            model.settings.refreshLaunchAtLogin()
             await model.refreshEnrolledDevices() // §1a step 1: paired-devices surface-open refresh
         }
     }
@@ -135,10 +136,6 @@ struct MenuBarHostView: View {
         } else {
             VStack(alignment: .leading, spacing: 4) {
                 Text(statusText).font(.system(size: 12.5)).foregroundStyle(Glass.text2)
-                if !model.onboarding.allGranted {
-                    Text("Open the window to grant permissions.")
-                        .font(.mono(10)).foregroundStyle(Glass.text3)
-                }
             }
         }
     }
@@ -153,6 +150,11 @@ struct MenuBarHostView: View {
                     Text("connected \(HostFormat.sessionDuration(seconds))")
                         .font(.mono(11)).foregroundStyle(Glass.text2)
                 }
+            }
+            HStack(spacing: 8) {
+                Button("Disconnect") { model.disconnectClients() }
+                    .buttonStyle(OutlineButtonStyle(tint: Glass.danger))
+                SendFileButton(model: model)
             }
         }
     }
@@ -388,11 +390,6 @@ struct MenuBarHostView: View {
                     Button("Start Hosting") { model.start() }.buttonStyle(AccentButtonStyle())
                 }
                 Spacer()
-                Button("Open window") {
-                    openWindow(id: PortviewHostApp.mainWindowID)
-                    NSApp.activate(ignoringOtherApps: true)
-                }
-                .buttonStyle(NeutralButtonStyle())
             }
             // Break-glass repair. It lives in the FOOTER, not in `pairedDevicesSection`, because
             // that section renders only when `enrolledDevices` is non-empty — and in the very modes

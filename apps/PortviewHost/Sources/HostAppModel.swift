@@ -60,6 +60,8 @@ final class HostAppModel {
     @ObservationIgnored private var task: Task<Void, Never>?
     /// Persisted host preferences; a snapshot is passed to the runtime at each `start()`.
     @ObservationIgnored let preferencesStore: HostPreferencesStore
+    /// Settings logic for the popover (port validation, launch-at-login transitions + inline errors).
+    @ObservationIgnored let settings: HostSettingsCoordinator
     /// The live displays last reported by the runner (feeds the default-display picker).
     private(set) var availableDisplays: [HostDisplayDescriptor] = []
     /// Owns the live clipboard/file opt-in (`control.accessPolicy`), seeded from the persisted
@@ -74,6 +76,7 @@ final class HostAppModel {
     init() {
         let store = HostPreferencesStore()
         preferencesStore = store
+        settings = HostSettingsCoordinator(store: store, launchAtLogin: SMAppServiceLaunchAtLogin())
         control = HostControl(accessPolicy: HostAccessPolicy(
             clipboardEnabled: store.preferences.clipboardEnabled,
             fileTransferEnabled: store.preferences.fileTransferEnabled))

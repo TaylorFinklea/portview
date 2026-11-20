@@ -35,6 +35,7 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         ITSAppUsesNonExemptEncryption: false
+        LSUIElement: true
         LSApplicationCategoryType: public.app-category.utilities
         NSLocalNetworkUsageDescription: "Portview publishes and accepts local-network connections from your iPhone to mirror and control this Mac."
         NSBonjourServices:

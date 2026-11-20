@@ -33,4 +33,9 @@ final class SMAppServiceLaunchAtLogin: LaunchAtLoginControlling {
             try SMAppService.mainApp.unregister()
         }
     }
+
+    /// Opens System Settings > Login Items so the user can approve a `requiresApproval` item.
+    static func openLoginItemsSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
 }

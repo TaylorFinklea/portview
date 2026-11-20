@@ -19,6 +19,13 @@ final class HostSettingsCoordinator: ObservableObject {
         self.launchAtLogin = controller.status
     }
 
+    /// The display the picker should show as selected: the remembered one only while it is still
+    /// attached, otherwise `nil` (= Automatic) so a stale choice never renders as live.
+    nonisolated static func displaySelection(preferred: UInt32?, available: [UInt32]) -> UInt32? {
+        guard let preferred, available.contains(preferred) else { return nil }
+        return preferred
+    }
+
     /// Re-read the OS state (e.g. when the settings view appears).
     func refreshLaunchAtLogin() {
         launchAtLogin = controller.status
