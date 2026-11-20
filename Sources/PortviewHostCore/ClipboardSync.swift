@@ -110,7 +110,12 @@ final class ClipboardSync: @unchecked Sendable {
     }
 
     /// Apply a clipboard update received from the client (without echoing it back).
+    ///
+    /// The policy state is captured HERE, at receive time: an update that arrives while clipboard
+    /// sync is disabled is dropped outright (enabling later must never apply it), and the disable
+    /// generation is recorded so an off->on cycle between receive and write also drops it.
     func applyRemote(_ text: String) {
+        guard let receivedGeneration = policy.performWithGeneration(.clipboard, { $0 }) else { return }
         Task { @MainActor [weak self] in
             guard let self else { return }
             // The recheck runs HERE, inside the deferred task, not at `applyRemote`'s call site —
@@ -119,7 +124,8 @@ final class ClipboardSync: @unchecked Sendable {
             // The policy check is nested INSIDE the capability's closure (capability -> policy) for
             // the same reason: a disable that lands while the task is queued must still drop it.
             self.capability.perform {
-                _ = self.policy.perform(.clipboard) {
+                _ = self.policy.performWithGeneration(.clipboard) { gen in
+                    guard gen == receivedGeneration else { return }
                     self.pasteboard.clearContents()
                     self.pasteboard.setString(text, forType: .string)
                     self.lastChangeCount = self.pasteboard.changeCount

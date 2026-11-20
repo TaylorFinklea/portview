@@ -154,6 +154,31 @@ import Foundation
         sync.stop()
     }
 
+    /// `@MainActor` so the deferred `Task { @MainActor }` cannot run until the test suspends: the
+    /// policy flips below land deterministically between `applyRemote` and the write.
+    @MainActor @Test func updateReceivedWhileDisabledThenEnabledBeforeWriteDoesNotWrite() async {
+        let pasteboard = FakePasteboard()
+        let policy = HostAccessPolicy()
+        let sync = ClipboardSync(pasteboard: pasteboard, capability: SessionCapability(), policy: policy)
+        sync.applyRemote("sent while off")
+        policy.update(clipboardEnabled: true, fileTransferEnabled: false)
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(pasteboard.string(forType: .string) == nil)
+        #expect(pasteboard.changeCount == 0)
+    }
+
+    @MainActor @Test func updateReceivedWhileEnabledThenOffOnBeforeWriteDoesNotWrite() async {
+        let pasteboard = FakePasteboard()
+        let policy = enabledPolicy()
+        let sync = ClipboardSync(pasteboard: pasteboard, capability: SessionCapability(), policy: policy)
+        sync.applyRemote("sent while on")
+        policy.update(clipboardEnabled: false, fileTransferEnabled: true)
+        policy.update(clipboardEnabled: true, fileTransferEnabled: true)
+        try? await Task.sleep(for: .milliseconds(200))
+        #expect(pasteboard.string(forType: .string) == nil)
+        #expect(pasteboard.changeCount == 0)
+    }
+
     @Test func validCapabilityAppliesTheDeferredWrite() async {
         let pasteboard = FakePasteboard()
         let sync = ClipboardSync(pasteboard: pasteboard, capability: SessionCapability(), policy: enabledPolicy())
