@@ -28,7 +28,7 @@ struct PortviewHostApp {
                 print("Device connected: \(name)")
             case .deviceDisconnected:
                 print("Device disconnected.")
-            case .ready, .sessionStats:
+            case .ready, .sessionStats, .displaysAvailable:
                 break
             case .sasCode, .sasConfirmed:
                 break  // never print/log the SAS code (secret hygiene); the CLI has no pairing-window UI

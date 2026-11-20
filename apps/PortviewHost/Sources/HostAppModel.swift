@@ -58,6 +58,10 @@ final class HostAppModel {
     }
 
     @ObservationIgnored private var task: Task<Void, Never>?
+    /// Persisted host preferences; a snapshot is passed to the runtime at each `start()`.
+    @ObservationIgnored let preferencesStore = HostPreferencesStore()
+    /// The live displays last reported by the runner (feeds the default-display picker).
+    private(set) var availableDisplays: [HostDisplayDescriptor] = []
     @ObservationIgnored private let control = HostControl()
     /// The ONE shared durable pairing store (design §2/§6c). Built once here — NOT per-`start()` — so
     /// the serve loop authorizes against, and the revoke UI mutates, the SAME actor instance: the
@@ -489,6 +493,7 @@ final class HostAppModel {
         messages = []
         sessions = HostSessions()
         connectedSince = nil
+        let preferencesSnapshot = preferencesStore.preferences
 
         task = Task { [weak self, control, sasControl, authority, pairings] in
             // `.required`, never `.legacyBootstrap` (bead portview-0u2). This host previously ran
@@ -511,7 +516,10 @@ final class HostAppModel {
             let events = HostRunner().events(identity: .app(displayName: Self.displayName), control: control, sasControl: sasControl,
                                              authPolicy: .required,
                                              pairings: pairings,
-                                             enrollment: authority)
+                                             enrollment: authority,
+                                             preferences: HostRuntimePreferences(
+                                                preferredPort: preferencesSnapshot.preferredPort,
+                                                preferredDisplayID: preferencesSnapshot.preferredDisplayID))
             for await event in events {
                 self?.handle(event)
             }
@@ -735,6 +743,8 @@ final class HostAppModel {
             }
         case .message(let message):
             messages.append(message)
+        case .displaysAvailable(let displays):
+            availableDisplays = displays
         case .accessibilityWarning(let warning):
             accessibilityWarning = warning
         case .failed(let message):

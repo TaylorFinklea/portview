@@ -128,7 +128,7 @@ private func serveRouterHost(_ listener: PortviewListener, token: [UInt8],
         // The host's listener path — multiplexed (grouped) delivery is enabled there (w6n.4).
         // No timeout wrapper needed (TLSIdentity isn't Sendable): start() resolves every state.
         let (listener, rawPort) = try await HostRunner.startListener(
-            identity: identity, serviceName: "LaneRouterTest", preferredPort: nil)
+            identity: identity, serviceName: "LaneRouterTest", candidatePorts: [])
         let port = try #require(NWEndpoint.Port(rawValue: rawPort))
 
         let token = LaneSessionToken.mint()

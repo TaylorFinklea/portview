@@ -55,7 +55,7 @@ public struct HostSessions: Equatable, Sendable {
         case .sessionStats(let stats):
             latestStats = stats
         case .message, .ready, .accessibilityWarning, .failed, .sasCode, .sasConfirmed,
-             .enrollmentRequest, .enrollmentResolved:
+             .enrollmentRequest, .enrollmentResolved, .displaysAvailable:
             break  // SAS/enrollment HUD-display state is handled by the app, not session state
         }
     }

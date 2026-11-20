@@ -59,6 +59,8 @@ public enum HostRunnerEvent: Equatable, Sendable {
     case enrollmentRequest(attemptID: UUID, fingerprint: String, claimedName: String, expiresAt: Date)
     /// The enrollment ceremony for `attemptID` resolved — approved (enrolled) or not.
     case enrollmentResolved(attemptID: UUID, approved: Bool)
+    /// The live display set — emitted at startup and whenever it changes (feeds the app's default-display picker).
+    case displaysAvailable([HostDisplayDescriptor])
 }
 
 public struct HostRunner: Sendable {
@@ -83,11 +85,13 @@ public struct HostRunner: Sendable {
                        sasControl: SASPairingControl? = nil,
                        authPolicy: MutualAuthPolicy = .required,
                        pairings: PairingStore,
-                       enrollment: EnrollmentAuthority? = nil) -> AsyncStream<HostRunnerEvent> {
+                       enrollment: EnrollmentAuthority? = nil,
+                       preferences: HostRuntimePreferences = .default) -> AsyncStream<HostRunnerEvent> {
         AsyncStream { continuation in
             let task = Task {
                 await run(identity: identity, control: control, sasControl: sasControl,
-                          authPolicy: authPolicy, pairings: pairings, enrollment: enrollment) { event in
+                          authPolicy: authPolicy, pairings: pairings, enrollment: enrollment,
+                          preferences: preferences) { event in
                     continuation.yield(event)
                 }
                 continuation.finish()
@@ -103,6 +107,7 @@ public struct HostRunner: Sendable {
         authPolicy: MutualAuthPolicy = .required,
         pairings: PairingStore,
         enrollment: EnrollmentAuthority? = nil,
+        preferences: HostRuntimePreferences = .default,
         onEvent: @escaping @Sendable (HostRunnerEvent) -> Void
     ) async {
         guard CGRequestScreenCaptureAccess() else {
@@ -138,12 +143,14 @@ public struct HostRunner: Sendable {
             }
 
             let serviceName = Host.current().localizedName ?? "Mac"
-            // Re-bind the persisted port so a saved pairing's host:port stays valid; persist whatever
-            // port actually bound (first run, or a fallback when the preferred port was taken).
+            // Port order: the user's explicit preference, then the identity's last-bound port (so a
+            // saved pairing's host:port stays valid), then an OS-assigned port. The actually-bound
+            // port is persisted to the identity; the user's explicit preference is never rewritten.
+            let candidatePorts = preferences.listenerPortCandidates(lastBoundPort: persistedIdentity.port)
             let (listener, port) = try await Self.startListener(
-                identity: tlsIdentity, serviceName: serviceName, preferredPort: persistedIdentity.port)
+                identity: tlsIdentity, serviceName: serviceName, candidatePorts: candidatePorts)
             defer { listener.cancel() }
-            if let preferred = persistedIdentity.port, preferred != port {
+            if let preferred = candidatePorts.first, preferred != port {
                 onEvent(.message("ℹ️ Preferred port \(preferred) was unavailable; bound \(port) instead. Reconnect from the QR/pairing URL to refresh saved pairings."))
             }
             if persistedIdentity.persistent, !TLSIdentity.persistPort(port, service: keychainService) {
@@ -172,6 +179,7 @@ public struct HostRunner: Sendable {
             }
 
             let registry = DisplayRegistry(displays)
+            onEvent(.displaysAvailable(Self.displayDescriptors(from: displays)))
             // Fail CLOSED if the cert hash is unavailable (spec §4-RESOLVED must-fix): the hash is
             // the SAS commit binding AND the signed-challenge relay defense — hosting without it
             // would silently drop both. (Was a degrade-to-`[]` fallback.)
@@ -204,7 +212,7 @@ public struct HostRunner: Sendable {
                             await Self.serve(connection, registry: registry, hostCertSHA256: hostCertBytes,
                                              authPolicy: authPolicy, pairings: pairings,
                                              emit: onEvent, control: control, sas: sasControl,
-                                             enrollment: enrollment)
+                                             enrollment: enrollment, preferences: preferences)
                         }
                     }
                     // serveConnections returns only on cancellation; tear down the refresh loop with it.
@@ -223,9 +231,9 @@ public struct HostRunner: Sendable {
         }
     }
 
-    /// Start the QUIC listener, preferring `preferredPort` for a stable endpoint. If that port is
-    /// unavailable, fall back to an OS-assigned one (so the host always starts). Returns the
-    /// listener and the actually-bound port.
+    /// Start the QUIC listener, trying each of `candidatePorts` in order for a stable endpoint, then
+    /// falling back to an OS-assigned port (so the host always starts). Returns the listener and the
+    /// actually-bound port.
     ///
     /// Multiplexed (grouped) delivery is enabled for QUIC lane-splitting: every inbound tunnel
     /// arrives as a connection group whose streams classify by first byte — legacy bare dials
@@ -234,21 +242,21 @@ public struct HostRunner: Sendable {
     static func startListener(
         identity: TLSIdentity,
         serviceName: String,
-        preferredPort: UInt16?
+        candidatePorts: [UInt16]
     ) async throws -> (listener: PortviewListener, port: UInt16) {
-        if let preferredPort {
+        for candidate in candidatePorts {
             do {
-                let listener = try PortviewListener(quicIdentity: identity, serviceName: serviceName, port: preferredPort,
+                let listener = try PortviewListener(quicIdentity: identity, serviceName: serviceName, port: candidate,
                                                     multiplexed: true)
                 do {
                     let port = try await listener.start()
                     return (listener, port.rawValue)
                 } catch {
-                    listener.cancel()  // release the partially-started listener before falling back
+                    listener.cancel()  // release the partially-started listener before trying the next port
                     throw error
                 }
             } catch {
-                logger.warning("Preferred port \(preferredPort, privacy: .public) unavailable (\(error, privacy: .public)); using an OS-assigned port.")
+                logger.warning("Port \(candidate, privacy: .public) unavailable (\(error, privacy: .public)); trying the next.")
             }
         }
         let listener = try PortviewListener(quicIdentity: identity, serviceName: serviceName, multiplexed: true)
@@ -324,6 +332,11 @@ public struct HostRunner: Sendable {
         }
     }
 
+    /// Public descriptors of the live displays, for the app's default-display picker.
+    static func displayDescriptors(from displays: [SCDisplay]) -> [HostDisplayDescriptor] {
+        displays.map { HostDisplayDescriptor(id: UInt32($0.displayID), width: $0.width, height: $0.height) }
+    }
+
     /// Whether the display configuration changed enough to re-advertise. Order-independent (the OS may
     /// reorder the list) but sensitive to identity, count, and dimensions — so a monitor connecting,
     /// waking, being removed, or changing resolution triggers a `DisplaysUpdate`, while a bare reorder
@@ -355,6 +368,7 @@ public struct HostRunner: Sendable {
             last = infos
             await registry.set(displays)
             emit(.message("Displays changed: \(infos.count) display(s) available."))
+            emit(.displaysAvailable(displayDescriptors(from: displays)))
             control?.broadcast(.displaysUpdate(DisplaysUpdate(displays: infos)))
         }
     }
@@ -516,7 +530,8 @@ public struct HostRunner: Sendable {
         emit: @escaping @Sendable (HostRunnerEvent) -> Void = { _ in },
         control: HostControl? = nil,
         sas: SASPairingControl? = nil,
-        enrollment: EnrollmentAuthority? = nil
+        enrollment: EnrollmentAuthority? = nil,
+        preferences: HostRuntimePreferences = .default
     ) async {
         // Invalidate-First on the SHUTDOWN path too (Sol review I3, design §7 invariant 1): the
         // capability is created inside `serveSession`, so it is published into this box for the
@@ -526,7 +541,7 @@ public struct HostRunner: Sendable {
             await serveSession(connection, registry: registry, hostCertSHA256: hostCertSHA256,
                                authPolicy: authPolicy, pairings: pairings,
                                emit: emit, control: control, sas: sas, enrollment: enrollment,
-                               capabilities: capabilities)
+                               preferences: preferences, capabilities: capabilities)
         } onCancel: {
             Self.cancelServe(capabilities) { connection.close() }
         }
@@ -560,6 +575,7 @@ public struct HostRunner: Sendable {
         control: HostControl? = nil,
         sas: SASPairingControl? = nil,
         enrollment: EnrollmentAuthority? = nil,
+        preferences: HostRuntimePreferences = .default,
         /// Publishes this session's capability to `serve`'s cancellation handler so a shutdown
         /// withdraws authority BEFORE closing the transport (Sol review I3). Absent only for tests
         /// that drive `serveSession` directly.
@@ -663,7 +679,11 @@ public struct HostRunner: Sendable {
         // Display guard (design §1b step 5, unchanged position): a session with no display to stream
         // is closed BEFORE admission — so an authenticated-but-display-less peer never occupies the
         // registry. In production `run` guarantees ≥1 display, so this effectively never fires there.
-        guard let firstDisplay = await registry.current().first else { connection.close(); return }
+        // ONE snapshot, preferred display (when present) first: the client starts on
+        // `ServerHello.displays.first`, so the advertised order IS the default-display choice, and
+        // `firstDisplay` (the injector's initial target / switch fallback) comes from the same list.
+        let displaySnapshot = preferences.orderedDisplays(await registry.current(), id: { UInt32($0.displayID) })
+        guard let firstDisplay = displaySnapshot.first else { connection.close(); return }
 
         // --- ADMISSION, before ANY producer or ServerHello (design §1b step 6, findings 5/H-e) ---
         // ONE per-session capability, threaded into EVERY effect boundary (inbound: injector,
@@ -707,7 +727,7 @@ public struct HostRunner: Sendable {
         // The token minter runs only for a lane-capable handshake (negotiated >= laneVersion) — an old
         // client never gets a token minted or advertised (ServerHandshake stamps the negotiated
         // version, and ServerHello carries the token iff that stamp >= laneVersion).
-        var server = ServerHandshake(displays: Self.displayInfos(from: await registry.current()), supportedCodecs: [.hevc],
+        var server = ServerHandshake(displays: Self.displayInfos(from: displaySnapshot), supportedCodecs: [.hevc],
                                      mintSessionToken: LaneSessionToken.mint)
         // Lane routing (QUIC lane-splitting, w6n.4): pumpVideo's video/audio/stats sends route onto the
         // client's secondary lane streams once it binds them; legacy sessions — and any lane that dies

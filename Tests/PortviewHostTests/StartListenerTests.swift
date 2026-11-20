@@ -16,7 +16,7 @@ import PortviewTransport
         defer { occupier.cancel() }
 
         let (listener, port) = try await HostRunner.startListener(
-            identity: identity, serviceName: "Test", preferredPort: takenPort.rawValue)
+            identity: identity, serviceName: "Test", candidatePorts: [takenPort.rawValue])
         defer { listener.cancel() }
 
         #expect(port != 0)
@@ -32,7 +32,28 @@ import PortviewTransport
         probe.cancel()
 
         let (listener, port) = try await HostRunner.startListener(
-            identity: identity, serviceName: "Test", preferredPort: freePort.rawValue)
+            identity: identity, serviceName: "Test", candidatePorts: [freePort.rawValue])
+        defer { listener.cancel() }
+
+        #expect(port == freePort.rawValue)
+    }
+
+    /// With the explicit port occupied, the next candidate (the identity's last-bound port) is bound
+    /// before any OS-assigned fallback.
+    @Test func startListenerTriesNextCandidateWhenFirstTaken() async throws {
+        let identity = try TLSIdentity.makeEphemeralSelfSigned()
+
+        let occupier = try PortviewListener(quicIdentity: identity)
+        let takenPort = try await occupier.start()
+        defer { occupier.cancel() }
+
+        let probe = try PortviewListener(quicIdentity: identity)
+        let freePort = try await probe.start()
+        probe.cancel()
+
+        let (listener, port) = try await HostRunner.startListener(
+            identity: identity, serviceName: "Test",
+            candidatePorts: [takenPort.rawValue, freePort.rawValue])
         defer { listener.cancel() }
 
         #expect(port == freePort.rawValue)
