@@ -2,6 +2,45 @@
 
 > Architecture decision records. Append-only — one entry per decision.
 
+## [2026-11-25] v1.0 is "production ready for anyone on the App Store"; Beads returns
+
+**Context**: The 2026-07-27 decision defined v1.0 as "prove what is built, document it honestly,
+cut what fails". With Gate 4 code complete, the owner set a higher bar: a non-technical stranger
+installs both halves, pairs, controls their Mac and stays updated without help. A code audit found
+gaps that rule never covered: no update path for the Mac host, no way to report problems, raw
+error text, no right-click, an untested iPad target, and one accessibility label in both apps.
+
+**Decisions** (owner, 2026-11-21 and 2026-11-25; full text in
+`docs/superpowers/specs/2026-11-21-v1-production-roadmap-design.md`):
+- v1.0 is nine acceptance points, reached through six phases and eleven workstreams. The July rule
+  still governs verification: after two failed fix attempts on one defect, the owner decides
+  whether to keep fixing or to cut the feature and its claim. The agent never cuts a feature
+  alone. Re-wake has its own pass rule. The security track stays frozen.
+- In v1: right-click, actionable errors, iPad with hardware keyboard, Sparkle auto-update (the
+  first third-party dependency), a user-sent diagnostics export, a disk-image download, a site and
+  privacy policy, an optional tip. Out of v1: accessibility (first after v1), localization, iPad
+  pointer passthrough, lanes, hosted CI, any crash or analytics service.
+- Launch path: public TestFlight beta, then the App Store. Work order: a short owner risk check
+  that runs alongside the start of the build, then one full device session on the release
+  candidate.
+- The site and update feed live on a domain the owner controls. The release branch is pushed as a
+  backup; it lands on `main` after the risk check confirms the menu-bar-only app.
+- **Beads returns** (reverses the 2026-09-29 retirement), following the owner's current global
+  rules: a project-local store at the main checkout, local-only, no remote. The earlier store was
+  lost in a machine move, so the roadmap document is written to rebuild the issues from; the store
+  is working state, not the record. IDs are `portview-<name>` (for example `portview-w4`).
+- Lead's calls the owner accepted with the roadmap: right-click is a two-finger tap; the Mac host
+  shows a one-time welcome window on first launch (a narrow exception to "the menu bar is the
+  app"); the command-line host is not shipped; re-wake is cut from 1.0 if it fails its pass rule;
+  the tip unlocks nothing (amounts still open).
+
+**Reviewed by**: an Opus takeover check, `gpt-6.2-sol` (plan), `gpt-6.1-terra` and a fresh Sonnet
+reviewer (pre-commit). Findings and their disposition are in section 12 of the roadmap document.
+
+**Consequences**: The gates in `phases/v1-release-finish-spec.md` are superseded as a plan; their
+device rows live on in the roadmap's Phase 3. The wire format freezes at the first public beta
+build. The old roadmap file is archived as `roadmap-archive-2026-11.md`.
+
 ## [2026-11-19] Gate 4 implementation rulings: opt-in enforcement, enable gate, URL confirm
 
 **Context**: Gate 4 (`docs/superpowers/plans/2026-08-03-settings-onboarding.md`) implemented the

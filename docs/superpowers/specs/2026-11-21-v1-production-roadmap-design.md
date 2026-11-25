@@ -1,6 +1,7 @@
 # Portview v1.0 — production roadmap (design)
 
-> Written 2026-11-21 by the lead (Fable) for the owner to approve and for an Opus lead to execute.
+> **Approved by the owner on 2026-11-25.** Written 2026-11-21 by the lead (Fable) for an Opus lead
+> to execute.
 > It replaces "what is left for v1" in `.docs/ai/phases/v1-release-finish-spec.md`: that plan's
 > Gates 2–5 are folded into the phases below. Earlier decisions stay in force unless this
 > document says otherwise (`.docs/ai/decisions.md` 2026-07-27, 2026-07-28, 2026-11-19).
@@ -142,16 +143,18 @@ Phase 5  1.0 launch     both    App Store review, manual release, tag
 
 ### Phase 0 — Handoff (agent)
 
-- After the owner approves this document: initialize a project-local Beads store at the repo's
-  main checkout (local-only, no remote), confirming the selected store with `bd --sandbox where`
-  before writing and that the release worktree resolves to the same store and file one issue per workstream and
-  per owner action, with dependencies and the acceptance checks from this document. Bead IDs in
-  older documents (`portview-uma`, `2u9`, `wyi`, `screenshare-*`) are historical.
+- Done 2026-11-25: a project-local Beads store at the repo's main checkout (local-only, no
+  remote; the release worktree resolves to the same store), with 40 issues named `portview-<name>`:
+  the workstreams (`portview-w1` … `w11`), the owner decisions (`portview-d1` … `d4`), the owner
+  actions (`portview-own-*`), the phases (`portview-p1`, `p3`, `p4`, `p5`) and the post-v1 parking
+  lot (`portview-post-*`). Each issue carries its dependencies and the acceptance checks from this
+  document. Run `bd --sandbox where` before writing. Bead IDs in older documents (`portview-uma`,
+  `2u9`, `wyi`, `screenshare-*`) are historical.
 - The earlier Beads store was lost in a machine move, which is why it was retired in September.
   This document is written so the issues can be rebuilt from it; the store is working state, not
   the record.
-- Rewrite `.docs/ai/roadmap.md` as the owner-facing summary of this roadmap. Update
-  `current-state.md`.
+- Done 2026-11-25: `.docs/ai/roadmap.md` rewritten as the owner-facing summary (the old file is
+  `roadmap-archive-2026-11.md`), and `current-state.md` updated.
 - **Branch.** The owner approved pushing `codex/v1-release-finish` to GitHub as a branch (backup).
   All work continues on it. After C3 passes, the lead asks the owner to fast-forward `main` to it
   and push; that publishes this branch plus 3 commits on local `main` that were never pushed.
@@ -186,7 +189,11 @@ listed for Phase 3.
 - W2 lands before the rest of W3 and before the first beta build, where the wire freezes.
 - W4 starts with a spike in a real notarized export, and needs D1 (the feed address) before any
   build that will be distributed.
-- W5 needs D2 (the support address). W6 waits for C1 and C2. W10 fills as sessions report.
+- W5 can start now; only its "where to send it" text needs D2 (the support address), which the
+  release candidate needs. W6 waits for C1 and C2. W10 fills as sessions report.
+- W7 lands before W4's release-pipeline changes, since both change `make release`.
+- The published site is needed for the Phase 3 device session (the links and uncoached-setup
+  rows), not for cutting the candidate.
 - W11 needs the owner's App Store Connect agreements (section 8) before it can be tested.
 - W1, W4's spike, W5, W7, W8, W9 and W3's probe can start immediately.
 
@@ -526,7 +533,7 @@ The roadmap file lists 37 items restored from a July snapshot of the old tracker
 - Adopted: an owner for session failures (W10); the old backlog triage (section 11); beta
   versioning and channels (W4); the command-line tool is not shipped (section 3); label-versus-
   export precedence (W5); export compliance and tester recruitment as owner actions (section 8);
-  the push is 29 commits (Phase 0); the disk image went to the owner, who chose it; Swift 6.2 means the
+  the push scope includes 3 never-pushed commits on local `main` (Phase 0); the disk image went to the owner, who chose it; Swift 6.2 means the
   toolchain; the app is already universal; why Beads was retired (Phase 0).
 - Sent to the owner: price. Answer: free with an optional tip, which added W11.
 
@@ -558,4 +565,11 @@ The roadmap file lists 37 items restored from a July snapshot of the old tracker
   C1–C6 to avoid clashing with the older "R3/R4 sitting" names.
 - Rejected from Sonnet: an owner for deploying the Production iCloud schema. It was deployed at
   Gate 1.
+
+**Handoff review** (2026-11-25, `gpt-6.1-terra` on the docs and a fresh Sonnet reviewer on the
+issues): all findings adopted. The decision entry now states the owner-decides cut rule and that
+the risk check runs alongside the build; an owner issue covers signing the candidate builds; the
+site gates the device session, not the candidate; W5 and W11 start with placeholders; W7 precedes
+W4; the keyboard probe is marked as needing the owner; post-v1 issues are deferred; and
+`current-state.md` carries the never-without-the-owner rules.
 </content>

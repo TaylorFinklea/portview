@@ -1,0 +1,255 @@
+# Roadmap archive (to 2026-11-21)
+
+> Historical. The live roadmap is `roadmap.md`; the v1.0 plan is `docs/superpowers/specs/2026-11-21-v1-production-roadmap-design.md`. Bead IDs and `bd ready` mentions below refer to the old tracker.
+
+> Durable goals and milestones. Updated when scope changes, not every session.
+
+## Vision
+
+Portview — open-source, native-feeling iPhone→Mac screen sharing & control (own Mac host agent: ScreenCaptureKit + VideoToolbox HEVC over QUIC; iPhone is pure viewer/controller). Replaces laggy VNC. Apache-2.0. macOS 26 / iOS 26, Apple Silicon.
+
+Full design: `docs/superpowers/specs/2026-06-02-portview-design.md`.
+
+## Architecture review (2026-07-01)
+
+Fable 5 six-lens review → decomposed the roadmap into a fleet-dispatchable beads backlog. Full report: `.docs/ai/phases/arch-review-2026-07-01-report.md`; ADR in `decisions.md` (2026-07-01). The durable backlog now lives in **beads** (`bd ready`); the epics are `screenshare-1n6` (wire-safety, P0), `screenshare-jfj` (PortviewClientCore + decomposition, P1), `screenshare-1nt` (host trust / mutual auth, P1), `screenshare-ja1` (real-time media foundation, P2), `screenshare-523` (concurrency correctness, P2). Start with `w-skip` (unknown-tag wedge — the wire-safety root) and `cc-target` (PortviewClientCore keystone). The Now/Next/Later below remains the device-verify + product-milestone view.
+
+## Re-review + lead specs (2026-07-02)
+
+A fresh re-review (ADR in `decisions.md` 2026-07-02) confirmed the 2026-07-01 findings and surfaced a **NET-NEW P0**: an unauthenticated ~10-byte pre-auth remote crash — `Int(bodyLength)` traps on a varint length > `Int.max` (`FrameDecoder`/`Frame`/`BinaryReader`), plus a pre-auth memory-DoS (unbounded decoder buffer) and a no-backpressure inbound stream. **Do the P0 wire-hardening first: `bd ready` roots `screenshare-1n6.1` (reject over-long frame lengths) + `screenshare-1n6.2` (bound the decoder buffer)** — pre-auth remote DoS on the current wire, above all feature work. Three lead specs authored + design-review-folded (`docs/superpowers/specs/2026-07-01-{cloudkit-rewake,quic-lane-splitting,revocable-pairing-mutual-auth}.md`); the mutual-auth spec carries one open enrollment-trust decision (deferred to a security-review pass; `screenshare-7jl` stays open). New epic **`screenshare-cqv` (prod / open-source release readiness)**: parameterize the hardcoded `DEVELOPMENT_TEAM`/bundle IDs, host notarization + install path, versioning + iOS TestFlight readiness, `os.Logger`, `SECURITY.md`. Concurrency/media/client beads filed under `523`/`ja1`/`jfj`.
+
+## Planning session (2026-07-08)
+
+Fable planning day (no code). The fleet had nearly drained the implementable queue, so the next
+waves were decomposed and the queue made Conductor-dispatchable. ADR: `decisions.md` (2026-07-08).
+(1) **bd metadata is now canonical** for `tier_floor`/`complexity`/`verify_cmd` — 12 dispatchable
+beads swept; device-verify / security-track / user-gated beads left Untriaged ON PURPOSE (Conductor's
+fail-closed behavior is the dispatch gate — don't "fix" them). (2) **Filed from the 2026-07-01
+specs**: EPIC `screenshare-8n1` CloudKit re-wake (pure core → host + client → device-verify);
+EPIC `screenshare-w6n` QUIC lane-splitting phase 1 (spike + proto → transport → host + client →
+Tailscale A/B), all gated on `vs9`; `screenshare-10p` demoted to the phase-2 per-frame-streams bead
+behind the A/B. (3) Wire-safety epic `screenshare-1n6` closed (7/7 landed). (4) `screenshare-l4y` =
+settings/first-run definition bead (needs user product decisions). (5) One-sitting device-verify
+script: `.docs/ai/phases/device-verify-plan-2026-07-08.md`.
+
+## Now / Next / Later
+
+### Now
+- [ ] **v1.0 push (2026-07-27)** — scope, panel review and consequences: `decisions.md` 2026-07-27;
+      loop state: `current-state.md`. Verification-first: freeze the security track, prove the built
+      surface on hardware, cut what fails. Landed: repo-level ignores, fresh-clone `make bootstrap`,
+      the break-glass pairing reset (supersedes `oj5`), GUI on `.required` (closed a fresh-install
+      legacy-admission hole), QR governed by the pairing window. **CUT from v1.0**: the QUIC lane
+      A/B (`3ev`) and phase-2 per-frame streams (`7fu`, deferred) — lanes stay dormant.
+      CAVEAT: R2 is installed but its six-surface hardware sweep is still the Gate 2 item below.
+- [?] **Gate 2 product test:** R2 Release client 1.0 (1), source `b31a3fd`, is installed on Roshar;
+      the notarized Release host remains at `/Applications`. Rerun all six surfaces on this exact
+      candidate and record approval in Harness Deck run `portview/20260819-gate2-product-test-r2`;
+      all six rows are pending and the verdict remains `changes-required`.
+- [?] **Gate 2 defect — clipboard iPhone → Mac:** code repaired and independently reviewed in
+      `b04400b`/`8aa4d0a`/`b31a3fd`; R2 uses the system `PasteButton`, retains payload/ordering guards,
+      and leaves non-clipboard host tools usable while locked. Close only after a fresh unique marker
+      arrives exactly once on the Mac during the R2 sitting.
+- [ ] **App Store validation blockers:** choose whether v1 is iPhone-only or universal; the current
+      iPhone+iPad archive warns that required orientations/full-screen policy is missing. Gate 4 must
+      add `portview://`; then obtain App Store distribution signing, confirm build-number availability,
+      and run Organizer **Validate App**. No upload/TestFlight action is authorized yet.
+- [x] **Fleet: work `bd ready`** — queue DRAINED 2026-07-15 (djx review executed + 9 findings fixed, s86, e00, 8z9, identity-rotation fix; ADR decisions.md 2026-07-15). Suite 459→469. `jc3` scope lost with the beads DB — bead `portview-qhl` awaits the user restating intent.
+- [ ] **User-present**: (a) review + push the 3 unpushed commits on `main` (2026-07-16 debugging session: odd-height encode fix, zero-byte stream parking, host observability — the 2026-07-15 six are pushed); (b) **plug the iPhone in via USB** → install current client → re-verify the ~7-10s freeze (bead `portview-4x8` — the phone still runs the Jul 10-11 build, which is the prime suspect); (c) answer the `l4y` settings/onboarding questions; (d) `cqv.2` notarization (Apple-account-gated).
+- [x] **Dedicated security session** for the mutual-auth track — **EPIC `portview-han` CODE-COMPLETE 2026-07-25** (was `screenshare-1nt`: 7jl→5yw→9m2). Ran as four sub-beads across dedicated sessions, each brainstorm→design→dual-adversarial-design-review→plan→SDD→whole-branch review: **han.1** gate wiring + rollout policy (+ durable `migrationComplete` so revoke-all/restart never reopen bootstrap) · **han.2** client `ClientIdentity` keypair + keychain store · **han.3** enrollment ceremony (LAContext prompt + dual-fingerprint compare) · **han.4** revoke kills live sessions + generation/lease registry + menu-bar revoke UI. Lane session-token hygiene (constant-time compare + never-log) landed 2026-07-21 with the §2 foundation. ADRs: decisions.md 2026-07-21/22/23/**25**. Kept out of fleet dispatch throughout (standing rule). **Remaining**: device-verify sittings — `portview-myt` (han.4 revoke) + the han.3 9-item list; and the user's review+push of 20 commits.
+
+### Next
+- [x] QUIC lane-splitting phase 1 lands (epic `w6n`) — DONE 2026-07-10 (w6n.1–.5 closed; loopback-verified, DORMANT until the `w6n.6` A/B flips `ProtocolVersion.current`). → Tailscale A/B (`w6n.6`) decides phase 2 (`10p`).
+- [x] CloudKit re-wake CODE-COMPLETE 2026-07-11; `8n1.3` adversarial review (`djx`) DONE 2026-07-15 — 9 findings fixed (real deadline, push chaining, narrow persists; ADR decisions.md 2026-07-15), 2 filed as beads (stale-port-on-tap, iCloud-account hint). Remaining: `8n1.4` device-verify (bead `portview-uma`) — needs entitlement activation (Apple ID in Xcode, `PORTVIEW_HOST_ENTITLEMENTS` opt-in) + fresh client install on a device.
+- [x] Lip-sync foundation: `b1l` (present-by-PTS) DONE 2026-07-10 → `ins` (device umbrella) remains.
+- [ ] Settings + first-run/TCC implementation beads (decomposed from `l4y` once answered).
+
+### Later
+- [ ] M6 polish umbrella `ux7` (index-only) — closes when `ja1`/`8n1`/`w6n`/`1nt`/`l4y` close.
+- [ ] Phase 2 per-frame video streams (`10p`) — needs its own lead spec first.
+
+### Archive — superseded 2026-07-08 (history only; the live queue is `bd ready`)
+
+#### Archived Now (pre-2026-07-08)
+- [x] **Keep the host awake while a client is connected + host-lock status** (the achievable slice of the "locked screen" ask) — DONE 2026-06-28 (build-green; **device-verify pending**). `KeepAwake` (keyed by session-id `Set`, injectable backend + ticker) holds a `kIOPMAssertionTypePreventUserIdleDisplaySleep` assertion AND a periodic `IOPMAssertionDeclareUserActivity` re-arm (the part that actually suppresses the idle screensaver-lock) while ≥1 client is connected, wired into `HostControl.register/deregister/disconnectAll` (id-keyed so `disconnectAll` can't strand it). `LockMonitor` detects lock/unlock (`DistributedNotificationCenter` + `CGSessionCopyCurrentDictionary` seed) and broadcasts a new `HostLockStatus(locked:)` message (tag 26); each client is also seeded the current state at handshake; client shows a "capture paused" overlay + pauses ALL input (`inputPaused` gates every send, not just the trackpad) and clears it per stream attempt (no stranding across reconnect). Built via ultracode (design workflow → TDD → adversarial review workflow: 16 findings, 7 real, all fixed incl. 2 functional bugs — input bypass + reconnect-stranding — plus a `.default`-QoS timer fix). Tests: HostLockStatus (4 pkg), KeepAwake (10 pkg), LockMonitor (3 pkg). `swift test` 183, macOS host BUILD SUCCEEDED, iOS 57. Host bundle updated at /Applications (running — quit+relaunch to load); client on Roshar. Decision: decisions.md (2026-06-28). CAVEAT (by design): cannot block a *manual* lock or "require password immediately" policy lock — only the idle path; does NOT unlock an already-locked Mac (see the feasibility report). <!-- device-verify: connect a client, leave the Mac idle past its display-sleep/screensaver timeout → screen stays awake + doesn't idle-lock; then manually lock the Mac → client shows "capture paused" overlay + input is disabled; unlock → overlay clears, control resumes. -->`tier_floor: senior`, `complexity: M`.
+- [x] **Locked-screen / login-window access + remote unlock — FEASIBILITY SPIKE, verdict: DON'T BUILD the daemon** (2026-06-28). Investigated per user ask. Full report: `.docs/ai/phases/locked-screen-feasibility-report.md`. **Remote unlock = hard-blocked** (secure event input drops synthetic CGEvents into the password field; no third-party API; ARD/Screen Sharing is first-party-only; FileVault pre-boot off-network). **Locked/login CAPTURE = technically partial but not worth it**: needs a root daemon + LoginWindow LaunchAgent split (SMAppService + notarization), and the Screen Recording TCC grant **can't be bootstrapped without a logged-in user approving once** → can't serve the cold-boot/locked headline case; also regressed on macOS 15 + commonly black on the lock screen; the real entitlement is VNC-only/Apple-gated. **Pivot**: build the keep-awake item above; use Apple's built-in **Screen Sharing/Remote Management** for true locked/login access; `fdesetup authrestart` / macOS 26 Tahoe pre-login SSH for FileVault reboots.
+- [x] **Host: refresh the display list at runtime (multi-monitor switcher disappears if a display was asleep at launch)** — DONE 2026-06-27 (build-green; **device-verify pending**). New `DisplaysUpdate` msg (tag 25); host polls `SCShareableContent.current` every 2s (`refreshDisplaysLoop`, runs alongside `serveConnections` in a `withTaskGroup`) and re-advertises via `HostControl.broadcast` when the display SET changes (`displaysChanged`, order-independent, dims-sensitive). `DisplayRegistry` (lock-guarded `@unchecked Sendable`) is the live source for the handshake `ServerHello` + `switchDisplay` lookup (replaced the launch-snapshot `SendableDisplays`). Client `.displaysUpdate` updates `session.displays` (switcher reappears, no relaunch); `resolvedActiveDisplay` keeps the streamed display or retargets the host (sends `switchDisplay`) if it vanished, and tracks a resolution change. Reviewed clean (native code-reviewer, no issues ≥80 — teardown, registry thread-safety, broadcast vs concurrent video sends, message ordering all verified). Tests: `DisplaysUpdateTests` (3, pkg), `DisplayRefreshTests` (5, pkg), `GlassMappingTests` +3 (iOS). `swift test` 166, macOS host BUILD SUCCEEDED, iOS `xcodebuild test` 57. Host reinstalled to /Applications; client reinstalled on Roshar. Decision: decisions.md (2026-06-27). <!-- device-verify: connect with one monitor → wake/plug a 2nd display mid-session → the switcher reappears within ~2s with no host relaunch, and switching to it works. -->
+- [~] **Zoom tearing + repaint glitches** — 2026-06-22 device test: NO crash ✅, crispness usable, but tearing + repaint-jumps when zoomed. Diagnosed (ultracode workflow): async CAMetalLayer present under a SwiftUI `.scaleEffect` (tear) + `renderScale` stepping per re-crop (jumps) + CA-upscale of a 1× drawable (softness). **Phase A DONE** (`f5bf60a`, device-confirmed: tearing GONE) — `presentsWithTransaction` + manual present in the CATransaction. **Phase C DONE** (build-green; device-verify pending) — moved zoom INTO the Metal shader: `ZoomGeometry`→`sampleRect`, fragment samples the sub-rect at full res, dropped the `.scaleEffect`; `sampleRect` computed per-frame against each frame's own region (no 1-frame re-crop jump); not clamped so a fast pan-past edge-clamps vs pinches. Reviewed SHIP-WITH-FIXES (native) → 2 fixes applied. Device test of C: tearing gone but pan "even jerkier." Root-caused (jerky only when panning, smooth still/at-zoom-1 = cursor-follow, not the stream): Phase C dropped display-rate pan smoothing (the window stepped at video-frame rate). **Smooth-pan fix DONE 2026-06-24** (build-green; device-verify pending — Roshar went unavailable mid-install): `CADisplayLink` render loop that eases the zoom window toward the cursor at display rate (`ZoomGeometry`→`visibleWindow`; renderer `submit`/`tick`/ease; time-normalized for 60/120Hz; snap on display switch). Reviewed SHIP-WITH-FIXES → 2 fixes applied. iOS 47. Decision: decisions.md (2026-06-24). Deferred: pause display link at idle. `tier_floor: senior`, `complexity: L`.
+- [x] **Menu-bar "Quit Portview Host"** — DONE 2026-06-22 (`21a791e`, device feedback). Stop only stopped hosting; added a Quit (NSApp.terminate) row.
+- [x] **M7 — Host presence & frictionless connect** — DONE (build-green; device-verify pending), 2026-06-16. P1 **menu-bar host** (`MenuBarExtra` popover: status + real QR + copy URL + connected count + Start/Stop + Open window; hosting outlives window-close). P2 **live permissions onboarding** (real `CGPreflight`/`AXIsProcessTrusted` status, 2s app-lifetime poll, guided banner + relaunch caveat — fixes the grant friction). P3 **input serialization** (`OutboundInputPump`: ordered lane + pointer-move coalescing — helps the choppy-drag report). P4 **6-digit SAS pairing = design spec only** (`docs/superpowers/specs/2026-06-15-sas-pairing-design.md`, awaiting security review). Design + adversarial-review workflows; 5/5 review findings fixed. New tests: `HostMenuBar` (5), `PermissionsOnboarding` (4), `OutboundInputPump` (2). Decision: decisions.md (2026-06-16). Verify: `swift test` 122/36, iOS 38, macOS BUILD SUCCEEDED. <!-- device-verify: open the menu-bar item → QR + Start/Stop + Open window; grant Accessibility in Settings → dot flips ≤2s (Screen Recording needs relaunch); confirm drag feels smoother + the glyph/Start-Stop update when a session ends -->
+- [x] **Magnifier crisp-region streaming (high-zoom usability — THE blocker)** — IMPL LANDED 2026-06-15 (build-green; **DEVICE-VERIFY REQUIRED — crash landmine**). Diagnosed: square crop `max(visW,visH)` + display-sized output meant the host never cropped for an ultrawide on a portrait phone → digital-zoom blur. Fixed: client `cropRequest` = the visible window's own aspect (not square); host `setViewport` sets `sourceRect` AND `config.width/height` to the crop's pixel size (`CaptureSizing.cropOutputSize`, mod-16/capped/floored, only changes on zoom not pan → minimal `updateConfiguration` churn); client render uses the FRAME's aspect. Zoom-1 overview math unchanged (no regression). Tests: ZoomGeometry + CaptureSizing; 113 pkg / 36 iOS / macOS builds. Decision + spec: decisions.md (2026-06-15) + `docs/superpowers/specs/2026-06-15-magnifier-region-streaming.md`. <!-- device-verify: ~5× zoom on the ultrawide → crisp region (not blur); pan smooth; zoom 1 unchanged; NO crash on rapid zoom in/out (the historical failure). If it crashes → likely the live updateConfiguration width/height change. -->
+- [x] **Magnifier crash-hardening — discrete capture-size ladder** — DONE 2026-06-16 (build-green; **DEVICE-VERIFY REQUIRED — this is the rapid-zoom crash de-risk**). Built the "small set of discrete output sizes" pre-emptively as the crash fix (not waiting for a device repro): `CaptureSizing.snapCropFraction` snaps the captured region's size onto a coarse geometric ladder (ratio 0.8, ~13 rungs) snapped UP to still cover the window; `setViewport` captures that snapped region + sizes the encoder output from the same fraction (buffer aspect == captured-region aspect, no stretch); host echoes the SNAPPED region so the client's `frameViewport` stays aligned. SCStream/encoder reconfigure only at rung crossings (~13 vs ~215) → kills the VideoToolbox teardown/rebuild churn that was the historical crash. Also: config save/restore on `updateConfiguration` failure; `encoder = nil` on encode failure (wedged-session spin). Found via a 5-model adversarial audit + tool-enabled review (sonnet proved the snap/clamp safety invariant; one near-full seam fixed). Tests: `CaptureSizingTests` ladder discreteness/idempotency/monotonic/aspect; 125 pkg / 38 iOS / macOS builds. Decision: decisions.md (2026-06-16). <!-- device-verify: rapid pinch zoom in/out repeatedly → MUST NOT crash (the point); ~5× text crisp; zoom feels continuous despite discrete crispness rungs; pan smooth. If still soft → densify the ladder (lower ratio). -->
+- [x] **Magnifier: viewport in VideoFrame (echo/frame race fix)** — DONE 2026-06-16 (build-green; device-verify pending). Every `VideoFrame` now carries the active region (4 normalized UInt16, full-display defaults); client sets `frameViewport` from the rendered frame (atomic with pixels, change-guarded); removed the standalone `.viewport` echo. Eliminates the cross-message ordering race qwen flagged. Spec'd by Opus → Sonnet impl → qwen+Opus adversarial review (2 findings applied, 4 false-positives confirming wire symmetry/clamp/Equatable). Residual (deferred): ≤2-frame capture-vs-encode skew at crop changes is inherent to SCStream — tag at capture time only if device-test shows a blip. Decision: decisions.md (2026-06-16). Tests: `VideoFrame` viewport round-trip; 126 pkg / 38 iOS / macOS builds.
+- [ ] **Magnifier on-device follow-up** (after the ladder is verified): if zoom feels notchy at rung crossings, densify the ladder (ratio 0.8→0.9) or interpolate `frameViewport` between host confirmations; if crispness steps are visible, raise encode bitrate when cropped; if a blip shows at rung crossings, tag frames with their capture-time viewport (lock-protected rect in the SCStream callback).
+- [~] **Motion choppiness / laggy pan repaint** — 2026-06-16 device test of the region-streaming magnifier: at high zoom, panning didn't repaint until the cursor STOPPED, then took ~1s. Fixed (build-green; device-verify pending): `ViewportRequestScheduler` idle-debounce → **leading+trailing throttle** (150ms) so the host crop tracks the cursor DURING a pan (cheap now — pan = sourceRect-only `updateConfiguration`, no encoder rebuild thanks to the discrete ladder); `ZoomGeometry` crop padding 0.08→**0.25** for more local-pan headroom. Decision: decisions.md (2026-06-16). Tests: throttle leading/burst/reset/near-dup. <!-- device-verify: high-zoom pan repaints AS you move, not after stop; watch for a NEW stutter from ~6 keyframes/s during pan → if so raise the throttle interval or stop forcing keyframes on pure-pan re-crops -->
+- [x] **Motion choppiness on pan/move** — DONE 2026-06-19 (build-green; device-verify pending). Diagnosed via an ultracode 4-slice motion-path map + ranked synthesis → three coordinated cuts: (1) **keyframe decoupling** — `CaptureEngine` forced an HEVC keyframe on every pan re-crop (~6.6/s → periodic dropped-frame hitch); now `CaptureSizing.cropRequiresKeyframe` forces one only on a zoom-rung (output-size) change, NOT a pure pan (double-guarded: a real dim change rebuilds the encoder which sets `needsKeyframe` independently). (2) **ordered cursor return-lane** — `CursorReportPump` (serial drain + last-wins coalescing) replaces the detached `Task`-per-report that could reorder/back-step the cursor. (3) **client spring guard** — `CGPoint.isClose` guards `cursorNormalized` so a host confirm matching the local prediction doesn't re-target the cursor-follow spring. Refuted suspect: host does NOT throttle cursor reports by time (3px gate). Decision: decisions.md (2026-06-19). Reviewed by glm-5.2 (tool-enabled, SHIP). Tests: `CursorReportPumpTests` + `CaptureSizing.cropRequiresKeyframe` (pkg 129/37), `CursorReconcileTests` (iOS 43). <!-- device-verify: high-zoom pan smooth (no periodic hitch); cursor doesn't rubber-band/back-step while dragging. If a render-scale "pop" shows at re-crops → that's the deferred renderScale-invariance item below. -->
+- [ ] **Magnifier: make `renderScale` invariant to `frameViewport`** (deferred suspect #4 from the 2026-06-19 motion diagnosis) — `ZoomGeometry.renderScale`/`pan` are computed THROUGH `frameViewport` (lines ~73-80), so each discrete host re-crop steps the on-screen scale and the cursor-follow spring animates a small "pop". The window→view mapping is fully determined by the window rect + view size; the `f` dependency should cancel (it should only pick which source pixels are sampled = crispness, not the scale). Land a pure ZoomGeometry guard test FIRST: assert `renderScale` (and `pan`) are bit-stable across two constructions differing ONLY in `frameViewport`, and that zoom-1 still yields center pan + full-display letterbox. HIGH-RISK (touches the zoom-1 invariant + crash-adjacent crispness math) → do not refactor blind; only after the device confirms the pop is visible. `tier_floor: senior`, `complexity: M`.
+- [x] **Bitrate default regression fixed** — the 2026-06-15 quality-controls change defaulted the client to request 25 Mbps, *below* the host's prior heuristic (~80 Mbps for a 3440×1440 display) → softer than before. Now the client defaults to **Auto** (`bitrateMbps = 0` → `targetBitrate = 0` → host uses its own high heuristic); the slider (0 = Auto, else 4–80) overrides. Tests updated (23 iOS).
+- [x] **Device-testable features: quality controls + endpoint persistence + Mac→iPhone files** — DONE (build-green; device-verify pending), 2026-06-15. (1) Host now HONORS the client's requested bitrate/fps (was hardcoded/ignored); client **Settings** sheet (gear on Deck Home) sets bitrate 4–80 Mbps + fps 30/60, persisted, applied next connect — the real crispness knob. (2) Discovered Macs now persist + a moved saved Mac's IP refreshes in place (resolved-endpoint on `PortviewConnection`; name→host:port→pin upsert; retired `PairingCoordinator`). (3) Mac→iPhone file transfer (streams to disk; `ShareLink`). Path-traversal hardened; 6-finding adversarial review applied. Decision: decisions.md (2026-06-15). Verify: `swift test` 110/34, iOS 31/31, macOS BUILD SUCCEEDED. <!-- device-verify: in Settings raise bitrate → reconnect → HUD shows higher Mbps + crisper text; pair a Mac from the discovered list → relaunch app → it's under Saved Macs; change the Mac's LAN IP → reconnect → saved entry refreshes (no duplicate); on the host's connected card tap Send a file → it arrives on the phone with a Share sheet -->
+- [x] **Glass HUD redesign (both apps)** — DONE (build-green; device-verify pending), 2026-06-15. Recreated the locked "Glass HUD" design (claude.ai/design handoff) in SwiftUI: per-app `GlassTheme`, all 6 iOS screens (Deck Home / Pair-Scan / Connecting / Live Control HUD / Keyboard+Modifiers / Reconnecting) + all 3 macOS host states (Permissions / Ready-to-pair w/ real CoreImage QR / Device-connected). System SF + SF Mono (no bundled fonts); Material glass (not Liquid Glass). Built the two states needing new real model surface: iOS `SessionViewModel.reconnecting` + bounded mid-session Bonjour re-bind, and macOS live device/stats via `HostRunner` events → `HostSessions` reducer → `HostAppModel` + a `HostControl` Disconnect (sends `.bye` so the client doesn't auto-reconnect). No fabricated data (real telemetry; latency omitted not faked). 4-dimension adversarial review: 9/9 confirmed, 5 fixed, 2 deferred (below), 2 no-action. Decision: decisions.md (2026-06-15). Verify: `swift test` 104/33, iOS `xcodebuild test` 17/17, macOS BUILD SUCCEEDED. <!-- device-verify: live IP-change reconnect (degraded→reconnecting→live); host state C with a real connected iPhone (name, ticking mm:ss, stats, Disconnect); the Glass look on a real device -->
+- [x] **Persistent host identity + stable port** — DONE (build-green; device-verify pending), commits `909c2a8` (spec) + `e1a9db4` (impl). Spec: `docs/superpowers/specs/2026-06-13-persistent-host-identity-design.md`. `TLSIdentity.loadOrCreatePersistent`/`persistPort` store the openssl p12 blob + bound port as one Keychain generic-password item (re-import on launch; re-mint absent/expired, cert `-days 2`→3650; degrade to ephemeral on Keychain failure). `PortviewListener` gained optional `port:`; `HostRunner` re-binds the persisted port (fallback if taken) and surfaces non-persistence / port-fallback via `HostRunnerEvent.message`. App + CLI use DISTINCT Keychain items. 15-finding adversarial review applied (errSecDuplicateItem, listener-leak, process lock). Tests: 94/32. <!-- device-verify: launch PortviewHost.app, pair, restart app, reconnect from Saved Macs without rescanning → same pin+port -->
+- [x] On-device verification of the "do all of it" features — user confirmed all new features work.
+- [ ] **On-device video quality diagnosis with HUD** — screenshot #1 showed pure digital zoom into full 1710x1107 frame (`Crop/Frame w1.00`, ~0.06 Mbps actual). Follow-up #1 moved crop but only to `w0.93 h0.93`; screenshot #2 still encoded `1710x1107`, `~0.05 Mbps`, `810 B/f`, `bpp 0.0034`. The full-frame Retina attempt (`SCContentFilter.pointPixelScale` output + encoder quality hints) looked less smooth/jerky and was rolled back. Latest client patch debounces viewport/crop sends until 250 ms idle; latest host packaging adds `PortviewHost.app` so Screen Recording grants attach to Portview instead of Terminal (automated verify: SwiftPM tests 82/28, CLI build, XcodeGen, macOS app BUILD SUCCEEDED). Human device test pending: launch/grant `PortviewHost.app`, confirm movement smoothness first, then record HUD Mbps/B/f/bpp + Crop/Frame; if still soft but smooth, tune effective crop + bitrate/adaptive rate.
+- [ ] **On-device test of QUIC + zoom overhaul** — QUIC is now the default transport (only loopback-verified so far): confirm connect/stream/control/clipboard/audio/files all still work over QUIC, ideally over a real/Tailscale link to gauge the latency win. Confirm zoom behavior while collecting HUD data.
+
+#### Archived Next (pre-2026-07-08)
+- [ ] QUIC lane-splitting (per-frame unidirectional video streams); validate QUIC latency over a real/Tailscale link.
+- [x] **Mac→iPhone file transfer** — DONE 2026-06-15 (host "Send a file" → streams to a per-transfer temp dir on the phone → `ShareLink`; sanitized filename). Completes M5 both directions.
+- [ ] Tight A/V lip-sync.
+- [x] **6-digit one-time pairing code for Bonjour-discovered Macs** (user request 2026-06-15) — **IMPLEMENTED 2026-06-20 (build-green; device-verify pending).** v1 was broken vs an active MITM; the v2 **commit-then-reveal** redesign (cert hash bound into the commit = the keystone) was design-verified SOUND, then implemented TDD across all layers: `SASCode`+4 messages (tags 20–23)+frozen KAT, `SASPreamblePinning` (isolated TOFU type)+negative pin test, `serveSASPreamble` (first-message role-lock, no streaming scaffolding)+`SASAttemptLimiter`/`SASPairingControl` (window + cap), host pairing-window UI + displayed code, client `beginSASPairing`/`submitSASCode`+`SASPairingSheet`+pinned re-dial. Reviewed SOUND (native SHIP + glm-5.2 IMPL SOUND). 6 digits; HMAC host-confirm = optional phase-2 (not built; the mandatory window-scoped cap is). Decision: decisions.md (2026-06-20). Verify: swift test 148, iOS 43, macOS BUILD SUCCEEDED. <!-- device-verify: Mac menu-bar → "Pair with a 6-digit code"; iPhone → tap the discovered Mac → type the shown code → connects (pinned); a wrong code refuses. QR full-pin path unaffected + still preferred. -->
+  - [x] **Guardrail E — HMAC host confirmation** (phase-2 defense-in-depth) DONE 2026-06-20 (build-green; device-verify pending). The host gets an authenticated "✓ a client confirmed" signal after the user matches; purely additive (doesn't weaken v2; host never gates the session on it). Full ultracode arc: design → 4-lens design-review workflow (SOUND-WITH-FIXES, 6 fixes folded in) → TDD → dual impl review (native + glm-5.2, both SHIP). New `SASClientConfirm` (tag 24), `SASCode.confirmation`/`verifyConfirmation` (HKDF-keyed HMAC, constant-time, KAT), host `serveSASPreamble` bounded confirm-await (25s), client held-connection + `teardownSAS` chokepoint. Decision: decisions.md (2026-06-20). Verify: swift test 153, iOS 43, macOS BUILD SUCCEEDED.
+  - [x] **Guardrail C — bound the connection accept loop** DONE 2026-06-21 (build-green). `HostRunner.serveConnections` was an unbounded `withTaskGroup` (one child task per accepted connection); now capped at `maxConcurrentConnections = 16` with backpressure (`await group.next()` frees a slot before adding more). Bounds a connection flood / many ~25s-lingering SAS preambles. Reviewed SHIP (cap accounting correct, liveness preserved, no deadlock). Tests: `ServeConnectionsTests` (peak≤cap + all-served + strict-serial at cap 1). Decision: decisions.md (2026-06-21). Verify: swift test 155.
+  - [x] **Host-side SAS preamble integration test** DONE 2026-06-21. `SASPreambleIntegrationTests` drives a real client commit→reveal→confirm over a loopback QUIC connection against the real `serveSASPreamble` (made `internal`): happy path (host emits `.sasCode(matching)` + `.sasConfirmed`; captured cert == host cert), forged confirm (code emitted, NO `.sasConfirmed`), closed window (nothing served, connection refused). Verify: swift test 158.
+  - [ ] **SAS follow-up (deferred, non-blocking)**: per-source preamble rate-limit — the concurrency cap (Guardrail C) is in; per-source throttling is a further refinement, gated on the QUIC/NAT-fuzzy `resolvedRemoteEndpoint`. `tier_floor: senior`, `complexity: S`.
+- [x] **Menu-bar host (`MenuBarExtra`)** — DONE 2026-06-16 as M7-P1 (build-green; device-verify pending). Popover with status + real QR + copy URL + connected count + Start/Stop + Open window; hosting outlives window-close. (Originally a user idea 2026-06-15.) click the menu-bar item to pop a compact panel showing the pairing QR for a quick connect, with a button to mint/show the 6-digit OTP (pairs with the item above). Lighter-weight than a full window for the common "just let me connect" flow; the full window can remain available. SwiftUI `MenuBarExtra` scene (per swiftui-expert macOS guidance), reusing the existing `HostAppModel`/QR. `tier_floor: senior`, `complexity: M`.
+- [ ] Magnifier follow-ups (if on-device testing shows them): tune the residual-settle timing; consider raising encode bitrate when cropped; smooth the crop transition.
+- [x] **IP stability** (split out of the persistent-identity work) — DONE (build-green; device-verify pending), commit `4fe9d79`. Saved-Mac reconnect now prefers a live Bonjour host matching by name (re-resolves the current IP), then the saved `host:port` fallback; pin unchanged so cert pinning still gates. Decision in decisions.md (2026-06-14). <!-- follow-up below: refresh the stored fallback IP after a Bonjour reconnect -->
+- [x] **Expose the resolved remote endpoint on `PortviewConnection`** — DONE 2026-06-15. `resolvedRemoteEndpoint` (`currentPath?.remoteEndpoint`) now drives unified remember-on-first-stream in `SessionViewModel`/`ContentView`: (a) a discovery-paired Mac persists with its concrete IP, and (b) a moved saved Mac's IP refreshes in place (name→host:port→pin upsert avoids duplicates). See decisions.md (2026-06-15).
+- [x] **Serialize all outbound input through one ordered consumer** (Glass-HUD review #3, hardening) — DONE (confirmed by the 2026-07-01 arch review; bead `screenshare-8ds` closed). `OutboundInputPump` is wired into `SessionViewModel` (field 71, bind 461, finish 466-467, enqueue 473) with `OutboundInputPumpTests`.
+
+#### Archived Later (pre-2026-07-08)
+- [ ] M6 polish: adaptive bitrate/fps, reconnect + APNs re-wake, settings, TCC onboarding UI. Device keypairs + revocable PairingStore. *(Quality HUD now exists as dev diagnostics; product polish still TBD.)*
+
+## Milestones
+
+### M0: Walking skeleton
+- [x] `PortviewProtocol`: lane defs, message types, binary framing, handshake state machine, version negotiation (pure Swift, unit-tested) — 31 tests green
+- [x] `PortviewTransport`: connection/listener wrapper over Network.framework — TLS-over-TCP for the POC (QUIC groundwork proven via one-way loopback spike; see decisions.md), cert pinning, handshake + VideoFrame over a real connection. 36 tests green.
+- [x] `PortviewMedia`: VideoToolbox HEVC encode + decode (round-trip recovers color); HEVC sample serialization; **full encode→pinned-TLS→decode pipeline POC, color-verified, autonomous**.
+- [x] Host: `portview-host` exe — SCStream capture → VideoEncoder → serialize → serve. Compiles; runs with a Screen-Recording grant.
+- [x] Client: iOS app — receive → deserialize → AVSampleBufferDisplayLayer render. Compiles for iOS 26 sim (BUILD SUCCEEDED). *(CAMetalLayer is a later latency optimization.)*
+- [x] Package macOS host (`PortviewHost.app` + SwiftPM CLI fallback) + iOS client app (xcodegen). Run guide: `apps/README.md`. *(Running on a real iPhone needs Xcode + your signing team.)*
+- [ ] Latency harness; confirm <50 ms motion-to-photon
+- [x] Resolve open Qs: iOS 26 QUIC datagrams (supported; deferred) ✓; HEVC encode works on macOS 26 ✓ (EnableLowLatencyRateControl accepted)
+
+### M1: Control + connect
+- [x] InputInjector (CGEvent global coords) + input lane (pointerMove/pointerButton/scroll/typeText) + trackpad gesture→message mapping. Host injection + client trackpad compile; 46 tests. *(Injection needs Accessibility grant; run-verify on hardware pending.)*
+- [x] On-screen keyboard UI — `UIKeyInput` first-responder; typeText + `KeyEvent` special keys (return/delete/tab/escape/arrows) + host CGEvent injection. *(Secure-Input detection/banner still to do.)*
+- [x] Pinch-to-zoom on the video that follows the cursor (host reports `CursorPosition`; client clamped layer transform). *(Approximates view-bounds, ignores letterbox; hardware-verify pending.)*
+- [x] Bonjour advertise (`_portview._tcp`) + NWBrowser discovery + client list; manual IP/port retained. *(LAN-functional verify needs devices.)*
+- [x] QR pairing — host terminal QR + pairing URL (`PairingPayload`); client camera scanner → auto-connect. Cert pinning enforced. *(Device keypairs + revocable PairingStore still to do.)*
+- [x] Saved-Macs list (`SavedHostsStore`, UserDefaults; one-tap reconnect, persists on successful stream). Persistence bug fixed 2026-06-05: QR/manual pending pairings now survive the connect-form → streaming view switch and commit only after `.streaming`.
+- [x] Modifier keys / chords (⌘⇧⌥⌃) — `KeyModifiers` + char-or-special `KeyEvent`; host CGEventFlags + ANSI keycodes; client sticky modifier bar.
+- [x] Separate 2-finger scroll from pinch-zoom (per-gesture intent lock).
+
+### M2: Clipboard sync (text, both ways) — [x] DONE
+Text both ways: `ClipboardUpdate` msg, host `ClipboardSync` (NSPasteboard poll + apply), client UIPasteboard + "paste to Mac" button.
+
+### M3: Multi-monitor (pick/switch display) — [x] DONE (build-green; device-verify pending)
+Host advertises all displays; `SwitchDisplay` msg re-targets capture + InputInjector live; client display-switcher Menu.
+
+### M4: Audio (Mac → iPhone) — [x] DONE (build-green; device-verify pending)
+SCStream `capturesAudio` → non-interleaved Float32 (AVAudioConverter) → `AudioFrame` → client AVAudioEngine. *(Plays as it arrives; tight lip-sync = future.)*
+
+### M5: File transfer (files lane) — [x] DONE (iPhone→Mac; Mac→iPhone future)
+`FileOffer`/`FileChunk`; host `FileReceiver` → ~/Downloads; client `.fileImporter` + chunked send interleaved with video.
+
+### Render: Metal — [x] DONE (build-green; device-verify pending)
+Explicit VideoToolbox decode (BGRA) → CAMetalLayer via CVMetalTextureCache. Replaced AVSampleBufferDisplayLayer.
+
+### M6: QUIC transport — [x] DEFAULT (build-green; loopback-verified; on-device pending)
+Bare QUIC `NWConnection` (one bidi stream — no multiplex group needed); host serves connections concurrently to tolerate QUIC double-delivery. `connectQUIC` + `PortviewListener(quicIdentity:)` are the default; TLS-over-TCP is a one-call fallback. Bonjour `_udp`. `QUICBidirectionalTests` enabled + green. See decisions.md.
+
+### M6: Polish (adaptive bitrate/fps, reconnect + APNs re-wake, settings, quality HUD) — not started
+
+## Zoom overhaul — [x] DONE (build-green; device-verify pending), commit `fad89a6`
+All three on-device complaints addressed via the **client window model** (`ZoomGeometry`):
+- **Fill the phone aspect (#1):** view-aspect "window" over the display, sized by 1/zoom; zoom 1 = whole display (overview, letterboxed, unchanged), and as you zoom the window shrinks toward the phone aspect so the **letterbox bars shrink continuously to none**. Rendered aspect-fit, mapped through the host crop (`frameViewport`) via uniform renderScale+pan — host re-cropping changes crispness without moving the picture (so no jerk from reconfig). Continuous from zoom-1 overview (no jump). *(Chose this over the originally-noted two-mode view-aspect host output — it's smoother and avoids the overview→zoom jump + encoder-rebuild churn.)*
+- **Jerky (#2):** visual decoupled from host re-crop timing; crop request padded 1.4×; throttle eased 80→120ms.
+- **Pixelated (#3):** `VideoEncoder` now sets an explicit AverageBitRate (w·h·6, 8–50 Mbps) — it set none before (soft default). Host crop encodes the zoomed region at that bitrate.
+Adversarially reviewed (no geometry bugs found). **Tests 72/25; host + iOS build clean.**
+
+### Zoom crispness — attempt 1 REVERTED, then fixed via bitrate
+- **Tight-crop / native-res host output (`4591ef7`) — REVERTED (`e02482e`).** On device it "looked worse" (+ a separate crash). Post-mortem: the blur was **bitrate-bound, not resolution-bound** — the whole display was already encoded at native res, just at ~0.1 bits/pixel (soft text). The tight crop shrank the buffer AND proportionally shrank the bitrate (heuristic w·h·6), so bits/pixel didn't improve, and the per-zoom re-encode added churn. Reverted to the known-good window model.
+- **Fix that shipped (`5b11c69`):** raised the encoder bitrate heuristic ~0.1→~0.3 bpp (w·h·18, clamped 12–80 Mbps). On LAN/QUIC bandwidth isn't the constraint; the whole display is encoded crisper and the client digitally zooms into it → crisper zoomed text. Build-green, device-verify pending; multiplier/clamp is tunable.
+- **Lesson:** for further crispness, the right path is *higher bits-per-pixel for the visible region* — e.g. keep the bitrate HIGH while cropping (don't scale it down with the buffer), or per-region rate control. A tight crop only helps if its bitrate stays high.
+
+### Backlog — zoom follow-ups (deferred)
+- **Adaptive bitrate** when cropped (raise further at high zoom); dynamic `kVTCompressionPropertyKey_AverageBitRate` without recreating the session.
+- **Jerky tuning** if still present on device: predictive/leading viewport, interpolate `frameViewport` between host confirmations, raise fps. Smooth the brief rebuild on zoom steps.
+
+## Backlog
+
+> The durable backlog lives in beads (`bd ready`). Prose backlog retired 2026-07-08.
+
+## Constraints
+
+- Apple Silicon only; macOS 26+ / iOS 26+. Swift 6.2 / Xcode 26.
+- Mac must be logged in (no pre-login capture / no remote-unlock — hard public-API limit).
+- iOS session is foreground-only (background suspends + drops connection; re-wake via push).
+- No servers we host; remote is the user's own overlay VPN.
+- Permissive license → clean-room only (no GPL refs like Lumen/Moonlight).
+
+## Backlog (migrated from Beads, 2026-09-29)
+
+Open items restored from the `backlog-screenshare` Dolt remote (last pushed 2026-07-11) when Beads was retired; they may be stale, so verify before starting. Full export of all 95 issues and 4 memories is in `beads-archive.jsonl`.
+
+- [ ] P0 Device-verify zoom render pipeline: tearing, smooth pan, hysteresis re-crop (`screenshare-89q`)
+- [ ] P1 On-device video-quality diagnosis with the Quality HUD (`screenshare-11s`)
+- [ ] P1 EPIC: Host trust model - mutual client auth + revocable pairing (M6 device keypairs) (`screenshare-1nt`)
+- [ ] P1 Device-verify keep-awake + host-lock capture-paused overlay (`screenshare-1wm`)
+- [ ] P1 Host-side PairingStore: enroll + revoke client device identities (`screenshare-5yw`)
+- [ ] P1 Design spec: client device keypairs + revocable host PairingStore (mutual auth) (`screenshare-7jl`)
+- [ ] P1 Require an authorized client identity before serving a streaming session (`screenshare-9m2`)
+- [ ] P1 Device-verify motion choppiness fixes on pan/cursor-move (`screenshare-b27`)
+- [ ] P1 Device-verify host runtime display refresh (multi-monitor switcher) (`screenshare-ed4`)
+- [ ] P1 EPIC: PortviewClientCore + god-file decomposition (lower the tier_floor of all client work) (`screenshare-jfj`)
+- [ ] P1 Device-verify magnifier rapid-zoom crash-hardening + region crispness (`screenshare-pkb`)
+- [ ] P1 On-device test of QUIC transport + zoom over a Tailscale link (`screenshare-ve5`)
+- [ ] P2 PHASE 2: per-frame unidirectional video streams (measurement-gated; needs own spec) (`screenshare-10p`)
+- [ ] P2 Make magnifier renderScale invariant to frameViewport (kill re-crop pop) (`screenshare-2ee`)
+- [ ] P2 Device-verify: audio resumes after a real call/Siri interruption mid-stream (`screenshare-36p`)
+- [ ] P2 Device-verify quality controls, endpoint persistence, Mac-to-iPhone files (`screenshare-43i`)
+- [ ] P2 EPIC: Concurrency correctness (data race + serve-slot starvation + outbound ownership) (`screenshare-523`)
+- [ ] P2 Device-verify: no tearing/garbage frames under high-fps zoomed load (CVMetalTexture lifetime) (`screenshare-5ep`)
+- [ ] P2 Device-verify 6-digit SAS pairing (core + HMAC host-confirm) (`screenshare-6j7`)
+- [ ] P2 EPIC: CloudKit silent-push re-wake (tap-to-resume after backgrounding) (`screenshare-8n1`)
+- [ ] P2 Device-verify CloudKit re-wake: menu-bar nudge -> notification -> tap-to-resume (`screenshare-8n1.4`)
+- [ ] P2 EPIC: Prod / open-source release readiness (`screenshare-cqv`)
+- [ ] P2 macOS host: hardened runtime, entitlements, notarization + install/update path (`screenshare-cqv.2`)
+- [ ] P2 Adversarial review of the 8n1.3 re-wake client commit (deferred at machine handoff) (`screenshare-djx`)
+- [ ] P2 Device-verify M7 menu-bar host + live permissions onboarding (`screenshare-er1`)
+- [ ] P2 Implement tight A/V lip-sync (`screenshare-ins`)
+- [ ] P2 EPIC: Real-time media foundation (RTT/clock/feedback -> adaptive bitrate, lip-sync, latency) (`screenshare-ja1`)
+- [ ] P2 EPIC: QUIC lane-splitting phase 1 (video/audio/stats lane streams off primary) (`screenshare-w6n`)
+- [ ] P2 Device-verify QUIC lanes over Tailscale: input-latency A/B under induced loss (`screenshare-w6n.6`)
+- [ ] P3 Magnifier crispness/smoothness tuning follow-ups (`screenshare-2ws`)
+- [ ] P3 Move HostBeaconRecord codec from PortviewClientCore to PortviewProtocol (`screenshare-8z9`)
+- [ ] P3 Pin the Auto/pinned bitrate-mode mapping in pumpVideo (480 test gap) (`screenshare-jc3`)
+- [ ] P3 Define scope: client settings expansion + first-run/TCC onboarding polish (M6 remainder) (`screenshare-l4y`)
+- [ ] P3 Boost-aware controller reseed at encoder rebuild (zoom-rung crossing gap) (`screenshare-s86`)
+- [ ] P3 M6 polish: adaptive bitrate/fps, reconnect+APNs, keypairs (`screenshare-ux7`)
+- [ ] P4 HostBeaconWriter: chain writes to close the actor-reentrancy save-ordering window (`screenshare-e00`)
+- [ ] P4 ClientFeedback sequence counter for staleness detection (batch with next protocol rev) (`screenshare-q48`)
+
+## Defects from the Gate 2 R3 sitting (2026-10-20)
+
+Found on hardware; details in `phases/v1-release-finish-spec.md` (Gate 2, 2026-10-20 record).
+
+- [ ] P1 Audio Mac → iPhone has periodic clicks about every 2 s (Gate 2 audio row FAIL; blocks
+      Gate 2). Siri/call interruption recovery was not observed and still needs a pass.
+      **Fix landed 2026-10-20, not yet device-verified**: `AudioPlayoutScheduler` (continuous playout;
+      decisions.md 2026-10-20). Verify with a device soak via the Quality HUD audio line, on the speaker
+      and on a Bluetooth route, then re-run Gate 2. Field-model expectation at the 120 ms lead cap is about
+      2 underrun gaps/min from the jitter tail. If the soak shows that, the lever is moving audio receive
+      off the main actor, not a higher cap.
+- [ ] P2 Presentation-clock offset is anchored once and never refined. Measured Mac-audio vs iPhone clock
+      drift of about 26 ppm grows A/V latency about 94 ms/hour in the direction seen on Roshar. The audio
+      scheduler re-anchors only in the late direction, so the early direction still grows unbounded for video and audio.
+      **Cause confirmed 2026-10-20** (instrumented client, 192 s steady 440 Hz tone): per-buffer
+      hostTime scheduling in `AudioPlayer.play`. Host PTS step exactly 20,000 µs per 960 frames
+      (no host gaps, 1 late buffer in steady state), but Roshar renders 48,000.52 samples/s, so
+      scheduled starts slip +10.9 ppm against playback: about one 1-sample gap or overlap every
+      1.9 s, and boundary jitter (render timestamps sd 0.37 sample) turns about a third of them
+      into +1/−1/+1 bursts (the "fizzle" the owner heard). The 2 s `SCShareableContent` display
+      poll is ruled out. Fix: schedule back-to-back after the first anchored buffer and hold queue
+      depth in a band with faded trims; the producer runs about 15 ppm faster than the consumer
+      (queue grows about 54 ms/h), so expect a trim roughly every 20 min.
+- [ ] P2 Audio drops at session start: 5.9–9.4 s after a reconnect the host skipped 10 runs of audio
+      (20–300 ms, whole 20 ms buffers) and those buffers arrived 100–340 ms late. Matches a host
+      send stall overflowing `CaptureEngine`'s `bufferingNewest(8)` audio stream; not yet proven.
+- [ ] P2 No right-click on the client: `PointerButtonKind.right` exists in the protocol, but the client
+      maps only a single tap to a left click. Other remote apps give right-click a tap gesture
+      (owner's note: "a double tap will do it"); pick the gesture before implementing.
+- [ ] P3 Send a file to the iPhone exists only in the host's main window, not the menu-bar popover;
+      fold into Gate 4 (menu bar is the app).

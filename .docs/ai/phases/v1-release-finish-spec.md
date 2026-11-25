@@ -1,5 +1,9 @@
 # Portview v1.0 Release-Finish Plan
 
+> **Superseded as a plan on 2026-11-25** by
+> `docs/superpowers/specs/2026-11-21-v1-production-roadmap-design.md`. Kept for the gate
+> definitions and the device-session records that the roadmap's Phase 3 refers to.
+
 > **For agentic workers:** Execute one gate at a time. Each gate ends in a command or named human
 > verification. Do not continue past a failed gate, invent CloudKit confirmation, initialize a new
 > Beads database, push, publish, or tag without the user authorizing that action.
@@ -176,7 +180,7 @@ installed at `/Applications`. Client: Release, device-signed, executable SHA-256
   about 2 s; switched to it and back.
 
 Side findings (not matrix rows): the client has no right-click gesture, and Send a file is only in
-the main window. All three are tracked in `roadmap.md`. Harness Deck run
+the main window. All three are tracked in `roadmap-archive-2026-11.md`. Harness Deck run
 `portview/20260819-gate2-product-test-r2` was not updated from this session.
 
 **Failure rule:** Record the build identity, exact action, observed result, and whether reconnect or

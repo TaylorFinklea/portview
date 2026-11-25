@@ -44,3 +44,10 @@ ai-scratch/
 *.MP4
 *.mov
 *.MOV
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+*.gate.lock*
