@@ -29,7 +29,7 @@ Approved by the owner on 2026-11-25. v1.0 ships when all nine hold on the build 
 | Phase | What | Who | State |
 |---|---|---|---|
 | 0 | Handoff: roadmap, Beads issues, branch backed up | agent | done 2026-11-25 |
-| 1 | Risk check on today's build (six checks) | owner | next (`portview-p1`); the agent prepares the checklist first |
+| 1 | Risk check on today's build (six checks) | owner | next (`portview-p1`); checklist ready: `phases/v1-risk-check-checklist.md` |
 | 2 | Build: eleven workstreams W1–W11 | agent | ready to start |
 | 3 | Release candidate and the full device session | both | waits for Phase 2 |
 | 4 | Public beta: Mac download and site first, then TestFlight | both | waits for Phase 3 |

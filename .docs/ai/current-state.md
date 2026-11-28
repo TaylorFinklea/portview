@@ -17,7 +17,10 @@ status from it. Work happens in the worktree `.worktrees/v1-release-finish`.
 
 ## Next for the executing lead
 
-1. `portview-p1-stage`: write the risk-check checklist and staging steps for the owner.
+1. Done 2026-11-27 (`portview-p1-stage`): the risk-check checklist and staging steps are in
+   `phases/v1-risk-check-checklist.md`. Staging runs only with the owner present. After the
+   sitting, copy the owner's results into that file as "owner reported" and file each failure
+   under `portview-w10`.
 2. In parallel with the owner's sitting, start what needs nothing from the owner: `portview-w1`,
    `portview-w4-spike`, `portview-w5`, `portview-w7`, `portview-w8`, `portview-w9`, `portview-w11`.
    `portview-w3-probe` needs the owner and their iPad with a hardware keyboard (it runs with
